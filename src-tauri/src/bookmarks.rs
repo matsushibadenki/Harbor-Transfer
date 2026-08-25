@@ -45,6 +45,22 @@ pub struct TransferHistory {
     pub completed_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncHistory {
+    pub id: String,
+    pub direction: String,
+    pub local_directory: String,
+    pub remote_directory: String,
+    pub status: String,
+    pub completed_items: u64,
+    pub total_items: u64,
+    pub bytes: u64,
+    pub detail: String,
+    #[serde(default)]
+    pub completed_at: String,
+}
+
 pub struct BookmarkStore {
     database_path: PathBuf,
 }
@@ -87,6 +103,18 @@ impl BookmarkStore {
                     status TEXT NOT NULL,
                     detail TEXT NOT NULL DEFAULT '',
                     bytes INTEGER NOT NULL DEFAULT 0,
+                    completed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS sync_history (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    direction TEXT NOT NULL,
+                    local_directory TEXT NOT NULL,
+                    remote_directory TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    completed_items INTEGER NOT NULL DEFAULT 0,
+                    total_items INTEGER NOT NULL DEFAULT 0,
+                    bytes INTEGER NOT NULL DEFAULT 0,
+                    detail TEXT NOT NULL DEFAULT '',
                     completed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );",
             )?;
@@ -258,6 +286,69 @@ impl BookmarkStore {
         })
     }
 
+    pub fn record_sync_history(&self, sync: &SyncHistory) -> Result<(), String> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO sync_history (id, direction, local_directory, remote_directory, status, completed_items, total_items, bytes, detail, completed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, CURRENT_TIMESTAMP)
+                 ON CONFLICT(id) DO UPDATE SET status=excluded.status,
+                 completed_items=excluded.completed_items, total_items=excluded.total_items,
+                 bytes=excluded.bytes, detail=excluded.detail, completed_at=CURRENT_TIMESTAMP",
+                params![
+                    sync.id,
+                    sync.direction,
+                    sync.local_directory,
+                    sync.remote_directory,
+                    sync.status,
+                    sync.completed_items,
+                    sync.total_items,
+                    sync.bytes,
+                    sync.detail
+                ],
+            )?;
+            connection.execute(
+                "DELETE FROM sync_history WHERE id NOT IN
+                 (SELECT id FROM sync_history ORDER BY completed_at DESC LIMIT 50)",
+                [],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn sync_history(&self) -> Result<Vec<SyncHistory>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT id, direction, local_directory, remote_directory, status,
+                        completed_items, total_items, bytes, detail, completed_at
+                 FROM sync_history ORDER BY completed_at DESC LIMIT 50",
+            )?;
+            let history = statement
+                .query_map([], |row| {
+                    Ok(SyncHistory {
+                        id: row.get(0)?,
+                        direction: row.get(1)?,
+                        local_directory: row.get(2)?,
+                        remote_directory: row.get(3)?,
+                        status: row.get(4)?,
+                        completed_items: row.get(5)?,
+                        total_items: row.get(6)?,
+                        bytes: row.get(7)?,
+                        detail: row.get(8)?,
+                        completed_at: row.get(9)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(history)
+        })
+    }
+
+    pub fn clear_sync_history(&self) -> Result<(), String> {
+        self.with_connection(|connection| {
+            connection.execute("DELETE FROM sync_history", [])?;
+            Ok(())
+        })
+    }
+
     pub fn delete(&self, id: &str) -> Result<(), String> {
         self.with_connection(|connection| {
             connection.execute("DELETE FROM bookmarks WHERE id = ?1", params![id])?;
@@ -268,7 +359,7 @@ impl BookmarkStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{Bookmark, BookmarkStore, TransferHistory};
+    use super::{Bookmark, BookmarkStore, SyncHistory, TransferHistory};
 
     fn sample_bookmark() -> Bookmark {
         Bookmark {
@@ -351,5 +442,29 @@ mod tests {
         assert_eq!(history[0].bytes, 42);
         store.clear_transfer_history().expect("clear transfer history");
         assert!(store.transfer_history().expect("list cleared transfer history").is_empty());
+    }
+
+    #[test]
+    fn records_sync_execution_history() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = BookmarkStore::new(directory.path()).expect("bookmark store");
+        let sync = SyncHistory {
+            id: "sync-1".to_string(),
+            direction: "localToRemote".to_string(),
+            local_directory: "/tmp/local".to_string(),
+            remote_directory: "/remote".to_string(),
+            status: "Completed".to_string(),
+            completed_items: 2,
+            total_items: 2,
+            bytes: 42,
+            detail: "[]".to_string(),
+            completed_at: String::new(),
+        };
+        store.record_sync_history(&sync).expect("record sync");
+        let history = store.sync_history().expect("sync history");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].completed_items, 2);
+        store.clear_sync_history().expect("clear sync history");
+        assert!(store.sync_history().expect("cleared sync history").is_empty());
     }
 }

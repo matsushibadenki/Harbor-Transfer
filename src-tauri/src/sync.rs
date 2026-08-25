@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum SyncDirection {
     LocalToRemote,
@@ -15,7 +15,7 @@ pub struct SnapshotEntry {
     pub is_directory: bool,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum SyncAction {
     Upload,
@@ -26,7 +26,7 @@ pub enum SyncAction {
     DestinationOnly,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncPreviewItem {
     pub path: String,
@@ -45,6 +45,64 @@ pub struct SyncPreview {
     pub directory_count: usize,
     pub conflict_count: usize,
     pub destination_only_count: usize,
+}
+
+pub fn matches_exclusion(path: &str, patterns: &[String]) -> bool {
+    let normalized_path = path.replace('\\', "/");
+    patterns.iter().any(|raw_pattern| {
+        let pattern = raw_pattern.trim().trim_start_matches("./").replace('\\', "/");
+        if pattern.is_empty() {
+            return false;
+        }
+        if pattern.contains('/') {
+            let recursive_root = pattern.strip_suffix("/**");
+            recursive_root == Some(normalized_path.as_str()) || glob_matches(&pattern, &normalized_path)
+        } else {
+            normalized_path.split('/').any(|component| glob_matches(&pattern, component))
+        }
+    })
+}
+
+pub fn filter_snapshot(entries: Vec<SnapshotEntry>, patterns: &[String]) -> Vec<SnapshotEntry> {
+    entries.into_iter().filter(|entry| !matches_exclusion(&entry.path, patterns)).collect()
+}
+
+fn glob_matches(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.chars().collect::<Vec<_>>();
+    let value = value.chars().collect::<Vec<_>>();
+    let mut memo = BTreeMap::new();
+    glob_matches_at(&pattern, &value, 0, 0, &mut memo)
+}
+
+fn glob_matches_at(
+    pattern: &[char],
+    value: &[char],
+    pattern_index: usize,
+    value_index: usize,
+    memo: &mut BTreeMap<(usize, usize), bool>,
+) -> bool {
+    if let Some(result) = memo.get(&(pattern_index, value_index)) {
+        return *result;
+    }
+    let result = if pattern_index == pattern.len() {
+        value_index == value.len()
+    } else if pattern[pattern_index] == '*' {
+        let recursive = pattern.get(pattern_index + 1) == Some(&'*');
+        let next_pattern = if recursive { pattern_index + 2 } else { pattern_index + 1 };
+        glob_matches_at(pattern, value, next_pattern, value_index, memo)
+            || (value_index < value.len()
+                && (recursive || value[value_index] != '/')
+                && glob_matches_at(pattern, value, pattern_index, value_index + 1, memo))
+    } else if value_index < value.len()
+        && ((pattern[pattern_index] == '?' && value[value_index] != '/')
+            || pattern[pattern_index] == value[value_index])
+    {
+        glob_matches_at(pattern, value, pattern_index + 1, value_index + 1, memo)
+    } else {
+        false
+    };
+    memo.insert((pattern_index, value_index), result);
+    result
 }
 
 pub fn plan_sync(
@@ -117,7 +175,7 @@ pub fn plan_sync(
 
 #[cfg(test)]
 mod tests {
-    use super::{plan_sync, SnapshotEntry, SyncAction, SyncDirection};
+    use super::{filter_snapshot, matches_exclusion, plan_sync, SnapshotEntry, SyncAction, SyncDirection};
 
     fn file(path: &str, size: u64) -> SnapshotEntry {
         SnapshotEntry { path: path.to_string(), size, is_directory: false }
@@ -142,5 +200,18 @@ mod tests {
         let preview =
             plan_sync(vec![file("same.txt", 10)], vec![file("same.txt", 10)], SyncDirection::RemoteToLocal);
         assert!(preview.items.is_empty());
+    }
+
+    #[test]
+    fn applies_component_and_recursive_exclusion_patterns() {
+        let patterns = vec![".DS_Store".to_string(), "node_modules/**".to_string(), "*.tmp".to_string()];
+        assert!(matches_exclusion("nested/.DS_Store", &patterns));
+        assert!(matches_exclusion("node_modules", &patterns));
+        assert!(matches_exclusion("node_modules/pkg/index.js", &patterns));
+        assert!(matches_exclusion("cache/result.tmp", &patterns));
+        assert!(!matches_exclusion("src/index.ts", &patterns));
+        let filtered =
+            filter_snapshot(vec![file("src/index.ts", 10), file("cache/result.tmp", 2)], &patterns);
+        assert_eq!(filtered, vec![file("src/index.ts", 10)]);
     }
 }

@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { startDrag } from '@crabnebula/tauri-plugin-drag';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
 import { emitTo, listen } from '@tauri-apps/api/event';
@@ -21,7 +22,11 @@ type FileProgress = { transferId: string; transferredBytes: number; totalBytes: 
 type LocalPathInfo = { name: string; isDirectory: boolean };
 type TransferHistory = { id: string; name: string; direction: 'Upload' | 'Download'; status: 'Completed' | 'Failed' | 'Cancelled'; detail: string; bytes: number; completedAt: string };
 type Language = 'ja' | 'en' | 'zh-CN';
-type Preferences = { language: Language; defaultProtocol: Protocol; conflictPolicy: 'ask' | 'overwrite' | 'skip'; confirmDelete: boolean; transferNotifications: boolean };
+type Preferences = { language: Language; defaultProtocol: Protocol; conflictPolicy: 'ask' | 'overwrite' | 'skip'; confirmDelete: boolean; transferNotifications: boolean; editorPath: string };
+type RemoteEdit = { editId: string; connectionId: string; name: string; remotePath: string; status: 'watching' | 'waiting' | 'failed'; detail?: string };
+type RemoteEditOpenResult = { editId: string; name: string; remotePath: string };
+type RemoteEditPollResult = { editId: string; remotePath: string; status: 'clean' | 'waiting' | 'uploaded'; bytes: number };
+type DragExport = { exportId: string; name: string; remotePath: string; localPath: string; iconPath: string; connectionId: string };
 type ColumnKey = 'name' | 'size' | 'modified' | 'permissions';
 type ColumnWidths = Record<ColumnKey, number>;
 type ViewMode = 'list' | 'icons' | 'columns';
@@ -30,9 +35,14 @@ type SyncDirection = 'localToRemote' | 'remoteToLocal';
 type SyncAction = 'upload' | 'download' | 'createRemoteDirectory' | 'createLocalDirectory' | 'conflict' | 'destinationOnly';
 type SyncPreviewItem = { path: string; action: SyncAction; localSize?: number; remoteSize?: number; isDirectory: boolean };
 type SyncPreview = { direction: SyncDirection; items: SyncPreviewItem[]; transferCount: number; directoryCount: number; conflictCount: number; destinationOnlyCount: number };
+type SyncConflictChoice = 'skip' | 'source';
+type SyncExecutionLogItem = { path: string; action: SyncAction; status: string; detail: string; bytes: number };
+type SyncExecutionResult = { syncId: string; status: string; completedItems: number; totalItems: number; bytes: number; log: SyncExecutionLogItem[] };
+type SyncExecutionProgress = { syncId: string; completedItems: number; totalItems: number; currentPath: string; status: string };
+type SyncHistory = { id: string; direction: SyncDirection; localDirectory: string; remoteDirectory: string; status: string; completedItems: number; totalItems: number; bytes: number; detail: string; completedAt: string };
 type BookmarkExportFile = { format: 'harbor-transfer-bookmarks'; version: 1; exportedAt: string; bookmarks: Connection[] };
 
-const defaultPreferences: Preferences = { language: 'ja', defaultProtocol: 'sftp', conflictPolicy: 'ask', confirmDelete: true, transferNotifications: true };
+const defaultPreferences: Preferences = { language: 'ja', defaultProtocol: 'sftp', conflictPolicy: 'ask', confirmDelete: true, transferNotifications: true, editorPath: '' };
 function loadPreferences(): Preferences { try { return { ...defaultPreferences, ...JSON.parse(localStorage.getItem('harbor-transfer.preferences') ?? '{}') }; } catch { return defaultPreferences; } }
 const minimumColumnWidths: ColumnWidths = { name: 160, size: 76, modified: 150, permissions: 104 };
 const defaultColumnWidths: ColumnWidths = { name: 320, size: 76, modified: 150, permissions: 104 };
@@ -57,15 +67,27 @@ const bookmarkLocalCopy = {
 } as const;
 
 const phaseTwoCopy = {
-  ja: { conflict: '同名の項目があります。「上書き」「スキップ」「別名」のいずれかを入力してください。', overwrite: '上書き', skip: 'スキップ', rename: '別名', action: '操作を入力してください: download / rename / delete', renameTo: '新しい名前', deleteConfirm: 'この項目を削除しますか？', drop: 'ここにファイルやフォルダをドロップ', speed: '速度', eta: '残り', completed: '転送が完了しました', failed: '転送に失敗しました', cancelled: '転送を取り消しました' },
-  en: { conflict: 'An item with this name exists. Enter overwrite, skip, or rename.', overwrite: 'overwrite', skip: 'skip', rename: 'rename', action: 'Enter action: download / rename / delete', renameTo: 'New name', deleteConfirm: 'Delete this item?', drop: 'Drop files or folders here', speed: 'Speed', eta: 'ETA', completed: 'Transfer completed', failed: 'Transfer failed', cancelled: 'Transfer cancelled' },
-  'zh-CN': { conflict: '存在同名项目。请输入 overwrite、skip 或 rename。', overwrite: 'overwrite', skip: 'skip', rename: 'rename', action: '输入操作：download / rename / delete', renameTo: '新名称', deleteConfirm: '删除此项目吗？', drop: '将文件或文件夹拖放到这里', speed: '速度', eta: '剩余', completed: '传输完成', failed: '传输失败', cancelled: '传输已取消' },
+  ja: { conflict: '同名の項目があります。「上書き」「スキップ」「別名」のいずれかを入力してください。', overwrite: '上書き', skip: 'スキップ', rename: '別名', action: '操作を入力してください: edit / download / rename / delete', renameTo: '新しい名前', deleteConfirm: 'この項目を削除しますか？', drop: 'ここにファイルやフォルダをドロップ', speed: '速度', eta: '残り', completed: '転送が完了しました', failed: '転送に失敗しました', cancelled: '転送を取り消しました' },
+  en: { conflict: 'An item with this name exists. Enter overwrite, skip, or rename.', overwrite: 'overwrite', skip: 'skip', rename: 'rename', action: 'Enter action: edit / download / rename / delete', renameTo: 'New name', deleteConfirm: 'Delete this item?', drop: 'Drop files or folders here', speed: 'Speed', eta: 'ETA', completed: 'Transfer completed', failed: 'Transfer failed', cancelled: 'Transfer cancelled' },
+  'zh-CN': { conflict: '存在同名项目。请输入 overwrite、skip 或 rename。', overwrite: 'overwrite', skip: 'skip', rename: 'rename', action: '输入操作：edit / download / rename / delete', renameTo: '新名称', deleteConfirm: '删除此项目吗？', drop: '将文件或文件夹拖放到这里', speed: '速度', eta: '剩余', completed: '传输完成', failed: '传输失败', cancelled: '传输已取消' },
 } as const;
 
 const preferencesCopy = {
-  ja: { title: '環境設定', detail: 'すべての接続に適用する共通設定です。', general: '一般', transfers: '転送', security: '安全性', language: '表示言語', defaultProtocol: '新規接続の既定プロトコル', conflictPolicy: '同名ファイルの既定動作', ask: '毎回確認', overwrite: '上書き', skip: 'スキップ', confirmDelete: '削除前に確認する', notifications: '転送結果を画面内に通知する', save: '保存' },
-  en: { title: 'Preferences', detail: 'These settings apply to every connection.', general: 'General', transfers: 'Transfers', security: 'Safety', language: 'Display language', defaultProtocol: 'Default protocol for new connections', conflictPolicy: 'Default duplicate-file action', ask: 'Ask every time', overwrite: 'Overwrite', skip: 'Skip', confirmDelete: 'Confirm before deleting', notifications: 'Show in-app transfer notifications', save: 'Save' },
-  'zh-CN': { title: '偏好设置', detail: '这些设置适用于所有连接。', general: '通用', transfers: '传输', security: '安全性', language: '显示语言', defaultProtocol: '新连接的默认协议', conflictPolicy: '同名文件的默认操作', ask: '每次询问', overwrite: '覆盖', skip: '跳过', confirmDelete: '删除前确认', notifications: '在应用内显示传输结果通知', save: '保存' },
+  ja: { title: '環境設定', detail: 'すべての接続に適用する共通設定です。', general: '一般', transfers: '転送', security: '安全性', editor: 'リモートファイルエディタ', editorDetail: 'キャッシュを開くアプリケーションです。保存を検知すると、同名のリモートファイルを自動的に上書きします。', chooseEditor: 'エディタを選択', clearEditor: '解除', noEditor: '選択されていません', language: '表示言語', defaultProtocol: '新規接続の既定プロトコル', conflictPolicy: '同名ファイルの既定動作', ask: '毎回確認', overwrite: '上書き', skip: 'スキップ', confirmDelete: '削除前に確認する', notifications: '転送結果を画面内に通知する', save: '保存' },
+  en: { title: 'Preferences', detail: 'These settings apply to every connection.', general: 'General', transfers: 'Transfers', security: 'Safety', editor: 'Remote File Editor', editorDetail: 'This application opens cached copies. Saving automatically overwrites the file at the same remote path.', chooseEditor: 'Choose Editor', clearEditor: 'Clear', noEditor: 'Not selected', language: 'Display language', defaultProtocol: 'Default protocol for new connections', conflictPolicy: 'Default duplicate-file action', ask: 'Ask every time', overwrite: 'Overwrite', skip: 'Skip', confirmDelete: 'Confirm before deleting', notifications: 'Show in-app transfer notifications', save: 'Save' },
+  'zh-CN': { title: '偏好设置', detail: '这些设置适用于所有连接。', general: '通用', transfers: '传输', security: '安全性', editor: '远程文件编辑器', editorDetail: '此应用用于打开缓存副本。保存后会自动覆盖同一路径下的远程文件。', chooseEditor: '选择编辑器', clearEditor: '清除', noEditor: '未选择', language: '显示语言', defaultProtocol: '新连接的默认协议', conflictPolicy: '同名文件的默认操作', ask: '每次询问', overwrite: '覆盖', skip: '跳过', confirmDelete: '删除前确认', notifications: '在应用内显示传输结果通知', save: '保存' },
+} as const;
+
+const remoteEditCopy = {
+  ja: { edit: '編集', configure: '環境設定でリモートファイルエディタを選択してください。', opening: '編集用キャッシュを準備しています', watching: '保存を監視中', waiting: '変更の安定を待っています', uploaded: 'リモートファイルを上書き保存しました', stop: '編集を終了してキャッシュを削除' },
+  en: { edit: 'Edit', configure: 'Choose a remote file editor in Preferences first.', opening: 'Preparing the editing cache', watching: 'Watching for saves', waiting: 'Waiting for changes to settle', uploaded: 'Remote file overwritten with saved changes', stop: 'Stop editing and delete cache' },
+  'zh-CN': { edit: '编辑', configure: '请先在偏好设置中选择远程文件编辑器。', opening: '正在准备编辑缓存', watching: '正在监视保存操作', waiting: '正在等待更改稳定', uploaded: '已用保存的更改覆盖远程文件', stop: '结束编辑并删除缓存' },
+} as const;
+
+const dragOutCopy = {
+  ja: { preparing: 'ドラッグ用ファイルを準備しています', ready: 'Finderへドラッグできます', retry: '準備中です。完了後にもう一度ドラッグしてください。', copied: 'Finderへファイルをコピーしました', cancelled: 'ファイルのドラッグを取り消しました' },
+  en: { preparing: 'Preparing item for dragging', ready: 'Ready to drag to Finder', retry: 'The item is still being prepared. Drag it again when ready.', copied: 'Item copied to Finder', cancelled: 'Item drag cancelled' },
+  'zh-CN': { preparing: '正在准备拖放文件', ready: '可以拖到访达', retry: '文件仍在准备中。完成后请再次拖动。', copied: '文件已复制到访达', cancelled: '已取消文件拖动' },
 } as const;
 
 const queueCopy = {
@@ -87,9 +109,9 @@ const viewCopy = {
 } as const;
 
 const syncCopy = {
-  ja: { button: '同期プレビュー', title: '片方向同期プレビュー', detail: 'ファイルはまだ変更されません。差分と競合を確認してください。', direction: '同期方向', localToRemote: 'ローカル → リモート', remoteToLocal: 'リモート → ローカル', refresh: '差分を再計算', transfers: '転送', directories: 'フォルダ作成', conflicts: '競合', destinationOnly: '同期先のみ', noChanges: '同期が必要な差分はありません。', upload: 'アップロード', download: 'ダウンロード', createRemoteDirectory: 'リモートにフォルダ作成', createLocalDirectory: 'ローカルにフォルダ作成', conflict: '競合', destinationOnlyAction: '同期先のみ（保持）' },
-  en: { button: 'Sync Preview', title: 'One-way Sync Preview', detail: 'No files are changed yet. Review differences and conflicts.', direction: 'Direction', localToRemote: 'Local → Remote', remoteToLocal: 'Remote → Local', refresh: 'Recalculate', transfers: 'Transfers', directories: 'Directories', conflicts: 'Conflicts', destinationOnly: 'Destination only', noChanges: 'No differences require synchronization.', upload: 'Upload', download: 'Download', createRemoteDirectory: 'Create remote directory', createLocalDirectory: 'Create local directory', conflict: 'Conflict', destinationOnlyAction: 'Destination only (keep)' },
-  'zh-CN': { button: '同步预览', title: '单向同步预览', detail: '尚未修改任何文件。请检查差异和冲突。', direction: '同步方向', localToRemote: '本地 → 远程', remoteToLocal: '远程 → 本地', refresh: '重新计算', transfers: '传输', directories: '创建文件夹', conflicts: '冲突', destinationOnly: '仅目标端', noChanges: '没有需要同步的差异。', upload: '上传', download: '下载', createRemoteDirectory: '创建远程文件夹', createLocalDirectory: '创建本地文件夹', conflict: '冲突', destinationOnlyAction: '仅目标端（保留）' },
+  ja: { button: '同期', title: '片方向同期', detail: '差分と競合を確認してから、安全な同期を実行します。同期先のみの項目は削除しません。', direction: '同期方向', localToRemote: 'ローカル → リモート', remoteToLocal: 'リモート → ローカル', refresh: '差分を再計算', transfers: '転送', directories: 'フォルダ作成', conflicts: '競合', destinationOnly: '同期先のみ', noChanges: '同期が必要な差分はありません。', upload: 'アップロード', download: 'ダウンロード', createRemoteDirectory: 'リモートにフォルダ作成', createLocalDirectory: 'ローカルにフォルダ作成', conflict: '競合', destinationOnlyAction: '同期先のみ（保持）', exclusions: '除外パターン', exclusionHint: '1行に1つ（例：.DS_Store、node_modules/**）', skip: 'スキップ', useSource: '同期元で上書き', execute: '同期を実行', executing: '同期中', confirmExecute: '{{count}}件の変更を実行します。同期先のみの項目は削除されません。続けますか？', cancelExecution: '同期を取り消す', result: '実行結果', history: '同期履歴', clearHistory: '同期履歴を削除', noHistory: '同期履歴はありません', completed: '完了', failed: '失敗', cancelled: '取消済み' },
+  en: { button: 'Sync', title: 'One-way Sync', detail: 'Review differences and conflicts before running a safe sync. Destination-only items are never deleted.', direction: 'Direction', localToRemote: 'Local → Remote', remoteToLocal: 'Remote → Local', refresh: 'Recalculate', transfers: 'Transfers', directories: 'Directories', conflicts: 'Conflicts', destinationOnly: 'Destination only', noChanges: 'No differences require synchronization.', upload: 'Upload', download: 'Download', createRemoteDirectory: 'Create remote directory', createLocalDirectory: 'Create local directory', conflict: 'Conflict', destinationOnlyAction: 'Destination only (keep)', exclusions: 'Exclusion patterns', exclusionHint: 'One per line (for example: .DS_Store or node_modules/**)', skip: 'Skip', useSource: 'Overwrite from source', execute: 'Run Sync', executing: 'Syncing', confirmExecute: 'Apply {{count}} changes? Destination-only items will not be deleted.', cancelExecution: 'Cancel sync', result: 'Execution result', history: 'Sync history', clearHistory: 'Clear sync history', noHistory: 'No sync history', completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled' },
+  'zh-CN': { button: '同步', title: '单向同步', detail: '确认差异和冲突后再安全执行同步。不会删除仅存在于目标端的项目。', direction: '同步方向', localToRemote: '本地 → 远程', remoteToLocal: '远程 → 本地', refresh: '重新计算', transfers: '传输', directories: '创建文件夹', conflicts: '冲突', destinationOnly: '仅目标端', noChanges: '没有需要同步的差异。', upload: '上传', download: '下载', createRemoteDirectory: '创建远程文件夹', createLocalDirectory: '创建本地文件夹', conflict: '冲突', destinationOnlyAction: '仅目标端（保留）', exclusions: '排除模式', exclusionHint: '每行一个（例如：.DS_Store、node_modules/**）', skip: '跳过', useSource: '使用源文件覆盖', execute: '执行同步', executing: '正在同步', confirmExecute: '将执行{{count}}项更改。不会删除仅存在于目标端的项目。是否继续？', cancelExecution: '取消同步', result: '执行结果', history: '同步历史', clearHistory: '清除同步历史', noHistory: '没有同步历史', completed: '已完成', failed: '失败', cancelled: '已取消' },
 } as const;
 
 function joinPath(base: string, name: string) { return base === '/' ? `/${name}` : `${base.replace(/\/$/, '')}/${name}`; }
@@ -152,6 +174,8 @@ export default function App() {
   const columnsText = columnCopy[language];
   const viewsText = viewCopy[language];
   const syncText = syncCopy[language];
+  const editText = remoteEditCopy[language];
+  const dragText = dragOutCopy[language];
   const [connections, setConnections] = useState<Connection[]>([]);
   const [history, setHistory] = useState<ConnectionHistory[]>([]);
   const [selectedTag, setSelectedTag] = useState('');
@@ -186,6 +210,22 @@ export default function App() {
   const [syncPreview, setSyncPreview] = useState<SyncPreview | null>(null);
   const [syncPreviewBusy, setSyncPreviewBusy] = useState(false);
   const [syncPreviewError, setSyncPreviewError] = useState('');
+  const [syncExclusions, setSyncExclusions] = useState(() => localStorage.getItem('harbor-transfer.sync-exclusions') ?? '.DS_Store\nnode_modules/**');
+  const [syncConflictChoices, setSyncConflictChoices] = useState<Record<string, SyncConflictChoice>>({});
+  const [syncExecutionBusy, setSyncExecutionBusy] = useState(false);
+  const [syncExecutionId, setSyncExecutionId] = useState('');
+  const [syncExecutionProgress, setSyncExecutionProgress] = useState<SyncExecutionProgress | null>(null);
+  const [syncExecutionResult, setSyncExecutionResult] = useState<SyncExecutionResult | null>(null);
+  const [syncHistory, setSyncHistory] = useState<SyncHistory[]>([]);
+  const [remoteEdits, setRemoteEdits] = useState<RemoteEdit[]>([]);
+  const [selectedRemoteFile, setSelectedRemoteFile] = useState<{ connectionId: string; remotePath: string } | null>(null);
+  const [dragExport, setDragExport] = useState<DragExport | null>(null);
+  const [dragPreparingPath, setDragPreparingPath] = useState('');
+  const remoteEditPolling = useRef<Set<string>>(new Set());
+  const dragPreparationSequence = useRef(0);
+  const dragExportRef = useRef<DragExport | null>(null);
+  const dragPreparingRef = useRef('');
+  const dragSelectionTimer = useRef<number | null>(null);
   const browserZoneRef = useRef<HTMLElement | null>(null);
   const filteredEntries = useMemo(() => entries.filter((entry) => entry.name.toLowerCase().includes(query.toLowerCase())), [entries, query]);
   const breadcrumbs = useMemo(() => {
@@ -198,10 +238,12 @@ export default function App() {
       invoke<Connection[]>('bookmarks_list'),
       invoke<ConnectionHistory[]>('connection_history_list'),
       invoke<TransferHistory[]>('transfer_history_list'),
-    ]).then(([saved, recent, transferHistory]) => {
+      invoke<SyncHistory[]>('sync_history_list'),
+    ]).then(([saved, recent, transferHistory, savedSyncHistory]) => {
       setConnections(saved);
       setHistory(recent);
       setTransfers(transferHistory.map((item) => ({ ...item, totalBytes: item.bytes, transferredBytes: item.bytes })));
+      setSyncHistory(savedSyncHistory);
     }).catch((reason) => setError(String(reason)));
   }, []);
 
@@ -222,6 +264,45 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('harbor-transfer.view-mode', viewMode);
   }, [viewMode]);
+
+  useEffect(() => {
+    localStorage.setItem('harbor-transfer.sync-exclusions', syncExclusions);
+  }, [syncExclusions]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<SyncExecutionProgress>('sync://progress', (event) => setSyncExecutionProgress(event.payload)).then((dispose) => { unlisten = dispose; });
+    return () => unlisten?.();
+  }, []);
+
+  useEffect(() => {
+    if (remoteEdits.length === 0) return;
+    const interval = window.setInterval(() => {
+      for (const edit of remoteEdits) {
+        if (remoteEditPolling.current.has(edit.editId)) continue;
+        remoteEditPolling.current.add(edit.editId);
+        void invoke<RemoteEditPollResult>('remote_edit_poll', { editId: edit.editId }).then((result) => {
+          const status: RemoteEdit['status'] = result.status === 'waiting' ? 'waiting' : 'watching';
+          setRemoteEdits((current) => {
+            let changed = false;
+            const next = current.map((item) => {
+              if (item.editId !== edit.editId || (item.status === status && !item.detail)) return item;
+              changed = true;
+              return { ...item, status, detail: undefined };
+            });
+            return changed ? next : current;
+          });
+          if (result.status === 'uploaded') {
+            setNotice(`${editText.uploaded}: ${edit.name}`);
+            if (active && parentPath(result.remotePath) === path) void loadDirectory(active, path);
+          }
+        }).catch((reason) => {
+          setRemoteEdits((current) => current.map((item) => item.editId === edit.editId ? { ...item, status: 'failed', detail: String(reason) } : item));
+        }).finally(() => remoteEditPolling.current.delete(edit.editId));
+      }
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [remoteEdits, editText.uploaded, active, path]);
 
   useEffect(() => {
     localStorage.setItem('harbor-transfer.sidebar-collapsed', String(sidebarCollapsed));
@@ -512,23 +593,63 @@ export default function App() {
     if (selected && !Array.isArray(selected)) await uploadDroppedPaths([selected]);
   }
 
-  async function calculateSyncPreview(localDirectory = syncLocalDirectory, direction = syncDirection) {
+  function parsedSyncExclusions(value = syncExclusions) {
+    return value.split(/\r?\n/).map((pattern) => pattern.trim()).filter(Boolean);
+  }
+
+  async function calculateSyncPreview(localDirectory = syncLocalDirectory, direction = syncDirection, exclusions = syncExclusions) {
     if (!active || !localDirectory) return;
     setSyncPreviewBusy(true); setSyncPreviewError('');
     try {
-      const preview = await invoke<SyncPreview>('sync_preview', { request: { connectionId: active.id, localDirectory, remoteDirectory: path, direction } });
+      const preview = await invoke<SyncPreview>('sync_preview', { request: { connectionId: active.id, localDirectory, remoteDirectory: path, direction, exclusions: parsedSyncExclusions(exclusions) } });
       setSyncPreview(preview);
+      setSyncConflictChoices(Object.fromEntries(preview.items.filter((item) => item.action === 'conflict').map((item) => [item.path, 'skip'])));
     } catch (reason) { setSyncPreviewError(String(reason)); }
     finally { setSyncPreviewBusy(false); }
   }
 
   async function openSyncPreview() {
-    const selected = await open({ multiple: false, directory: true });
+    const selected = active?.localDirectory || await open({ multiple: false, directory: true });
     if (!selected || Array.isArray(selected)) return;
     setSyncLocalDirectory(selected);
     setSyncDirection('localToRemote');
     setSyncPreview(null);
-    await calculateSyncPreview(selected, 'localToRemote');
+    setSyncExecutionResult(null);
+    await calculateSyncPreview(selected, 'localToRemote', syncExclusions);
+  }
+
+  async function executeSync() {
+    if (!active || !syncPreview || syncExecutionBusy) return;
+    const items = syncPreview.items.flatMap((item) => {
+      if (item.action === 'destinationOnly') return [];
+      if (item.action !== 'conflict') return [{ path: item.path, action: item.action }];
+      if (item.isDirectory || syncConflictChoices[item.path] !== 'source') return [];
+      return [{ path: item.path, action: syncDirection === 'localToRemote' ? 'upload' : 'download' }];
+    });
+    if (items.length === 0 || !window.confirm(syncText.confirmExecute.replace('{{count}}', String(items.length)))) return;
+    const syncId = crypto.randomUUID();
+    setSyncExecutionId(syncId); setSyncExecutionBusy(true); setSyncExecutionResult(null); setSyncPreviewError('');
+    setSyncExecutionProgress({ syncId, completedItems: 0, totalItems: items.length, currentPath: '', status: 'Running' });
+    try {
+      const result = await invoke<SyncExecutionResult>('sync_execute', { request: { syncId, connectionId: active.id, localDirectory: syncLocalDirectory, remoteDirectory: path, direction: syncDirection, exclusions: parsedSyncExclusions(), items } });
+      setSyncExecutionResult(result);
+      setSyncHistory(await invoke<SyncHistory[]>('sync_history_list'));
+      await loadDirectory(active, path);
+      await calculateSyncPreview(syncLocalDirectory, syncDirection, syncExclusions);
+    } catch (reason) { setSyncPreviewError(String(reason)); }
+    finally { setSyncExecutionBusy(false); setSyncExecutionId(''); }
+  }
+
+  async function cancelSyncExecution() {
+    if (!syncExecutionId) return;
+    try { await invoke('transfer_cancel', { transferId: syncExecutionId }); }
+    catch (reason) { setSyncPreviewError(String(reason)); }
+  }
+
+  async function clearSyncHistory() {
+    if (!window.confirm(`${syncText.clearHistory}?`)) return;
+    try { await invoke('sync_history_clear'); setSyncHistory([]); }
+    catch (reason) { setSyncPreviewError(String(reason)); }
   }
 
   async function controlDirectoryTransfer(action: 'pause' | 'resume' | 'cancel') {
@@ -597,9 +718,124 @@ export default function App() {
     catch (reason) { setError(String(reason)); }
   }
 
+  async function editRemoteFile(entry: FileEntry, basePath = path) {
+    if (!active || entry.file_type !== 'File') return;
+    if (!preferences.editorPath) {
+      setNotice(editText.configure);
+      setShowPreferences(true);
+      return;
+    }
+    const remotePath = joinPath(basePath, entry.name);
+    if (remoteEdits.some((edit) => edit.connectionId === active.id && edit.remotePath === remotePath)) {
+      setNotice(`${editText.watching}: ${entry.name}`);
+      return;
+    }
+    setNotice(`${editText.opening}: ${entry.name}`);
+    try {
+      const session = await invoke<RemoteEditOpenResult>('remote_edit_open', { request: { connectionId: active.id, remotePath, editorPath: preferences.editorPath } });
+      setRemoteEdits((current) => [{ ...session, connectionId: active.id, status: 'watching' }, ...current]);
+      setNotice(`${editText.watching}: ${entry.name}`);
+    } catch (reason) { setError(String(reason)); }
+  }
+
+  async function cleanupDragExport(target = dragExportRef.current, delayMs = 0) {
+    if (!target) return;
+    if (dragExportRef.current?.exportId === target.exportId) {
+      dragExportRef.current = null;
+      setDragExport(null);
+    }
+    try { await invoke('drag_export_cleanup', { exportId: target.exportId, delayMs }); }
+    catch (reason) { setError(String(reason)); }
+  }
+
+  function scheduleRemoteDragPreparation(entry: FileEntry, basePath = path) {
+    if (!active) return;
+    if (dragSelectionTimer.current !== null) window.clearTimeout(dragSelectionTimer.current);
+    setSelectedRemoteFile({ connectionId: active.id, remotePath: joinPath(basePath, entry.name) });
+    dragSelectionTimer.current = window.setTimeout(() => {
+      dragSelectionTimer.current = null;
+      void prepareRemoteDrag(entry, basePath);
+    }, 220);
+  }
+
+  function cancelScheduledDragPreparation() {
+    if (dragSelectionTimer.current !== null) window.clearTimeout(dragSelectionTimer.current);
+    dragSelectionTimer.current = null;
+  }
+
+  async function prepareRemoteDrag(entry: FileEntry, basePath = path) {
+    if (!active) return;
+    const remotePath = joinPath(basePath, entry.name);
+    setSelectedRemoteFile({ connectionId: active.id, remotePath });
+    if (entry.file_type === 'Symlink') {
+      dragPreparationSequence.current += 1;
+      dragPreparingRef.current = '';
+      setDragPreparingPath('');
+      await cleanupDragExport();
+      return;
+    }
+    const prepared = dragExportRef.current;
+    if (prepared?.connectionId === active.id && prepared.remotePath === remotePath) return;
+    if (dragPreparingRef.current === remotePath) return;
+    const sequence = ++dragPreparationSequence.current;
+    dragPreparingRef.current = remotePath;
+    setDragPreparingPath(remotePath);
+    setNotice(`${dragText.preparing}: ${entry.name}`);
+    await cleanupDragExport(prepared);
+    try {
+      const result = await invoke<Omit<DragExport, 'connectionId'>>('drag_export_prepare', { request: { connectionId: active.id, remotePath, isDirectory: entry.file_type === 'Directory' } });
+      const next = { ...result, connectionId: active.id };
+      if (sequence !== dragPreparationSequence.current) {
+        await invoke('drag_export_cleanup', { exportId: result.exportId, delayMs: 0 });
+        return;
+      }
+      dragExportRef.current = next;
+      setDragExport(next);
+      dragPreparingRef.current = '';
+      setDragPreparingPath('');
+      setNotice(`${dragText.ready}: ${entry.name}`);
+    } catch (reason) {
+      if (sequence === dragPreparationSequence.current) {
+        dragPreparingRef.current = '';
+        setDragPreparingPath('');
+      }
+      setError(String(reason));
+    }
+  }
+
+  function startRemoteDrag(event: React.DragEvent, entry: FileEntry, basePath = path) {
+    if (!active || entry.file_type === 'Symlink') return;
+    cancelScheduledDragPreparation();
+    event.preventDefault();
+    event.stopPropagation();
+    const remotePath = joinPath(basePath, entry.name);
+    const prepared = dragExportRef.current;
+    if (!prepared || prepared.connectionId !== active.id || prepared.remotePath !== remotePath) {
+      const preparing = dragPreparingRef.current === remotePath;
+      setNotice(preparing ? dragText.retry : `${dragText.preparing}: ${entry.name}`);
+      if (!preparing) void prepareRemoteDrag(entry, basePath);
+      return;
+    }
+    let finished = false;
+    void startDrag({ item: [prepared.localPath], icon: prepared.iconPath, mode: 'copy' }, (payload) => {
+      if (finished) return;
+      finished = true;
+      setNotice(`${payload.result === 'Dropped' ? dragText.copied : dragText.cancelled}: ${entry.name}`);
+      void cleanupDragExport(prepared, payload.result === 'Dropped' ? 30 * 60 * 1000 : 0);
+    }).catch((reason) => { setError(String(reason)); void cleanupDragExport(prepared); });
+  }
+
+  async function closeRemoteEdit(edit: RemoteEdit) {
+    try {
+      await invoke('remote_edit_close', { editId: edit.editId });
+      setRemoteEdits((current) => current.filter((item) => item.editId !== edit.editId));
+    } catch (reason) { setError(String(reason)); }
+  }
+
   async function manageEntry(entry: FileEntry, basePath = path) {
     if (!active) return;
-    const action = window.prompt(p2.action, entry.file_type === 'Directory' ? 'rename' : 'download')?.toLowerCase();
+    const action = window.prompt(p2.action, entry.file_type === 'Directory' ? 'rename' : 'edit')?.toLowerCase();
+    if (action === 'edit') { await editRemoteFile(entry, basePath); return; }
     if (action === 'download') { await downloadFile(entry, basePath); return; }
     if (action === 'rename') {
       const newName = window.prompt(p2.renameTo, entry.name);
@@ -673,19 +909,19 @@ export default function App() {
               <ResizableColumnHeader label={t.modified} column="modified" width={columnWidths.modified} resizeLabel={columnsText.resize} onStart={startColumnResize} onAdjust={adjustColumnWidth}/>
               <ResizableColumnHeader label={columnsText.permissions} column="permissions" width={columnWidths.permissions} resizeLabel={columnsText.resize} onStart={startColumnResize} onAdjust={adjustColumnWidth}/><span />
             </div>
-            {filteredEntries.map((entry) => <div className="file-row interactive" key={entry.name} role="row" onDoubleClick={() => entry.file_type === 'Directory' ? void loadDirectory(active, joinPath(path, entry.name)) : void downloadFile(entry)}>
-              <span className="file-name">{entry.file_type === 'Directory' ? <Folder fill="currentColor" size={18}/> : <Cloud size={18}/>} {entry.name}</span><span>{entry.file_type === 'Directory' ? '—' : formatBytes(entry.size)}</span><span>{entry.modified ?? '—'}</span><span className="permissions-cell">{entry.permissions ?? '—'}</span><button aria-label="More actions" onClick={() => void manageEntry(entry)}><MoreHorizontal size={18}/></button>
-            </div>)}
+            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`file-row interactive ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="row" draggable={entry.file_type !== 'Symlink'} onClick={() => scheduleRemoteDragPreparation(entry)} onDragStart={(event) => startRemoteDrag(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void loadDirectory(active, remotePath) : void downloadFile(entry); }}>
+              <span className="file-name">{entry.file_type === 'Directory' ? <Folder fill="currentColor" size={18}/> : <Cloud size={18}/>} {entry.name}</span><span>{entry.file_type === 'Directory' ? '—' : formatBytes(entry.size)}</span><span>{entry.modified ?? '—'}</span><span className="permissions-cell">{entry.permissions ?? '—'}</span><button aria-label="More actions" onClick={(event) => { event.stopPropagation(); void manageEntry(entry); }}><MoreHorizontal size={18}/></button>
+            </div>; })}
           </div>}
           {viewMode === 'icons' && <div className="icon-grid" role="grid">
             {filteredEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
-            {filteredEntries.map((entry) => <div className="icon-entry" role="gridcell" key={entry.name}>
-              <button className="icon-entry-main" title={entry.name} onDoubleClick={() => entry.file_type === 'Directory' ? void loadDirectory(active, joinPath(path, entry.name)) : void downloadFile(entry)} onKeyDown={(event) => { if (event.key !== 'Enter') return; entry.file_type === 'Directory' ? void loadDirectory(active, joinPath(path, entry.name)) : void downloadFile(entry); }}>
+            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`icon-entry ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} role="gridcell" key={entry.name} draggable={entry.file_type !== 'Symlink'} onDragStart={(event) => startRemoteDrag(event, entry)}>
+              <button className="icon-entry-main" title={entry.name} onClick={() => scheduleRemoteDragPreparation(entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void loadDirectory(active, remotePath) : void downloadFile(entry); }} onKeyDown={(event) => { if (event.key !== 'Enter') return; entry.file_type === 'Directory' ? void loadDirectory(active, remotePath) : void downloadFile(entry); }}>
                 {entry.file_type === 'Directory' ? <Folder className="entry-art folder-art" fill="currentColor" size={46}/> : <File className="entry-art" size={44}/>}
                 <strong>{entry.name}</strong><small>{entry.file_type === 'Directory' ? entry.permissions ?? '—' : formatBytes(entry.size)}</small>
               </button>
-              <button className="icon-entry-more" aria-label="More actions" onClick={() => void manageEntry(entry)}><MoreHorizontal size={16}/></button>
-            </div>)}
+              <button className="icon-entry-more" aria-label="More actions" onClick={(event) => { event.stopPropagation(); void manageEntry(entry); }}><MoreHorizontal size={16}/></button>
+            </div>; })}
           </div>}
           {viewMode === 'columns' && <div className="column-browser" role="listbox" aria-label={viewsText.columns}>
             {columnLevels.map((level, levelIndex) => {
@@ -693,12 +929,12 @@ export default function App() {
               return <section className="directory-column" key={`${level.path}-${levelIndex}`} aria-label={level.path}>
                 <div className="directory-column-title" title={level.path}>{level.path}</div>
                 {visibleLevelEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
-                {visibleLevelEntries.map((entry) => <div className={`column-entry ${level.selectedName === entry.name ? 'selected' : ''}`} key={entry.name} role="option" aria-selected={level.selectedName === entry.name}>
-                  <button className="column-entry-main" title={entry.name} onClick={(event) => { if (event.detail <= 1) void openColumnEntry(levelIndex, entry); }} onDoubleClick={() => { if (entry.file_type !== 'Directory') void downloadFile(entry, level.path); }}>
+                {visibleLevelEntries.map((entry) => { const remotePath = joinPath(level.path, entry.name); const selectedForDrag = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`column-entry ${level.selectedName === entry.name || selectedForDrag ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="option" aria-selected={level.selectedName === entry.name || selectedForDrag} draggable={entry.file_type !== 'Symlink'} onDragStart={(event) => startRemoteDrag(event, entry, level.path)}>
+                  <button className="column-entry-main" title={entry.name} onClick={(event) => { if (event.detail <= 1) { void openColumnEntry(levelIndex, entry); scheduleRemoteDragPreparation(entry, level.path); } }} onDoubleClick={() => { cancelScheduledDragPreparation(); if (entry.file_type !== 'Directory') void downloadFile(entry, level.path); }}>
                     {entry.file_type === 'Directory' ? <Folder fill="currentColor" size={17}/> : <File size={16}/>}<span>{entry.name}</span>{entry.file_type === 'Directory' ? <ChevronRight size={14}/> : <small>{formatBytes(entry.size)}</small>}
                   </button>
-                  <button className="column-entry-more" aria-label="More actions" onClick={() => void manageEntry(entry, level.path)}><MoreHorizontal size={15}/></button>
-                </div>)}
+                  <button className="column-entry-more" aria-label="More actions" onClick={(event) => { event.stopPropagation(); void manageEntry(entry, level.path); }}><MoreHorizontal size={15}/></button>
+                </div>; })}
               </section>;
             })}
           </div>}
@@ -712,10 +948,12 @@ export default function App() {
       </section>
     </section>
     <section className={`transfer-panel ${transferPanelCollapsed ? 'collapsed' : ''}`}>
-      <div className="transfer-heading"><span>{t.status}</span><small>{transfers.filter((item) => item.status === 'Running').length} active</small><span className="transfer-heading-spacer"/>{transfers.some((item) => item.status !== 'Running') && <button className="icon-button" aria-label={queueText.clearTransferHistory} title={queueText.clearTransferHistory} onClick={() => void clearTransferHistory()}><Trash2 size={15}/></button>}<button className="icon-button" aria-label={transferPanelCollapsed ? queueText.expand : queueText.collapse} title={transferPanelCollapsed ? queueText.expand : queueText.collapse} aria-expanded={!transferPanelCollapsed} onClick={() => setTransferPanelCollapsed((current) => !current)}>{transferPanelCollapsed ? <ChevronUp size={17}/> : <ChevronDown size={17}/>}</button></div>
+      <div className="transfer-heading"><span>{t.status}</span><small>{transfers.filter((item) => item.status === 'Running').length + remoteEdits.length + (dragPreparingPath ? 1 : 0)} active</small><span className="transfer-heading-spacer"/>{transfers.some((item) => item.status !== 'Running') && <button className="icon-button" aria-label={queueText.clearTransferHistory} title={queueText.clearTransferHistory} onClick={() => void clearTransferHistory()}><Trash2 size={15}/></button>}<button className="icon-button" aria-label={transferPanelCollapsed ? queueText.expand : queueText.collapse} title={transferPanelCollapsed ? queueText.expand : queueText.collapse} aria-expanded={!transferPanelCollapsed} onClick={() => setTransferPanelCollapsed((current) => !current)}>{transferPanelCollapsed ? <ChevronUp size={17}/> : <ChevronDown size={17}/>}</button></div>
       <div className="transfer-list">
         {directoryProgress && directoryProgress.status !== 'completed' && <div className="directory-progress"><span>{directoryProgress.completedFiles} / {directoryProgress.totalFiles || '…'}</span><strong>{directoryProgress.currentPath}</strong><button onClick={() => void controlDirectoryTransfer(directoryPaused ? 'resume' : 'pause')}>{directoryPaused ? t.resume : t.pause}</button><button onClick={() => void controlDirectoryTransfer('cancel')}>{t.cancel}</button></div>}
-        {transfers.length === 0 ? <p className="muted">Transfers will appear here.</p> : transfers.slice(0, 8).map((transfer) => <div className="transfer-row" key={transfer.id}>
+        {dragPreparingPath && <div className="drag-export-progress"><LoaderCircle className="spinning" size={15}/><strong>{dragPreparingPath.split('/').pop()}</strong><span>{dragText.preparing}</span></div>}
+        {remoteEdits.map((edit) => <div className={`remote-edit-row ${edit.status}`} key={edit.editId}><Pencil size={15}/><strong>{edit.name}</strong><span>{edit.status === 'waiting' ? editText.waiting : edit.status === 'failed' ? edit.detail : editText.watching}</span><small title={edit.remotePath}>{edit.remotePath}</small><button className="icon-button" aria-label={editText.stop} title={editText.stop} onClick={() => void closeRemoteEdit(edit)}><Trash2 size={14}/></button></div>)}
+        {transfers.length === 0 && remoteEdits.length === 0 && !dragPreparingPath ? <p className="muted">Transfers will appear here.</p> : transfers.slice(0, 8).map((transfer) => <div className="transfer-row" key={transfer.id}>
           <span className={`transfer-status ${transfer.status.toLowerCase()}`}/><strong>{transfer.name}</strong>
           <span>{transfer.totalBytes ? `${Math.round(((transfer.transferredBytes ?? 0) / transfer.totalBytes) * 100)}%` : transfer.direction}</span>
           <span>{transfer.speed ? `${formatBytes(transfer.speed)}/s · ${p2.eta} ${formatDuration(transfer.etaSeconds)}` : transfer.detail}</span>
@@ -737,20 +975,26 @@ export default function App() {
       setShowConnect(false);
     }} onConnected={(connection) => { setConnections((current) => [connection, ...current.filter((item) => item.id !== connection.id)]); void Promise.all([invoke('bookmark_save', { bookmark: connection }), invoke('connection_history_record', { bookmark: connection })]).then(() => invoke<ConnectionHistory[]>('connection_history_list')).then(setHistory).catch((reason) => setError(String(reason))); setActive(connection); setShowConnect(false); void loadDirectory(connection, connection.initialPath); }} />}
     {showPreferences && <PreferencesSheet value={preferences} language={language} t={t} onClose={() => setShowPreferences(false)} onSave={(next) => { setPreferences(next); setShowPreferences(false); }} />}
-    {syncLocalDirectory && <SyncPreviewSheet preview={syncPreview} localDirectory={syncLocalDirectory} remoteDirectory={path} direction={syncDirection} busy={syncPreviewBusy} error={syncPreviewError} t={t} text={syncText} onClose={() => { setSyncLocalDirectory(''); setSyncPreview(null); }} onDirection={(direction) => { setSyncDirection(direction); void calculateSyncPreview(syncLocalDirectory, direction); }} onRefresh={() => void calculateSyncPreview()} />}
+    {syncLocalDirectory && <SyncPreviewSheet preview={syncPreview} localDirectory={syncLocalDirectory} remoteDirectory={path} direction={syncDirection} busy={syncPreviewBusy} executionBusy={syncExecutionBusy} error={syncPreviewError} exclusions={syncExclusions} conflictChoices={syncConflictChoices} progress={syncExecutionProgress} result={syncExecutionResult} history={syncHistory} t={t} text={syncText} onClose={() => { if (syncExecutionBusy) return; setSyncLocalDirectory(''); setSyncPreview(null); }} onDirection={(direction) => { setSyncDirection(direction); setSyncExecutionResult(null); void calculateSyncPreview(syncLocalDirectory, direction); }} onExclusions={(value) => { setSyncExclusions(value); setSyncPreview(null); setSyncExecutionResult(null); }} onConflict={(itemPath, choice) => setSyncConflictChoices((current) => ({ ...current, [itemPath]: choice }))} onRefresh={() => void calculateSyncPreview()} onExecute={() => void executeSync()} onCancelExecution={() => void cancelSyncExecution()} onClearHistory={() => void clearSyncHistory()} />}
   </main>;
 }
 
-function SyncPreviewSheet({ preview, localDirectory, remoteDirectory, direction, busy, error, t, text, onClose, onDirection, onRefresh }: { preview: SyncPreview | null; localDirectory: string; remoteDirectory: string; direction: SyncDirection; busy: boolean; error: string; t: typeof copy[keyof typeof copy]; text: typeof syncCopy[keyof typeof syncCopy]; onClose: () => void; onDirection: (direction: SyncDirection) => void; onRefresh: () => void }) {
+function SyncPreviewSheet({ preview, localDirectory, remoteDirectory, direction, busy, executionBusy, error, exclusions, conflictChoices, progress, result, history, t, text, onClose, onDirection, onExclusions, onConflict, onRefresh, onExecute, onCancelExecution, onClearHistory }: { preview: SyncPreview | null; localDirectory: string; remoteDirectory: string; direction: SyncDirection; busy: boolean; executionBusy: boolean; error: string; exclusions: string; conflictChoices: Record<string, SyncConflictChoice>; progress: SyncExecutionProgress | null; result: SyncExecutionResult | null; history: SyncHistory[]; t: typeof copy[keyof typeof copy]; text: typeof syncCopy[keyof typeof syncCopy]; onClose: () => void; onDirection: (direction: SyncDirection) => void; onExclusions: (value: string) => void; onConflict: (path: string, choice: SyncConflictChoice) => void; onRefresh: () => void; onExecute: () => void; onCancelExecution: () => void; onClearHistory: () => void }) {
   const actionLabel = (action: SyncAction) => ({ upload: text.upload, download: text.download, createRemoteDirectory: text.createRemoteDirectory, createLocalDirectory: text.createLocalDirectory, conflict: text.conflict, destinationOnly: text.destinationOnlyAction })[action];
+  const executableCount = preview?.items.filter((item) => item.action !== 'destinationOnly' && (item.action !== 'conflict' || (!item.isDirectory && conflictChoices[item.path] === 'source'))).length ?? 0;
+  const statusLabel = (status: string) => status === 'Completed' ? text.completed : status === 'Cancelled' ? text.cancelled : text.failed;
   return <div className="modal-backdrop" role="presentation"><section className="connect-sheet sync-sheet">
-    <div className="sheet-title"><div><h2>{text.title}</h2><p>{text.detail}</p></div><button type="button" onClick={onClose}>×</button></div>
+    <div className="sheet-title"><div><h2>{text.title}</h2><p>{text.detail}</p></div><button type="button" disabled={executionBusy} onClick={onClose}>×</button></div>
     <div className="sync-paths"><span><strong>Local</strong>{localDirectory}</span><span><strong>Remote</strong>{remoteDirectory}</span></div>
-    <div className="sync-controls"><label>{text.direction}<select value={direction} onChange={(event) => onDirection(event.target.value as SyncDirection)}><option value="localToRemote">{text.localToRemote}</option><option value="remoteToLocal">{text.remoteToLocal}</option></select></label><button onClick={onRefresh} disabled={busy}>{busy && <LoaderCircle className="spinning" size={15}/>} {text.refresh}</button></div>
+    <div className="sync-controls"><label>{text.direction}<select value={direction} disabled={executionBusy} onChange={(event) => onDirection(event.target.value as SyncDirection)}><option value="localToRemote">{text.localToRemote}</option><option value="remoteToLocal">{text.remoteToLocal}</option></select></label><button onClick={onRefresh} disabled={busy || executionBusy}>{busy && <LoaderCircle className="spinning" size={15}/>} {text.refresh}</button></div>
+    <label className="sync-exclusions">{text.exclusions}<textarea value={exclusions} disabled={executionBusy} onChange={(event) => onExclusions(event.target.value)} placeholder={text.exclusionHint}/><small>{text.exclusionHint}</small></label>
     {error && <p className="form-error">{error}</p>}
     {preview && <><div className="sync-summary"><span>{text.transfers}<strong>{preview.transferCount}</strong></span><span>{text.directories}<strong>{preview.directoryCount}</strong></span><span className={preview.conflictCount ? 'warning' : ''}>{text.conflicts}<strong>{preview.conflictCount}</strong></span><span>{text.destinationOnly}<strong>{preview.destinationOnlyCount}</strong></span></div>
-      <div className="sync-preview-list">{preview.items.length === 0 ? <p className="muted">{text.noChanges}</p> : preview.items.map((item) => <div className={`sync-preview-row ${item.action}`} key={`${item.action}-${item.path}`}><span>{actionLabel(item.action)}</span><strong>{item.path}</strong><small>{item.isDirectory ? '—' : `${formatBytes(item.localSize ?? 0)} / ${formatBytes(item.remoteSize ?? 0)}`}</small></div>)}</div></>}
-    <div className="form-actions"><button type="button" onClick={onClose}>{t.cancel}</button></div>
+      <div className="sync-preview-list">{preview.items.length === 0 ? <p className="muted">{text.noChanges}</p> : preview.items.map((item) => <div className={`sync-preview-row ${item.action}`} key={`${item.action}-${item.path}`}><span>{actionLabel(item.action)}</span><strong>{item.path}</strong><small>{item.isDirectory ? '—' : `${formatBytes(item.localSize ?? 0)} / ${formatBytes(item.remoteSize ?? 0)}`}</small>{item.action === 'conflict' && <select value={conflictChoices[item.path] ?? 'skip'} disabled={executionBusy || item.isDirectory} onChange={(event) => onConflict(item.path, event.target.value as SyncConflictChoice)}><option value="skip">{text.skip}</option>{!item.isDirectory && <option value="source">{text.useSource}</option>}</select>}</div>)}</div></>}
+    {executionBusy && progress && <div className="sync-execution-progress"><div><strong>{text.executing}</strong><span>{progress.completedItems} / {progress.totalItems}</span></div><progress value={progress.completedItems} max={Math.max(progress.totalItems, 1)}/><small>{progress.currentPath}</small></div>}
+    {result && <section className={`sync-result ${result.status.toLowerCase()}`}><div><strong>{text.result}: {statusLabel(result.status)}</strong><span>{result.completedItems} / {result.totalItems} · {formatBytes(result.bytes)}</span></div>{result.log.filter((item) => item.status !== 'Completed').map((item) => <p key={`${item.action}-${item.path}`}><strong>{item.path}</strong>{item.detail}</p>)}</section>}
+    <section className="sync-history"><div className="sync-history-heading"><strong>{text.history}</strong>{history.length > 0 && <button type="button" className="icon-button" aria-label={text.clearHistory} title={text.clearHistory} onClick={onClearHistory}><Trash2 size={14}/></button>}</div>{history.length === 0 ? <p className="muted">{text.noHistory}</p> : history.slice(0, 5).map((item) => <div className="sync-history-row" key={item.id}><span className={item.status.toLowerCase()}>{statusLabel(item.status)}</span><strong>{item.direction === 'localToRemote' ? text.localToRemote : text.remoteToLocal}</strong><small>{item.completedItems}/{item.totalItems} · {item.completedAt.slice(0, 16)}</small></div>)}</section>
+    <div className="form-actions">{executionBusy ? <button type="button" onClick={onCancelExecution}>{text.cancelExecution}</button> : <><button type="button" onClick={onClose}>{t.cancel}</button><button type="button" className="primary" disabled={!preview || executableCount === 0 || busy} onClick={onExecute}>{text.execute} ({executableCount})</button></>}</div>
   </section></div>;
 }
 
@@ -798,35 +1042,45 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phas
   }
   return <div className="modal-backdrop" role="presentation"><form className="connect-sheet bookmark-sheet" onSubmit={submit}>
     <div className="sheet-title"><div><h2>{mode === 'edit' ? t.editBookmarkTitle : t.connectTitle}</h2><p>{mode === 'edit' ? t.editBookmark : t.connect}</p></div><button type="button" onClick={onClose}>×</button></div>
-    <label>{t.bookmarkName}<input required value={bookmarkName} onChange={(event) => setBookmarkName(event.target.value)} placeholder={t.bookmarkNameHint}/></label>
-    <label>{t.protocol}<select value={protocol} onChange={(event) => updateProtocol(event.target.value as Protocol)}><option value="sftp">SFTP</option><option value="ftp">FTP</option><option value="ftps">Explicit FTPS</option></select></label>
-    <div className="form-grid"><label>{t.host}<input required value={host} onChange={(event) => setHost(event.target.value)} placeholder="example.com"/></label><label>{t.port}<input required type="number" value={port} onChange={(event) => setPort(Number(event.target.value))}/></label></div>
-    <label>{t.initialDirectory}<input required value={initialDirectory} onChange={(event) => setInitialDirectory(event.target.value)} placeholder={t.initialDirectoryHint}/></label>
-    <label>{t.user}<input required value={username} onChange={(event) => setUsername(event.target.value)}/></label><label>{t.password}<input type="password" value={password} onChange={(event) => setPassword(event.target.value)}/></label>
-    {protocol === 'sftp' && <label>{t.key}<input value={keyPath} onChange={(event) => setKeyPath(event.target.value)} placeholder="~/.ssh/id_ed25519"/></label>}
-    <label>{phaseCopy.tags}<input value={tags} onChange={(event) => setTags(event.target.value)} placeholder={phaseCopy.tagHint}/></label>
-    <section className="bookmark-local-directory-section">
-      <div className="bookmark-local-directory-copy"><strong>{localCopy.title}</strong><p>{localCopy.detail}</p></div>
-      <div className="bookmark-local-directory-picker"><div className={`local-directory-path ${localDirectory ? '' : 'empty'}`} title={localDirectory || localCopy.none}><Folder size={16}/><span>{localDirectory || localCopy.none}</span></div><button type="button" onClick={() => void selectLocalDirectory()}>{localCopy.select}</button>{localDirectory && <button type="button" onClick={() => setLocalDirectory('')}>{localCopy.clear}</button>}</div>
-    </section>
-    {error && <p className="form-error">{error}</p>}<div className="form-actions"><button type="button" onClick={onClose}>{t.cancel}</button><button className="primary" disabled={busy}>{busy && <LoaderCircle className="spinning" size={16}/>} {mode === 'edit' ? t.saveBookmark : t.start}</button></div>
+    <div className="bookmark-sheet-scroll">
+      <label>{t.bookmarkName}<input required value={bookmarkName} onChange={(event) => setBookmarkName(event.target.value)} placeholder={t.bookmarkNameHint}/></label>
+      <label>{t.protocol}<select value={protocol} onChange={(event) => updateProtocol(event.target.value as Protocol)}><option value="sftp">SFTP</option><option value="ftp">FTP</option><option value="ftps">Explicit FTPS</option></select></label>
+      <div className="form-grid"><label>{t.host}<input required value={host} onChange={(event) => setHost(event.target.value)} placeholder="example.com"/></label><label>{t.port}<input required type="number" value={port} onChange={(event) => setPort(Number(event.target.value))}/></label></div>
+      <label>{t.initialDirectory}<input required value={initialDirectory} onChange={(event) => setInitialDirectory(event.target.value)} placeholder={t.initialDirectoryHint}/></label>
+      <label>{t.user}<input required value={username} onChange={(event) => setUsername(event.target.value)}/></label><label>{t.password}<input type="password" value={password} onChange={(event) => setPassword(event.target.value)}/></label>
+      {protocol === 'sftp' && <label>{t.key}<input value={keyPath} onChange={(event) => setKeyPath(event.target.value)} placeholder="~/.ssh/id_ed25519"/></label>}
+      <label>{phaseCopy.tags}<input value={tags} onChange={(event) => setTags(event.target.value)} placeholder={phaseCopy.tagHint}/></label>
+      <section className="bookmark-local-directory-section">
+        <div className="bookmark-local-directory-copy"><strong>{localCopy.title}</strong><p>{localCopy.detail}</p></div>
+        <div className="bookmark-local-directory-picker"><div className={`local-directory-path ${localDirectory ? '' : 'empty'}`} title={localDirectory || localCopy.none}><Folder size={16}/><span>{localDirectory || localCopy.none}</span></div><button type="button" onClick={() => void selectLocalDirectory()}>{localCopy.select}</button>{localDirectory && <button type="button" onClick={() => setLocalDirectory('')}>{localCopy.clear}</button>}</div>
+      </section>
+      {error && <p className="form-error">{error}</p>}
+    </div>
+    <div className="form-actions"><button type="button" onClick={onClose}>{t.cancel}</button><button className="primary" disabled={busy}>{busy && <LoaderCircle className="spinning" size={16}/>} {mode === 'edit' ? t.saveBookmark : t.start}</button></div>
   </form></div>;
 }
 
 function PreferencesSheet({ value, language, t, onClose, onSave }: { value: Preferences; language: Language; t: typeof copy[keyof typeof copy]; onClose: () => void; onSave: (preferences: Preferences) => void }) {
   const [draft, setDraft] = useState(value);
   const text = preferencesCopy[language];
+  async function selectEditor() {
+    const selected = await open({ multiple: false, directory: false, filters: [{ name: 'macOS Applications', extensions: ['app'] }] });
+    if (selected && !Array.isArray(selected)) setDraft((current) => ({ ...current, editorPath: selected }));
+  }
   return <div className="modal-backdrop" role="presentation"><form className="connect-sheet preferences-sheet" onSubmit={(event) => { event.preventDefault(); onSave(draft); }}>
     <div className="sheet-title"><div><h2>{text.title}</h2><p>{text.detail}</p></div><button type="button" onClick={onClose}>×</button></div>
-    <fieldset><legend>{text.general}</legend>
-      <label>{text.language}<select value={draft.language} onChange={(event) => setDraft((current) => ({ ...current, language: event.target.value as Language }))}><option value="ja">日本語</option><option value="en">English</option><option value="zh-CN">简体中文</option></select></label>
-      <label>{text.defaultProtocol}<select value={draft.defaultProtocol} onChange={(event) => setDraft((current) => ({ ...current, defaultProtocol: event.target.value as Protocol }))}><option value="sftp">SFTP</option><option value="ftp">FTP</option><option value="ftps">Explicit FTPS</option></select></label>
-    </fieldset>
-    <fieldset><legend>{text.transfers}</legend>
-      <label>{text.conflictPolicy}<select value={draft.conflictPolicy} onChange={(event) => setDraft((current) => ({ ...current, conflictPolicy: event.target.value as Preferences['conflictPolicy'] }))}><option value="ask">{text.ask}</option><option value="overwrite">{text.overwrite}</option><option value="skip">{text.skip}</option></select></label>
-      <label className="check-row"><input type="checkbox" checked={draft.transferNotifications} onChange={(event) => setDraft((current) => ({ ...current, transferNotifications: event.target.checked }))}/><span>{text.notifications}</span></label>
-    </fieldset>
-    <fieldset><legend>{text.security}</legend><label className="check-row"><input type="checkbox" checked={draft.confirmDelete} onChange={(event) => setDraft((current) => ({ ...current, confirmDelete: event.target.checked }))}/><span>{text.confirmDelete}</span></label></fieldset>
+    <div className="preferences-sheet-scroll">
+      <fieldset><legend>{text.general}</legend>
+        <label>{text.language}<select value={draft.language} onChange={(event) => setDraft((current) => ({ ...current, language: event.target.value as Language }))}><option value="ja">日本語</option><option value="en">English</option><option value="zh-CN">简体中文</option></select></label>
+        <label>{text.defaultProtocol}<select value={draft.defaultProtocol} onChange={(event) => setDraft((current) => ({ ...current, defaultProtocol: event.target.value as Protocol }))}><option value="sftp">SFTP</option><option value="ftp">FTP</option><option value="ftps">Explicit FTPS</option></select></label>
+      </fieldset>
+      <fieldset><legend>{text.editor}</legend><p className="preferences-field-detail">{text.editorDetail}</p><div className="editor-picker"><input readOnly value={draft.editorPath} placeholder={text.noEditor}/><button type="button" onClick={() => void selectEditor()}>{text.chooseEditor}</button>{draft.editorPath && <button type="button" onClick={() => setDraft((current) => ({ ...current, editorPath: '' }))}>{text.clearEditor}</button>}</div></fieldset>
+      <fieldset><legend>{text.transfers}</legend>
+        <label>{text.conflictPolicy}<select value={draft.conflictPolicy} onChange={(event) => setDraft((current) => ({ ...current, conflictPolicy: event.target.value as Preferences['conflictPolicy'] }))}><option value="ask">{text.ask}</option><option value="overwrite">{text.overwrite}</option><option value="skip">{text.skip}</option></select></label>
+        <label className="check-row"><input type="checkbox" checked={draft.transferNotifications} onChange={(event) => setDraft((current) => ({ ...current, transferNotifications: event.target.checked }))}/><span>{text.notifications}</span></label>
+      </fieldset>
+      <fieldset><legend>{text.security}</legend><label className="check-row"><input type="checkbox" checked={draft.confirmDelete} onChange={(event) => setDraft((current) => ({ ...current, confirmDelete: event.target.checked }))}/><span>{text.confirmDelete}</span></label></fieldset>
+    </div>
     <div className="form-actions"><button type="button" onClick={onClose}>{t.cancel}</button><button className="primary">{text.save}</button></div>
   </form></div>;
 }

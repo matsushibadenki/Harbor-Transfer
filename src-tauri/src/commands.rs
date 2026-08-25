@@ -1,31 +1,66 @@
-use crate::bookmarks::{Bookmark, BookmarkStore, ConnectionHistory, TransferHistory};
+use crate::bookmarks::{Bookmark, BookmarkStore, ConnectionHistory, SyncHistory, TransferHistory};
 use crate::ftp_client::{FtpClient, FtpConfig};
 use crate::remote_fs::RemoteFileSystem;
 use crate::sftp_client::{FileEntry, SftpAuthMethod, SftpConfig, StandaloneSftpClient};
 use crate::ssh;
-use crate::sync::{plan_sync, SnapshotEntry, SyncDirection, SyncPreview};
+use crate::sync::{filter_snapshot, plan_sync, SnapshotEntry, SyncAction, SyncDirection, SyncPreview};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, State};
 use tokio::sync::Mutex;
+
+static EDIT_SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static DRAG_EXPORT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub struct AppState {
     connections: Mutex<HashMap<String, RemoteConnection>>,
     bookmarks: BookmarkStore,
     transfer_controls: Mutex<HashMap<String, Arc<TransferControl>>>,
+    edit_cache_directory: PathBuf,
+    remote_edits: Mutex<HashMap<String, RemoteEditSession>>,
+    drag_cache_directory: PathBuf,
+    drag_icon_path: PathBuf,
+    drag_exports: Mutex<HashMap<String, PathBuf>>,
 }
 
 impl AppState {
-    pub fn new(data_directory: std::path::PathBuf) -> Result<Self, String> {
+    pub fn new(data_directory: PathBuf, cache_directory: PathBuf) -> Result<Self, String> {
+        let edit_cache_directory = cache_directory.join("remote-edit");
+        std::fs::create_dir_all(&edit_cache_directory).map_err(|error| error.to_string())?;
+        let drag_cache_directory = cache_directory.join("drag-export");
+        std::fs::create_dir_all(&drag_cache_directory).map_err(|error| error.to_string())?;
+        let drag_icon_path = drag_cache_directory.join("drag-preview.png");
+        std::fs::write(&drag_icon_path, include_bytes!("../icons/128x128.png"))
+            .map_err(|error| error.to_string())?;
         Ok(Self {
             connections: Mutex::new(HashMap::new()),
             bookmarks: BookmarkStore::new(&data_directory)?,
             transfer_controls: Mutex::new(HashMap::new()),
+            edit_cache_directory,
+            remote_edits: Mutex::new(HashMap::new()),
+            drag_cache_directory,
+            drag_icon_path,
+            drag_exports: Mutex::new(HashMap::new()),
         })
     }
+}
+
+#[derive(Clone)]
+struct RemoteEditSession {
+    connection_id: String,
+    remote_path: String,
+    cache_file: PathBuf,
+    cache_directory: PathBuf,
+    uploaded_hash: u64,
+    pending_hash: Option<u64>,
+    pending_since: Option<Instant>,
+    uploading: bool,
 }
 
 struct TransferControl {
@@ -153,6 +188,393 @@ pub struct LocalPathInfo {
     pub is_directory: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteEditOpenRequest {
+    pub connection_id: String,
+    pub remote_path: String,
+    pub editor_path: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteEditOpenResult {
+    pub edit_id: String,
+    pub name: String,
+    pub remote_path: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteEditPollResult {
+    pub edit_id: String,
+    pub remote_path: String,
+    pub status: String,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DragExportPrepareRequest {
+    pub connection_id: String,
+    pub remote_path: String,
+    pub is_directory: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DragExportPrepareResult {
+    pub export_id: String,
+    pub name: String,
+    pub remote_path: String,
+    pub local_path: String,
+    pub icon_path: String,
+}
+
+enum RemoteExportEntry {
+    Directory(PathBuf),
+    File(PathBuf),
+}
+
+async fn collect_remote_export_entries(
+    file_system: &mut dyn RemoteFileSystem,
+    root: &str,
+) -> Result<Vec<RemoteExportEntry>, String> {
+    let mut result = Vec::new();
+    let mut directories = vec![(root.to_string(), PathBuf::new())];
+    while let Some((remote_directory, relative_directory)) = directories.pop() {
+        let entries = file_system.list_dir(&remote_directory).await.map_err(|error| error.to_string())?;
+        for entry in entries {
+            let relative = relative_directory.join(&entry.name);
+            let relative_text = relative.to_string_lossy();
+            safe_relative_path(&relative_text)?;
+            match entry.file_type {
+                crate::sftp_client::FileEntryType::Directory => {
+                    if result.len() >= 100_000 {
+                        return Err("The folder contains too many items to drag safely.".to_string());
+                    }
+                    let child = remote_join(root, &relative);
+                    result.push(RemoteExportEntry::Directory(relative.clone()));
+                    directories.push((child, relative));
+                }
+                crate::sftp_client::FileEntryType::File => {
+                    if result.len() >= 100_000 {
+                        return Err("The folder contains too many items to drag safely.".to_string());
+                    }
+                    result.push(RemoteExportEntry::File(relative));
+                }
+                crate::sftp_client::FileEntryType::Symlink => {
+                    return Err(format!(
+                        "Folder drag does not follow symbolic links: {}",
+                        relative.display()
+                    ));
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn drag_export_prepare(
+    request: DragExportPrepareRequest,
+    state: State<'_, Arc<AppState>>,
+) -> Result<DragExportPrepareResult, String> {
+    if request.connection_id.trim().is_empty() || request.remote_path.trim().is_empty() {
+        return Err("Invalid drag export request.".to_string());
+    }
+    let name = Path::new(&request.remote_path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .ok_or("The remote file name is invalid.")?
+        .to_string();
+    let sequence = DRAG_EXPORT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let timestamp =
+        SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_millis();
+    let export_id = format!("drag-{timestamp}-{sequence}");
+    let export_directory = state.drag_cache_directory.join(&export_id);
+    std::fs::create_dir(&export_directory).map_err(|error| error.to_string())?;
+    let local_item = export_directory.join(&name);
+    let prepare = {
+        let mut connections = state.connections.lock().await;
+        match connections.get_mut(&request.connection_id) {
+            Some(connection) if request.is_directory => {
+                let file_system = connection.file_system();
+                match collect_remote_export_entries(file_system, &request.remote_path).await {
+                    Ok(entries) => {
+                        let mut outcome = std::fs::create_dir(&local_item).map_err(|error| error.to_string());
+                        for entry in entries {
+                            if outcome.is_err() {
+                                break;
+                            }
+                            outcome = match entry {
+                                RemoteExportEntry::Directory(relative) => {
+                                    std::fs::create_dir_all(local_item.join(relative))
+                                        .map_err(|error| error.to_string())
+                                }
+                                RemoteExportEntry::File(relative) => {
+                                    let local_file = local_item.join(&relative);
+                                    let parent_result = local_file
+                                        .parent()
+                                        .ok_or("Invalid drag cache path.".to_string())
+                                        .and_then(|parent| {
+                                            std::fs::create_dir_all(parent).map_err(|error| error.to_string())
+                                        });
+                                    match parent_result {
+                                        Ok(()) => file_system
+                                            .download_file(
+                                                &remote_join(&request.remote_path, &relative),
+                                                &local_file.to_string_lossy(),
+                                            )
+                                            .await
+                                            .map(|_| ())
+                                            .map_err(|error| error.to_string()),
+                                        Err(error) => Err(error),
+                                    }
+                                }
+                            };
+                        }
+                        outcome
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Some(connection) => connection
+                .file_system()
+                .download_file(&request.remote_path, &local_item.to_string_lossy())
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+            None => Err("Connection not found.".to_string()),
+        }
+    };
+    if let Err(error) = prepare {
+        let _ = std::fs::remove_dir_all(&export_directory);
+        return Err(error);
+    }
+    let metadata = std::fs::symlink_metadata(&local_item).map_err(|error| error.to_string())?;
+    let expected_type =
+        if request.is_directory { metadata.file_type().is_dir() } else { metadata.file_type().is_file() };
+    if !expected_type || metadata.file_type().is_symlink() {
+        let _ = std::fs::remove_dir_all(&export_directory);
+        return Err("The drag cache has an unexpected item type.".to_string());
+    }
+    state.drag_exports.lock().await.insert(export_id.clone(), export_directory);
+    Ok(DragExportPrepareResult {
+        export_id,
+        name,
+        remote_path: request.remote_path,
+        local_path: local_item.to_string_lossy().to_string(),
+        icon_path: state.drag_icon_path.to_string_lossy().to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn drag_export_cleanup(
+    export_id: String,
+    delay_ms: Option<u64>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let directory = state.drag_exports.lock().await.remove(&export_id);
+    if let Some(directory) = directory {
+        let delay_ms = delay_ms.unwrap_or(0).min(60 * 60 * 1000);
+        if delay_ms == 0 {
+            std::fs::remove_dir_all(directory).map_err(|error| error.to_string())?;
+        } else {
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                let _ = std::fs::remove_dir_all(directory);
+            });
+        }
+    }
+    Ok(())
+}
+
+fn content_hash(path: &Path) -> Result<u64, String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err("The editing cache is no longer a regular file.".to_string());
+    }
+    let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut hasher = DefaultHasher::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        buffer[..read].hash(&mut hasher);
+    }
+    Ok(hasher.finish())
+}
+
+fn launch_editor(editor_path: &Path, cache_file: &Path) -> Result<(), String> {
+    let editor = editor_path.canonicalize().map_err(|error| error.to_string())?;
+    let is_app_bundle =
+        editor.extension().and_then(|extension| extension.to_str()) == Some("app") && editor.is_dir();
+    let mut command = if is_app_bundle {
+        let mut command = std::process::Command::new("/usr/bin/open");
+        command.arg("-a").arg(&editor);
+        command
+    } else if editor.is_file() {
+        std::process::Command::new(&editor)
+    } else {
+        return Err("The selected editor is not an application or executable file.".to_string());
+    };
+    command.arg(cache_file).spawn().map(|_| ()).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn remote_edit_open(
+    request: RemoteEditOpenRequest,
+    state: State<'_, Arc<AppState>>,
+) -> Result<RemoteEditOpenResult, String> {
+    if request.connection_id.trim().is_empty() || request.remote_path.trim().is_empty() {
+        return Err("Invalid remote edit request.".to_string());
+    }
+    let name = Path::new(&request.remote_path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .ok_or("The remote file name is invalid.")?
+        .to_string();
+    let sequence = EDIT_SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let timestamp =
+        SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_millis();
+    let edit_id = format!("edit-{timestamp}-{sequence}");
+    let cache_directory = state.edit_cache_directory.join(&edit_id);
+    std::fs::create_dir(&cache_directory).map_err(|error| error.to_string())?;
+    let cache_file = cache_directory.join(&name);
+
+    let download = {
+        let mut connections = state.connections.lock().await;
+        match connections.get_mut(&request.connection_id) {
+            Some(connection) => connection
+                .file_system()
+                .download_file(&request.remote_path, &cache_file.to_string_lossy())
+                .await
+                .map_err(|error| error.to_string()),
+            None => Err("Connection not found.".to_string()),
+        }
+    };
+    if let Err(error) = download {
+        let _ = std::fs::remove_dir_all(&cache_directory);
+        return Err(error);
+    }
+    let uploaded_hash = match content_hash(&cache_file) {
+        Ok(hash) => hash,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&cache_directory);
+            return Err(error);
+        }
+    };
+    if let Err(error) = launch_editor(Path::new(&request.editor_path), &cache_file) {
+        let _ = std::fs::remove_dir_all(&cache_directory);
+        return Err(error);
+    }
+    state.remote_edits.lock().await.insert(
+        edit_id.clone(),
+        RemoteEditSession {
+            connection_id: request.connection_id,
+            remote_path: request.remote_path.clone(),
+            cache_file,
+            cache_directory,
+            uploaded_hash,
+            pending_hash: None,
+            pending_since: None,
+            uploading: false,
+        },
+    );
+    Ok(RemoteEditOpenResult { edit_id, name, remote_path: request.remote_path })
+}
+
+#[tauri::command]
+pub async fn remote_edit_poll(
+    edit_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<RemoteEditPollResult, String> {
+    let snapshot = state.remote_edits.lock().await.get(&edit_id).cloned().ok_or("Edit session not found.")?;
+    let current_hash = content_hash(&snapshot.cache_file)?;
+    let should_upload = {
+        let mut edits = state.remote_edits.lock().await;
+        let edit = edits.get_mut(&edit_id).ok_or("Edit session not found.")?;
+        if edit.uploading {
+            false
+        } else if current_hash == edit.uploaded_hash {
+            edit.pending_hash = None;
+            edit.pending_since = None;
+            return Ok(RemoteEditPollResult {
+                edit_id,
+                remote_path: edit.remote_path.clone(),
+                status: "clean".to_string(),
+                bytes: 0,
+            });
+        } else if edit.pending_hash != Some(current_hash) {
+            edit.pending_hash = Some(current_hash);
+            edit.pending_since = Some(Instant::now());
+            false
+        } else if edit.pending_since.is_some_and(|started| started.elapsed() >= Duration::from_millis(750)) {
+            edit.uploading = true;
+            true
+        } else {
+            false
+        }
+    };
+    if !should_upload {
+        return Ok(RemoteEditPollResult {
+            edit_id,
+            remote_path: snapshot.remote_path,
+            status: "waiting".to_string(),
+            bytes: 0,
+        });
+    }
+
+    let upload = {
+        let mut connections = state.connections.lock().await;
+        match connections.get_mut(&snapshot.connection_id) {
+            Some(connection) => connection
+                .file_system()
+                .upload_file(&snapshot.cache_file.to_string_lossy(), &snapshot.remote_path)
+                .await
+                .map_err(|error| error.to_string()),
+            None => Err("Connection not found.".to_string()),
+        }
+    };
+    let mut edits = state.remote_edits.lock().await;
+    let edit = edits.get_mut(&edit_id).ok_or("Edit session not found.")?;
+    edit.uploading = false;
+    match upload {
+        Ok(bytes) => {
+            edit.uploaded_hash = current_hash;
+            edit.pending_hash = None;
+            edit.pending_since = None;
+            Ok(RemoteEditPollResult {
+                edit_id,
+                remote_path: edit.remote_path.clone(),
+                status: "uploaded".to_string(),
+                bytes,
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[tauri::command]
+pub async fn remote_edit_close(edit_id: String, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let mut edits = state.remote_edits.lock().await;
+    let current = edits.get(&edit_id).ok_or("Edit session not found.")?;
+    if current.uploading {
+        return Err("Wait for the edited file to finish uploading.".to_string());
+    }
+    if content_hash(&current.cache_file)? != current.uploaded_hash {
+        return Err("The editing cache still has changes waiting to upload.".to_string());
+    }
+    let session = edits.remove(&edit_id).ok_or("Edit session not found.")?;
+    drop(edits);
+    std::fs::remove_dir_all(session.cache_directory).map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub async fn local_path_info(path: String) -> Result<LocalPathInfo, String> {
     let path = PathBuf::from(path);
@@ -210,6 +632,59 @@ pub struct SyncPreviewRequest {
     pub local_directory: String,
     pub remote_directory: String,
     pub direction: SyncDirection,
+    #[serde(default)]
+    pub exclusions: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncExecutionSelection {
+    pub path: String,
+    pub action: SyncAction,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncExecuteRequest {
+    pub sync_id: String,
+    pub connection_id: String,
+    pub local_directory: String,
+    pub remote_directory: String,
+    pub direction: SyncDirection,
+    #[serde(default)]
+    pub exclusions: Vec<String>,
+    pub items: Vec<SyncExecutionSelection>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncExecutionLogItem {
+    pub path: String,
+    pub action: SyncAction,
+    pub status: String,
+    pub detail: String,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncExecutionResult {
+    pub sync_id: String,
+    pub status: String,
+    pub completed_items: usize,
+    pub total_items: usize,
+    pub bytes: u64,
+    pub log: Vec<SyncExecutionLogItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncExecutionProgress {
+    pub sync_id: String,
+    pub completed_items: usize,
+    pub total_items: usize,
+    pub current_path: String,
+    pub status: String,
 }
 
 #[tauri::command]
@@ -262,6 +737,41 @@ fn collect_local_entries(root: &Path, current: &Path, entries: &mut Vec<LocalEnt
 fn remote_join(base: &str, relative: &Path) -> String {
     let relative = relative.to_string_lossy().replace('\\', "/");
     format!("{}/{}", base.trim_end_matches('/'), relative.trim_start_matches('/'))
+}
+
+fn safe_relative_path(value: &str) -> Result<PathBuf, String> {
+    if value.is_empty() || value.contains('\0') {
+        return Err("Invalid empty sync path.".to_string());
+    }
+    let path = PathBuf::from(value);
+    if path.components().any(|component| !matches!(component, std::path::Component::Normal(_))) {
+        return Err(format!("Unsafe sync path: {value}"));
+    }
+    Ok(path)
+}
+
+fn reject_symlink_ancestors(root: &Path, target: &Path) -> Result<(), String> {
+    let relative = target.strip_prefix(root).map_err(|_| "Sync path escaped the local root.".to_string())?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!("Refusing to follow a symlink during sync: {}", current.display()));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(())
+}
+
+fn direction_label(direction: SyncDirection) -> &'static str {
+    match direction {
+        SyncDirection::LocalToRemote => "localToRemote",
+        SyncDirection::RemoteToLocal => "remoteToLocal",
+    }
 }
 
 fn collect_local_snapshot(root: &Path) -> Result<Vec<SnapshotEntry>, String> {
@@ -371,6 +881,16 @@ pub async fn transfer_history_record(
 #[tauri::command]
 pub async fn transfer_history_clear(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.bookmarks.clear_transfer_history()
+}
+
+#[tauri::command]
+pub async fn sync_history_list(state: State<'_, Arc<AppState>>) -> Result<Vec<SyncHistory>, String> {
+    state.bookmarks.sync_history()
+}
+
+#[tauri::command]
+pub async fn sync_history_clear(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.bookmarks.clear_sync_history()
 }
 
 /// Metadata only: private-key bytes never cross the Tauri IPC boundary.
@@ -509,11 +1029,220 @@ pub async fn sync_preview(
     request: SyncPreviewRequest,
     state: State<'_, Arc<AppState>>,
 ) -> Result<SyncPreview, String> {
-    let local = collect_local_snapshot(Path::new(&request.local_directory))?;
+    let local =
+        filter_snapshot(collect_local_snapshot(Path::new(&request.local_directory))?, &request.exclusions);
     let mut connections = state.connections.lock().await;
     let connection = connections.get_mut(&request.connection_id).ok_or("Connection not found.")?;
-    let remote = collect_remote_snapshot(connection.file_system(), &request.remote_directory).await?;
+    let remote = filter_snapshot(
+        collect_remote_snapshot(connection.file_system(), &request.remote_directory).await?,
+        &request.exclusions,
+    );
     Ok(plan_sync(local, remote, request.direction))
+}
+
+#[tauri::command]
+pub async fn sync_execute(
+    request: SyncExecuteRequest,
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<SyncExecutionResult, String> {
+    if request.sync_id.trim().is_empty() || request.items.len() > 100_000 {
+        return Err("Invalid sync execution request.".to_string());
+    }
+    let local_root = PathBuf::from(&request.local_directory);
+    let canonical_local_root = local_root.canonicalize().map_err(|error| error.to_string())?;
+    if !canonical_local_root.is_dir() {
+        return Err("The selected local path is not a directory.".to_string());
+    }
+
+    let local = filter_snapshot(collect_local_snapshot(&canonical_local_root)?, &request.exclusions);
+    let mut connections = state.connections.lock().await;
+    let connection = connections.get_mut(&request.connection_id).ok_or("Connection not found.")?;
+    let remote = filter_snapshot(
+        collect_remote_snapshot(connection.file_system(), &request.remote_directory).await?,
+        &request.exclusions,
+    );
+    let current_plan = plan_sync(local, remote, request.direction);
+    let planned =
+        current_plan.items.into_iter().map(|item| (item.path.clone(), item)).collect::<HashMap<_, _>>();
+
+    let mut selected = HashMap::new();
+    for item in request.items {
+        safe_relative_path(&item.path)?;
+        let current = planned
+            .get(&item.path)
+            .ok_or_else(|| format!("The sync plan changed for {}. Refresh the preview.", item.path))?;
+        let conflict_source_action = match request.direction {
+            SyncDirection::LocalToRemote => SyncAction::Upload,
+            SyncDirection::RemoteToLocal => SyncAction::Download,
+        };
+        let allowed = current.action == item.action
+            || (current.action == SyncAction::Conflict
+                && !current.is_directory
+                && item.action == conflict_source_action);
+        if !allowed
+            || matches!(item.action, SyncAction::Conflict | SyncAction::DestinationOnly)
+            || selected.insert(item.path.clone(), item.action).is_some()
+        {
+            return Err(format!("Unsafe or stale sync action for {}. Refresh the preview.", item.path));
+        }
+    }
+
+    let mut items = selected.into_iter().collect::<Vec<_>>();
+    items.sort_by(|(left_path, left_action), (right_path, right_action)| {
+        let left_file = matches!(left_action, SyncAction::Upload | SyncAction::Download);
+        let right_file = matches!(right_action, SyncAction::Upload | SyncAction::Download);
+        left_file
+            .cmp(&right_file)
+            .then_with(|| left_path.matches('/').count().cmp(&right_path.matches('/').count()))
+            .then_with(|| left_path.cmp(right_path))
+    });
+
+    let total_items = items.len();
+    let control = Arc::new(TransferControl::new());
+    state.transfer_controls.lock().await.insert(request.sync_id.clone(), control.clone());
+    let file_system = connection.file_system();
+    let mut completed_items = 0;
+    let mut transferred_bytes = 0;
+    let mut log = Vec::new();
+    let mut final_status = "Completed".to_string();
+
+    for (relative, action) in items {
+        if let Err(error) = control.wait_until_running().await {
+            final_status = "Cancelled".to_string();
+            log.push(SyncExecutionLogItem {
+                path: relative,
+                action,
+                status: final_status.clone(),
+                detail: error,
+                bytes: 0,
+            });
+            break;
+        }
+        let relative_path = safe_relative_path(&relative)?;
+        let local_path = canonical_local_root.join(&relative_path);
+        let remote_path = remote_join(&request.remote_directory, &relative_path);
+        let _ = app.emit(
+            "sync://progress",
+            SyncExecutionProgress {
+                sync_id: request.sync_id.clone(),
+                completed_items,
+                total_items,
+                current_path: relative.clone(),
+                status: "Running".to_string(),
+            },
+        );
+        let operation = match action {
+            SyncAction::CreateRemoteDirectory => {
+                file_system.create_dir(&remote_path).await.map(|_| 0).map_err(|error| error.to_string())
+            }
+            SyncAction::CreateLocalDirectory => reject_symlink_ancestors(&canonical_local_root, &local_path)
+                .and_then(|_| std::fs::create_dir_all(&local_path).map_err(|error| error.to_string()))
+                .map(|_| 0),
+            SyncAction::Upload => {
+                let canonical_file = local_path.canonicalize().map_err(|error| error.to_string());
+                match canonical_file {
+                    Ok(path) if path.starts_with(&canonical_local_root) && path.is_file() => file_system
+                        .upload_file(&path.to_string_lossy(), &remote_path)
+                        .await
+                        .map_err(|error| error.to_string()),
+                    Ok(_) => Err(format!("Local sync source escaped its root: {relative}")),
+                    Err(error) => Err(error),
+                }
+            }
+            SyncAction::Download => {
+                let validation =
+                    reject_symlink_ancestors(&canonical_local_root, &local_path).and_then(|_| {
+                        local_path.parent().ok_or("Invalid local destination.".to_string()).and_then(
+                            |parent| std::fs::create_dir_all(parent).map_err(|error| error.to_string()),
+                        )
+                    });
+                match validation {
+                    Ok(()) => file_system
+                        .download_file(&remote_path, &local_path.to_string_lossy())
+                        .await
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error),
+                }
+            }
+            SyncAction::Conflict | SyncAction::DestinationOnly => {
+                Err("Unsafe sync action was rejected.".to_string())
+            }
+        };
+        match operation {
+            Ok(bytes) => {
+                completed_items += 1;
+                transferred_bytes += bytes;
+                log.push(SyncExecutionLogItem {
+                    path: relative.clone(),
+                    action,
+                    status: "Completed".to_string(),
+                    detail: String::new(),
+                    bytes,
+                });
+                let _ = app.emit(
+                    "sync://progress",
+                    SyncExecutionProgress {
+                        sync_id: request.sync_id.clone(),
+                        completed_items,
+                        total_items,
+                        current_path: relative,
+                        status: "Running".to_string(),
+                    },
+                );
+            }
+            Err(error) => {
+                final_status = if error.to_lowercase().contains("cancel") {
+                    "Cancelled".to_string()
+                } else {
+                    "Failed".to_string()
+                };
+                log.push(SyncExecutionLogItem {
+                    path: relative,
+                    action,
+                    status: final_status.clone(),
+                    detail: error,
+                    bytes: 0,
+                });
+                break;
+            }
+        }
+    }
+
+    drop(connections);
+    state.transfer_controls.lock().await.remove(&request.sync_id);
+    let result = SyncExecutionResult {
+        sync_id: request.sync_id.clone(),
+        status: final_status.clone(),
+        completed_items,
+        total_items,
+        bytes: transferred_bytes,
+        log,
+    };
+    let detail = serde_json::to_string(&result.log).map_err(|error| error.to_string())?;
+    state.bookmarks.record_sync_history(&SyncHistory {
+        id: request.sync_id.clone(),
+        direction: direction_label(request.direction).to_string(),
+        local_directory: request.local_directory,
+        remote_directory: request.remote_directory,
+        status: final_status.clone(),
+        completed_items: completed_items as u64,
+        total_items: total_items as u64,
+        bytes: transferred_bytes,
+        detail,
+        completed_at: String::new(),
+    })?;
+    let _ = app.emit(
+        "sync://progress",
+        SyncExecutionProgress {
+            sync_id: request.sync_id,
+            completed_items,
+            total_items,
+            current_path: String::new(),
+            status: final_status,
+        },
+    );
+    Ok(result)
 }
 
 #[tauri::command]
@@ -737,4 +1466,52 @@ pub async fn transfer_upload_directory(
     );
     state.transfer_controls.lock().await.remove(&request.transfer_id);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{content_hash, reject_symlink_ancestors, safe_relative_path};
+
+    #[test]
+    fn editing_cache_hash_changes_with_file_contents() {
+        let root = tempfile::tempdir().expect("cache root");
+        let file = root.path().join("file.txt");
+        std::fs::write(&file, b"before").expect("initial cache");
+        let before = content_hash(&file).expect("initial hash");
+        std::fs::write(&file, b"after").expect("edited cache");
+        assert_ne!(before, content_hash(&file).expect("edited hash"));
+    }
+
+    #[test]
+    fn rejects_absolute_and_parent_sync_paths() {
+        assert!(safe_relative_path("folder/file.txt").is_ok());
+        assert!(safe_relative_path("/tmp/file.txt").is_err());
+        assert!(safe_relative_path("../file.txt").is_err());
+        assert!(safe_relative_path("folder/../file.txt").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_local_sync_destinations_through_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("local root");
+        let outside = tempfile::tempdir().expect("outside directory");
+        symlink(outside.path(), root.path().join("escape")).expect("create symlink");
+        assert!(reject_symlink_ancestors(root.path(), &root.path().join("escape/file.txt")).is_err());
+        assert!(reject_symlink_ancestors(root.path(), &root.path().join("safe/file.txt")).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn editing_cache_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("cache root");
+        let source = root.path().join("source.txt");
+        let link = root.path().join("link.txt");
+        std::fs::write(&source, b"secret").expect("source file");
+        symlink(&source, &link).expect("cache symlink");
+        assert!(content_hash(&link).is_err());
+    }
 }

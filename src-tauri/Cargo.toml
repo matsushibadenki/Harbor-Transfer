@@ -26,6 +26,7 @@ suppaftp = { version = "6", features = ["async-native-tls"] }
 tauri = { version = "2.1", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
+tauri-plugin-drag = "2.1.1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"

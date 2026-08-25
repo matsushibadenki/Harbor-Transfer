@@ -22,11 +22,14 @@ Harbor Transfer is a friendly desktop file-transfer client built with **Tauri 2*
 - Display file size, modification date, and permissions when supported by the protocol.
 - Upload files, multiple selections, and complete folders, including Finder drag and drop.
 - Download, rename, delete, and create remote folders.
+- Select a remote file or recursively prepared folder and drag its local copy from list, icon, or column view to Finder or the desktop.
+- Open a cached copy of a remote file in a selected macOS editor and automatically overwrite the same remote path after the saved content becomes stable.
 - Monitor transfers with progress, speed, remaining time, pause, resume, cancel, and retry controls.
 - Resolve duplicate filenames by asking, overwriting, skipping, or choosing another name.
 - Save, edit, tag, import, and export bookmarks.
-- Associate an optional local directory with each bookmark for future differential synchronization.
-- Preview one-way differences between local and remote directory trees.
+- Associate an optional local directory with each bookmark as the default synchronization source or destination.
+- Preview and safely execute one-way synchronization between local and remote directory trees.
+- Configure glob-style exclusions, resolve each file conflict, cancel a running synchronization, and review its persistent execution log.
 - Review and clear connection and transfer history.
 - Manage available SSH keys from the local `~/.ssh` directory.
 - Use the interface in English, Japanese, or Simplified Chinese.
@@ -86,6 +89,6 @@ pnpm tauri build
 
 ## Project Status
 
-Bookmark management, remote browsing, file operations, transfer controls, FTP/FTPS support, and synchronization preview are implemented. Safe synchronization execution, exclusion rules, execution logs, packaging, signing, and automatic updates remain planned work.
+Bookmark management, remote browsing, file operations, transfer controls, FTP/FTPS support, and safe one-way synchronization are implemented. Protocol integration testing, packaging, signing, and automatic updates remain planned work.
 
 See [the roadmap](docs/roadmap.md) and [the functional design](docs/functional-design.md) for more detail.

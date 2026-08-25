@@ -12,6 +12,7 @@
     "core:window:allow-set-focus",
     "core:window:allow-start-dragging",
     "dialog:default",
+    "drag:default",
     "fs:default"
   ]
 }
