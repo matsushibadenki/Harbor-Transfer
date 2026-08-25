@@ -25,6 +25,11 @@ if [ ! -f "$cert_dir/ca.crt" ]; then
 fi
 
 cleanup() {
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "Protocol integration failed; collecting service logs."
+    docker compose -f "$compose_file" logs --no-color || true
+  fi
   docker compose -f "$compose_file" down --volumes --remove-orphans
 }
 trap cleanup EXIT INT TERM
@@ -39,3 +44,9 @@ FTP_TEST_CA_CERT="$cert_dir/ca.crt" FTP_TEST_HOST=127.0.0.1 FTP_TEST_PORT=2990 F
 
 SFTP_TEST_HOST=127.0.0.1 SFTP_TEST_PORT=2222 SFTP_TEST_USER=harbor SFTP_TEST_PASS=harbor \
   cargo test --manifest-path "$project_dir/src-tauri/Cargo.toml" sftp_client::tests::test_sftp_live_ -- --test-threads=1
+
+WEBDAV_TEST_CA_CERT="$cert_dir/ca.crt" WEBDAV_TEST_HOST=127.0.0.1 WEBDAV_TEST_PORT=8443 WEBDAV_TEST_USER=harbor WEBDAV_TEST_PASS=harbor \
+  cargo test --manifest-path "$project_dir/src-tauri/Cargo.toml" webdav_client::tests::live_webdav_ -- --test-threads=1
+
+WEBDAV_TEST_CA_CERT="$cert_dir/ca.crt" WEBDAV_TEST_HOST=127.0.0.1 WEBDAV_TEST_PORT=8444 WEBDAV_TEST_USER=harbor WEBDAV_TEST_PASS=harbor WEBDAV_TEST_ROOT=/remote.php/dav/files/harbor \
+  cargo test --manifest-path "$project_dir/src-tauri/Cargo.toml" webdav_client::tests::live_webdav_ -- --test-threads=1

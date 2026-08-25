@@ -1,5 +1,6 @@
 use crate::ftp_client::FtpClient;
 use crate::sftp_client::{FileEntry, StandaloneSftpClient};
+use crate::webdav_client::WebDavClient;
 use anyhow::Result;
 use async_trait::async_trait;
 
@@ -69,5 +70,33 @@ impl RemoteFileSystem for FtpClient {
     }
     async fn disconnect(&mut self) -> Result<()> {
         FtpClient::disconnect(self).await
+    }
+}
+
+#[async_trait]
+impl RemoteFileSystem for WebDavClient {
+    async fn list_dir(&mut self, path: &str) -> Result<Vec<FileEntry>> {
+        WebDavClient::list_dir(self, path).await
+    }
+    async fn upload_file(&mut self, local_path: &str, remote_path: &str) -> Result<u64> {
+        WebDavClient::upload_file(self, local_path, remote_path).await
+    }
+    async fn download_file(&mut self, remote_path: &str, local_path: &str) -> Result<u64> {
+        WebDavClient::download_file(self, remote_path, local_path).await
+    }
+    async fn create_dir(&mut self, path: &str) -> Result<()> {
+        WebDavClient::create_dir(self, path).await
+    }
+    async fn rename(&mut self, old_path: &str, new_path: &str) -> Result<()> {
+        WebDavClient::rename(self, old_path, new_path).await
+    }
+    async fn delete_file(&mut self, path: &str) -> Result<()> {
+        WebDavClient::delete(self, path).await
+    }
+    async fn delete_dir(&mut self, path: &str) -> Result<()> {
+        WebDavClient::delete(self, path).await
+    }
+    async fn disconnect(&mut self) -> Result<()> {
+        WebDavClient::disconnect(self).await
     }
 }

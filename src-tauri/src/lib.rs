@@ -6,6 +6,7 @@ mod remote_fs;
 mod sftp_client;
 mod ssh;
 mod sync;
+mod webdav_client;
 
 use commands::AppState;
 use std::sync::Arc;

@@ -105,6 +105,7 @@ pub struct StandaloneSftpClient {
 }
 
 impl StandaloneSftpClient {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self { session: None, sftp: None }
     }
@@ -198,6 +199,7 @@ impl StandaloneSftpClient {
         Ok(Self { session: Some(session), sftp: Some(sftp) })
     }
 
+    #[cfg(test)]
     pub fn is_connected(&self) -> bool {
         self.session.is_some() && self.sftp.is_some()
     }

@@ -14,7 +14,7 @@ Harbor Transfer is a friendly desktop file-transfer client built with **Tauri 2*
 
 ## Features
 
-- Connect to remote servers using **SFTP**, **FTP**, or **Explicit FTPS**.
+- Connect to remote servers using **SFTP**, **FTP**, **Explicit FTPS**, or **HTTPS WebDAV**.
 - Authenticate with a password or an SSH private key.
 - Verify SSH host-key fingerprints on first connection and reject unexpected changes.
 - Browse remote files in list, icon, or Finder-style column views.
@@ -41,6 +41,7 @@ Harbor Transfer is a friendly desktop file-transfer client built with **Tauri 2*
 - Bookmark exports do not contain passwords, private-key contents, or passphrases.
 - SSH private-key contents are not exposed through the user interface.
 - FTPS certificate verification remains enabled by default.
+- WebDAV always uses HTTPS with certificate verification; its password follows the same macOS Keychain-only storage policy.
 - Remote paths are handled as structured application data and are not executed as shell commands.
 
 ## Technology
@@ -52,6 +53,7 @@ Harbor Transfer is a friendly desktop file-transfer client built with **Tauri 2*
 - macOS Keychain for passwords
 - `russh` / `russh-sftp` for SFTP
 - `suppaftp` for FTP and FTPS
+- `reqwest`, Rustls, and `quick-xml` for WebDAV
 
 ## Development
 
@@ -90,6 +92,6 @@ pnpm tauri build
 
 ## Project Status
 
-Bookmark management, remote browsing, file operations, transfer controls, FTP/FTPS support, safe one-way synchronization, protocol CI, accessibility improvements, and macOS distribution preparation are implemented. WebDAV is the next planned protocol; automatic updates remain disabled until a signed production feed is available.
+Bookmark management, remote browsing, file operations, transfer controls, SFTP/FTP/FTPS/WebDAV support, safe one-way synchronization, protocol CI, accessibility improvements, and macOS distribution preparation are implemented. S3 is the next planned protocol; automatic updates remain disabled until a signed production feed is available.
 
 See [the roadmap](docs/roadmap.md), [quality checklist](docs/quality-and-release.md), [macOS release guide](docs/macos-release.md), and [functional design](docs/functional-design.md) for more detail.

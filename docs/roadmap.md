@@ -23,8 +23,9 @@
 - [Done] Phase 3 の SFTP / FTP / FTPS 共通ファイルシステム抽象化と双方向の同期プレビューを実装
 - [Done] 同期プレビューからの安全な実行、除外パターン、競合選択、停止、実行ログを実装
 - [Done] Phase 4 の統合テスト、CI、耐障害性、アクセシビリティ、配布準備を完了
-- [Next] Phase 5 として WebDAV アダプタと統合テストを実装
-- [Later] S3 と rsync 互換の高度な差分同期を段階的に実装
+- [Done] Phase 5 の HTTPS WebDAV アダプタ、UI統合、標準サーバー／Nextcloud統合テストを完了
+- [Next] Phase 6 として S3 の安全なオブジェクトストレージ設計とアダプタを実装
+- [Later] rsync 互換の高度な差分同期を段階的に実装
 
 ## Phase 0 — プロジェクト基盤 [Done]
 
@@ -82,14 +83,24 @@
 - [Done] 安定したBundle ID、CSP、macOS署名・notarizationスクリプト、更新配信方針、ローカル限定クラッシュ診断を整備
 - [Done] WebDAV / S3 を評価し、既存抽象化に適合する WebDAV を次の実装対象に決定
 
-## Phase 5 — WebDAV [Next]
+## Phase 5 — WebDAV [Done]
 
 **完了条件:** HTTPS WebDAV 接続で、既存の閲覧・転送・同期機能を安全に利用できる。
 
-- [Next] WebDAV の接続設定、Keychain資格情報、`RemoteFileSystem` アダプタを実装
-- [Later] PROPFIND、アップロード、ダウンロード、MOVE、DELETE、空コレクションを統合テスト
-- [Later] Nextcloud と標準WebDAVサーバーの相互運用性、Unicode／percent encodingを検証
+- [Done] HTTPS WebDAV の接続設定、Keychain資格情報、`RemoteFileSystem` アダプタを実装
+- [Done] PROPFIND、ストリーミングアップロード／ダウンロード、MKCOL、MOVE、DELETE、空コレクションを統合テスト
+- [Done] TLS証明書検証を無効化する製品設定を設けず、認証情報をブックマーク／診断へ含めない安全境界を維持
+- [Done] 標準仕様に集中したWebDAVテストサーバーとNextcloudの両方で、Unicode／percent encoding、2 MiB超転送、再接続を検証
+- [Done] WebDAVを新規接続、ブックマーク、履歴、既定プロトコル、一覧、ファイル操作、転送、同期UIへ統合
+
+## Phase 6 — S3 [Next]
+
+**完了条件:** オブジェクトストレージ固有の制約を明示し、誤削除を避けながら閲覧・転送できる。
+
+- [Next] AWS SDK、認証情報のKeychain保存、リージョン／エンドポイント設定、バケット選択の設計を確定
+- [Later] prefixを仮想ディレクトリとして扱うS3アダプタとmultipart転送を実装
+- [Later] rename相当のcopy＋delete、競合、安全な同期プレビューをS3向けに検証
 
 ## 次の実装単位
 
-次は WebDAV の接続モデルと `RemoteFileSystem` アダプタを実装し、既存の一覧・転送・同期UIへ統合する。
+次は S3 の認証・バケット／prefix表現・multipart転送・copy＋deleteの安全境界を設計し、まず読み取り専用の一覧アダプタから実装する。

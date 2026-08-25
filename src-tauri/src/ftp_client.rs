@@ -1,7 +1,9 @@
 use anyhow::Result;
-use async_std::io::ReadExt;
 use serde::Deserialize;
+use std::io::Cursor;
 use std::time::Duration;
+use suppaftp::tokio::{AsyncFtpStream, AsyncNativeTlsConnector, AsyncNativeTlsFtpStream};
+use tokio::io::AsyncReadExt;
 
 use crate::sftp_client::{FileEntry, FileEntryType};
 
@@ -18,8 +20,8 @@ pub struct FtpConfig {
 
 /// Wrapper enum to handle both plain and TLS FTP streams.
 enum FtpStreamKind {
-    Plain(suppaftp::AsyncFtpStream),
-    Secure(suppaftp::AsyncNativeTlsFtpStream),
+    Plain(AsyncFtpStream),
+    Secure(AsyncNativeTlsFtpStream),
 }
 
 /// Dispatch a method call to whichever stream variant is active.
@@ -39,6 +41,7 @@ pub struct FtpClient {
 }
 
 impl FtpClient {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self { stream: None }
     }
@@ -54,23 +57,20 @@ impl FtpClient {
             config.anonymous
         );
 
-        // Use async_std timeout since suppaftp uses async_std internally
+        // Bound connection setup so an unreachable endpoint cannot stall a UI command.
         let timeout_duration = Duration::from_secs(15);
 
         let mut stream_kind = if config.ftps_enabled {
-            let ftp_stream = async_std::future::timeout(
-                timeout_duration,
-                suppaftp::AsyncNativeTlsFtpStream::connect(&addr),
-            )
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "FTPS connection timed out after 15s. Check host {} and port {}.",
-                    config.host,
-                    config.port
-                )
-            })?
-            .map_err(|e| anyhow::anyhow!("FTPS TCP connect to {} failed: {}", addr, e))?;
+            let ftp_stream = tokio::time::timeout(timeout_duration, AsyncNativeTlsFtpStream::connect(&addr))
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "FTPS connection timed out after 15s. Check host {} and port {}.",
+                        config.host,
+                        config.port
+                    )
+                })?
+                .map_err(|e| anyhow::anyhow!("FTPS TCP connect to {} failed: {}", addr, e))?;
 
             tracing::info!("FTPS TCP connected, starting TLS handshake...");
 
@@ -92,24 +92,23 @@ impl FtpClient {
                 Err(_) => tls_connector,
             };
             let secure_stream = ftp_stream
-                .into_secure(suppaftp::AsyncNativeTlsConnector::from(tls_connector), &config.host)
+                .into_secure(AsyncNativeTlsConnector::from(tls_connector), &config.host)
                 .await
                 .map_err(|e| anyhow::anyhow!("FTPS TLS handshake failed: {}", e))?;
 
             tracing::info!("FTPS TLS handshake complete");
             FtpStreamKind::Secure(secure_stream)
         } else {
-            let ftp_stream =
-                async_std::future::timeout(timeout_duration, suppaftp::AsyncFtpStream::connect(&addr))
-                    .await
-                    .map_err(|_| {
-                        anyhow::anyhow!(
-                            "FTP connection timed out after 15s. Check host {} and port {}.",
-                            config.host,
-                            config.port
-                        )
-                    })?
-                    .map_err(|e| anyhow::anyhow!("FTP TCP connect to {} failed: {}", addr, e))?;
+            let ftp_stream = tokio::time::timeout(timeout_duration, AsyncFtpStream::connect(&addr))
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "FTP connection timed out after 15s. Check host {} and port {}.",
+                        config.host,
+                        config.port
+                    )
+                })?
+                .map_err(|e| anyhow::anyhow!("FTP TCP connect to {} failed: {}", addr, e))?;
 
             tracing::info!("FTP TCP connected to {}", addr);
             FtpStreamKind::Plain(ftp_stream)
@@ -146,6 +145,7 @@ impl FtpClient {
         Ok(Self { stream: Some(stream_kind) })
     }
 
+    #[cfg(test)]
     pub fn is_connected(&self) -> bool {
         self.stream.is_some()
     }
@@ -223,7 +223,7 @@ impl FtpClient {
         let total_bytes = data.len() as u64;
 
         ftp_stream!(self, s => {
-            let mut reader = async_std::io::Cursor::new(data);
+            let mut reader = Cursor::new(data);
             s.put_file(remote_path, &mut reader).await.map_err(|e| {
                 anyhow::anyhow!("Failed to upload file '{}': {}", remote_path, e)
             })?

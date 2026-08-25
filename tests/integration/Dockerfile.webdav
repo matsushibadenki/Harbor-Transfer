@@ -1,0 +1,7 @@
+FROM python:3.13-slim
+
+RUN mkdir -p /srv/webdav
+COPY webdav_server.py /usr/local/bin/webdav_server.py
+
+EXPOSE 8443
+ENTRYPOINT ["python", "/usr/local/bin/webdav_server.py"]

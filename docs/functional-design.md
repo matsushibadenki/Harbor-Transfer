@@ -12,7 +12,7 @@
 
 | 領域 | 機能 |
 | --- | --- |
-| 接続 | SFTP、FTP、Explicit FTPS、ブックマーク、接続履歴 |
+| 接続 | SFTP、FTP、Explicit FTPS、HTTPS WebDAV、ブックマーク、接続履歴 |
 | 認証 | パスワード、SSH 公開鍵、パスフレーズ、ホスト鍵の初回確認 |
 | キー管理 | ローカル `~/.ssh` の鍵メタデータ一覧と、接続への鍵選択 |
 | ファイル操作 | 一覧、移動、検索、アップロード、ダウンロード、キャッシュ経由の外部編集、フォルダ作成、名前変更、削除 |
@@ -22,7 +22,7 @@
 
 ### 初回リリースの対象外
 
-- WebDAV、S3、Backblaze B2、Google Drive などのクラウドストレージ
+- S3、Backblaze B2、Google Drive などのオブジェクト／クラウドストレージ
 - 端末エミュレータ、リモートデスクトップ、サーバー監視
 - 双方向同期、スケジュール実行、共同編集
 - Finder 拡張・システム常駐メニュー
@@ -80,7 +80,7 @@ macOS の標準ツールバーと Finder に近い情報構造を採用する。
 
 ツールバーの環境設定から、特定のブックマークに属さない共通設定を変更する。初期実装では表示言語、新規接続の既定プロトコル、同名ファイルの既定動作、削除確認、転送結果通知、リモートファイルを開く外部エディタを管理する。設定データはブックマークとは別の名前空間で永続化し、今後の転送・表示・セキュリティ設定を追加できる構造にする。
 
-- プロトコルを選ぶと既定ポートを提案する（SFTP 22、FTP 21、Explicit FTPS 21）。
+- プロトコルを選ぶと既定ポートを提案する（SFTP 22、FTP 21、Explicit FTPS 21、HTTPS WebDAV 443）。
 - 初回接続時は SSH ホスト鍵の fingerprint を明示し、信頼または中止を選べる。保存済み fingerprint と異なる接続は中止する。
 - 保存する場合のみブックマーク名とタグを入力する。秘密情報は OS のキーチェーンに保存し、設定ファイルへ平文で書かない。
 
@@ -92,7 +92,7 @@ macOS の標準ツールバーと Finder に近い情報構造を採用する。
 
 ### FR-01 接続とブックマーク
 
-- SFTP、FTP、Explicit FTPS へ接続できる。
+- SFTP、FTP、Explicit FTPS、HTTPS WebDAV へ接続できる。
 - ブックマークの作成、編集、複製、削除、タグ付け、フォルダ整理、検索ができる。
 - ブックマークはバージョン付き JSON へ書き出し・読み込みできる。同一 ID・同一接続先は更新し、新しい ID は追加する。同一 ID でも接続先が異なる場合は、Keychain の認証情報との誤結合を避けるため新しい ID で追加する。
 - ブックマークごとに、リモート初期ディレクトリと組み合わせる任意のローカルディレクトリを選択・解除できる。この対応関係は将来の rsync 互換差分同期の既定値として利用する。
@@ -152,12 +152,12 @@ macOS の標準ツールバーと Finder に近い情報構造を採用する。
 | UI | Tauri 2 WebView + TypeScript フロントエンド | 画面、状態、i18n、ドラッグ&ドロップ、IPC 呼び出し |
 | アプリケーション | Rust / Tauri Commands | 入力検証、接続・転送・ブックマークのユースケース |
 | ドメイン | Rust | 転送キュー、競合判定、同期計画、接続状態遷移 |
-| インフラ | Rust async + プロトコルアダプタ | SFTP、FTP、FTPS、ローカル FS、Keychain、SQLite |
+| インフラ | Rust async + プロトコルアダプタ | SFTP、FTP、FTPS、WebDAV、ローカル FS、Keychain、SQLite |
 
 ```text
 UI ── invoke/event ──> Tauri Commands ──> TransferService
                                       ├──> ConnectionRegistry
-                                      ├──> ProtocolAdapter (SFTP / FTP / FTPS)
+                                      ├──> ProtocolAdapter (SFTP / FTP / FTPS / WebDAV)
                                       ├──> BookmarkRepository (SQLite)
                                       └──> SecretStore (macOS Keychain)
 ```
@@ -169,7 +169,7 @@ UI ── invoke/event ──> Tauri Commands ──> TransferService
 | モジュール | 責務 |
 | --- | --- |
 | `models` | Bookmark、ConnectionProfile、RemoteEntry、TransferJob、SyncPlan の直列化可能な型 |
-| `protocol` | `RemoteFileSystem` trait と SFTP / FTP / FTPS 実装 |
+| `protocol` | `RemoteFileSystem` trait と SFTP / FTP / FTPS / WebDAV 実装 |
 | `connection` | 接続生成、ライフサイクル、ホスト鍵/TLS 信頼判定 |
 | `transfer` | キュー、並列数制御、停止/再開/再試行、進捗イベント |
 | `sync` | 再帰差分、glob 除外規則、同期計画生成と安全性検証 |
@@ -198,6 +198,7 @@ UI ── invoke/event ──> Tauri Commands ──> TransferService
 - ブックマークの書き出しにはパスワード、秘密鍵の内容、パスフレーズを含めない。読み込み時は形式、件数、プロトコル、ポート、必須項目を検証する。
 - SSH は未知のホスト鍵・変更されたホスト鍵を明確に区別し、変更時は自動接続しない。
 - FTPS は既定で証明書検証を有効にする。例外を許可する場合も、接続先単位で明示的な利用者操作を必要とする。
+- WebDAV は HTTPS のみを許可し、TLS証明書検証を無効化する製品設定を設けない。Basic認証のパスワードはmacOS Keychainに保存する。
 - ログにはパスワード、トークン、秘密鍵内容を絶対に出力しない。
 - 削除・上書き・同期による変更前には確認ダイアログを出し、対象・件数・方針を表示する。
 
@@ -206,7 +207,7 @@ UI ── invoke/event ──> Tauri Commands ──> TransferService
 - 転送中でも UI は操作可能であり、進捗イベントを滑らかに反映する。
 - 接続断・アプリ再起動・一時ネットワーク障害でも、失敗したジョブの理由と再試行操作が残る。
 - 単一ファイル、複数ファイル、階層フォルダ、空フォルダ、Unicode 名、空白を含むパスをテスト対象に含める。
-- SFTP と FTP/FTPS のそれぞれで、一覧・作成・改名・削除・アップロード・ダウンロードを自動テストする。
+- SFTP、FTP/FTPS、WebDAV のそれぞれで、一覧・作成・改名・削除・アップロード・ダウンロードを自動テストする。WebDAVは標準仕様向けfixtureとNextcloudの両方で検証する。
 - 英語・日本語・简体中文で翻訳キーの不足を CI で検出する。
 - 新規 UI は macOS の標準ショートカット、フォーカス、ダークモードに適合する。
 

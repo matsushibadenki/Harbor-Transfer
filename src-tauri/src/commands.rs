@@ -4,6 +4,7 @@ use crate::remote_fs::RemoteFileSystem;
 use crate::sftp_client::{FileEntry, SftpAuthMethod, SftpConfig, StandaloneSftpClient};
 use crate::ssh;
 use crate::sync::{filter_snapshot, plan_sync, SnapshotEntry, SyncAction, SyncDirection, SyncPreview};
+use crate::webdav_client::{WebDavClient, WebDavConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -92,6 +93,7 @@ impl TransferControl {
 enum RemoteConnection {
     Sftp(StandaloneSftpClient),
     Ftp { client: FtpClient, protocol: Protocol },
+    WebDav(WebDavClient),
 }
 
 impl RemoteConnection {
@@ -99,6 +101,7 @@ impl RemoteConnection {
         match self {
             Self::Sftp(client) => client,
             Self::Ftp { client, .. } => client,
+            Self::WebDav(client) => client,
         }
     }
 
@@ -106,6 +109,7 @@ impl RemoteConnection {
         match self {
             Self::Sftp(_) => Protocol::Sftp,
             Self::Ftp { protocol, .. } => *protocol,
+            Self::WebDav(_) => Protocol::Webdav,
         }
     }
 }
@@ -122,6 +126,7 @@ pub struct ConnectRequest {
     pub key_path: Option<String>,
     pub passphrase: Option<String>,
     pub expected_host_key: Option<String>,
+    pub initial_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy)]
@@ -130,6 +135,7 @@ pub enum Protocol {
     Sftp,
     Ftp,
     Ftps,
+    Webdav,
 }
 
 #[derive(Debug, Serialize)]
@@ -942,6 +948,17 @@ pub async fn connection_connect(
             .map_err(|error| error.to_string())?,
             protocol,
         },
+        Protocol::Webdav => RemoteConnection::WebDav(
+            WebDavClient::connect(&WebDavConfig {
+                host: request.host,
+                port: request.port,
+                username: request.username,
+                password: request.password.unwrap_or_default(),
+                probe_path: request.initial_path.unwrap_or_else(|| "/".to_string()),
+            })
+            .await
+            .map_err(|error| error.to_string())?,
+        ),
     };
 
     state.connections.lock().await.insert(request.connection_id.clone(), connection);
@@ -1325,6 +1342,9 @@ pub async fn transfer_upload(
         RemoteConnection::Ftp { client, .. } => {
             client.upload_file(&request.local_path, &request.remote_path).await
         }
+        RemoteConnection::WebDav(client) => {
+            client.upload_file(&request.local_path, &request.remote_path).await
+        }
     };
     drop(connections);
     state.transfer_controls.lock().await.remove(&transfer_id);
@@ -1380,6 +1400,9 @@ pub async fn transfer_download(
                 .await
         }
         RemoteConnection::Ftp { client, .. } => {
+            client.download_file(&request.remote_path, &request.local_path).await
+        }
+        RemoteConnection::WebDav(client) => {
             client.download_file(&request.remote_path, &request.local_path).await
         }
     };

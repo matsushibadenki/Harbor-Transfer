@@ -7,11 +7,11 @@ import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { getCurrentWebviewWindow, WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Cloud, Columns3, Copy, File, Folder, FolderPlus, Grid2X2, HardDrive,
+  ArrowUpToLine, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Cloud, Columns3, Copy, File, Folder, FolderPlus, Grid2X2, HardDrive,
   FileDown, FileUp, FolderSync, FolderUp, KeyRound, List, LoaderCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, RefreshCw, Search, Settings, Trash2, Upload,
 } from 'lucide-react';
 
-type Protocol = 'sftp' | 'ftp' | 'ftps';
+type Protocol = 'sftp' | 'ftp' | 'ftps' | 'webdav';
 type FileEntry = { name: string; size: number; modified?: string; permissions?: string; file_type: 'File' | 'Directory' | 'Symlink' };
 type Connection = { id: string; name: string; protocol: Protocol; host: string; port: number; username: string; initialPath: string; keyPath?: string; hostKey?: string; localDirectory?: string; tags: string };
 type ConnectionHistory = { bookmarkId: string; name: string; protocol: Protocol; host: string; port: number; username: string; connectedAt: string };
@@ -55,9 +55,9 @@ const copy = {
 } as const;
 
 const phaseOneCopy = {
-  ja: { tags: 'タグ', all: 'すべて', noHistory: '接続履歴はありません', tagHint: 'カンマ区切り（例: 本番, Web）' },
-  en: { tags: 'Tags', all: 'All', noHistory: 'No connection history', tagHint: 'Comma separated (e.g. Production, Web)' },
-  'zh-CN': { tags: '标签', all: '全部', noHistory: '没有连接历史记录', tagHint: '使用逗号分隔（例如：生产, Web）' },
+  ja: { tags: 'タグ', all: 'すべて', noHistory: '接続履歴はありません', tagHint: 'カンマ区切り（例: 本番, Web）', webdavHint: '証明書を検証するHTTPS接続だけを使用します。NextcloudではDAVのパスを初期ディレクトリに指定してください。' },
+  en: { tags: 'Tags', all: 'All', noHistory: 'No connection history', tagHint: 'Comma separated (e.g. Production, Web)', webdavHint: 'Only HTTPS with certificate verification is used. For Nextcloud, enter the DAV path as the initial directory.' },
+  'zh-CN': { tags: '标签', all: '全部', noHistory: '没有连接历史记录', tagHint: '使用逗号分隔（例如：生产, Web）', webdavHint: '仅使用经过证书验证的HTTPS连接。使用Nextcloud时，请将DAV路径填写为初始目录。' },
 } as const;
 
 const bookmarkLocalCopy = {
@@ -121,6 +121,7 @@ const syncCopy = {
 } as const;
 
 function joinPath(base: string, name: string) { return base === '/' ? `/${name}` : `${base.replace(/\/$/, '')}/${name}`; }
+function defaultPort(protocol: Protocol) { return protocol === 'sftp' ? 22 : protocol === 'webdav' ? 443 : 21; }
 function parentPath(path: string) { const parts = path.split('/').filter(Boolean); parts.pop(); return `/${parts.join('/')}` || '/'; }
 function formatBytes(bytes: number) { if (!bytes) return '—'; const units = ['B', 'KB', 'MB', 'GB']; const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), 3); return `${(bytes / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`; }
 function formatDuration(seconds?: number) { if (seconds === undefined || !Number.isFinite(seconds)) return '—'; if (seconds < 60) return `${Math.ceil(seconds)}s`; return `${Math.floor(seconds / 60)}m ${Math.ceil(seconds % 60)}s`; }
@@ -139,7 +140,7 @@ function parseBookmarkExport(raw: string): Connection[] | null {
       const port = bookmark.port;
       const requiredStrings = ['id', 'name', 'host', 'username', 'initialPath', 'tags'] as const;
       if (!requiredStrings.every((key) => typeof bookmark[key] === 'string' && (bookmark[key] as string).length <= 4096)) return null;
-      if (!(protocol === 'sftp' || protocol === 'ftp' || protocol === 'ftps') || !Number.isInteger(port) || (port as number) < 1 || (port as number) > 65535) return null;
+      if (!(protocol === 'sftp' || protocol === 'ftp' || protocol === 'ftps' || protocol === 'webdav') || !Number.isInteger(port) || (port as number) < 1 || (port as number) > 65535) return null;
       if (!(bookmark.keyPath === undefined || (typeof bookmark.keyPath === 'string' && bookmark.keyPath.length <= 4096)) || !(bookmark.hostKey === undefined || (typeof bookmark.hostKey === 'string' && bookmark.hostKey.length <= 4096)) || !(bookmark.localDirectory === undefined || (typeof bookmark.localDirectory === 'string' && bookmark.localDirectory.length <= 4096))) return null;
       const id = (bookmark.id as string).trim();
       const host = (bookmark.host as string).trim();
@@ -187,6 +188,8 @@ export default function App() {
   const [selectedTag, setSelectedTag] = useState('');
   const [active, setActive] = useState<Connection | null>(null);
   const [path, setPath] = useState('/');
+  const [directoryHistory, setDirectoryHistory] = useState<string[]>([]);
+  const [directoryHistoryIndex, setDirectoryHistoryIndex] = useState(-1);
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [query, setQuery] = useState('');
   const [showConnect, setShowConnect] = useState(false);
@@ -379,14 +382,42 @@ export default function App() {
     return () => unlisten?.();
   }, []);
 
-  async function loadDirectory(connection = active, requestedPath = path) {
-    if (!connection) return;
+  async function loadDirectory(connection = active, requestedPath = path): Promise<boolean> {
+    if (!connection) return false;
     setBusy(true); setError(null);
     try {
       const result = await invoke<FileEntry[]>('remote_list', { request: { connectionId: connection.id, path: requestedPath } });
       setEntries(result); setPath(requestedPath); setColumnLevels([{ path: requestedPath, entries: result }]);
-    } catch (reason) { setError(String(reason)); }
+      return true;
+    } catch (reason) { setError(String(reason)); return false; }
     finally { setBusy(false); }
+  }
+
+  function recordDirectoryNavigation(nextPath: string, reset = false) {
+    if (reset) {
+      setDirectoryHistory([nextPath]);
+      setDirectoryHistoryIndex(0);
+      return;
+    }
+    if (directoryHistory[directoryHistoryIndex] === nextPath) return;
+    const nextHistory = [...directoryHistory.slice(0, directoryHistoryIndex + 1), nextPath];
+    setDirectoryHistory(nextHistory);
+    setDirectoryHistoryIndex(nextHistory.length - 1);
+  }
+
+  async function navigateDirectory(connection = active, requestedPath = path, resetHistory = false) {
+    if (resetHistory) {
+      setDirectoryHistory([]);
+      setDirectoryHistoryIndex(-1);
+    }
+    if (await loadDirectory(connection, requestedPath)) recordDirectoryNavigation(requestedPath, resetHistory);
+  }
+
+  async function navigateDirectoryHistory(offset: -1 | 1) {
+    const nextIndex = directoryHistoryIndex + offset;
+    const requestedPath = directoryHistory[nextIndex];
+    if (!active || requestedPath === undefined) return;
+    if (await loadDirectory(active, requestedPath)) setDirectoryHistoryIndex(nextIndex);
   }
 
   function selectViewMode(next: ViewMode) {
@@ -412,6 +443,7 @@ export default function App() {
       setColumnLevels([...selectedLevels, { path: childPath, entries: childEntries }]);
       setPath(childPath);
       setEntries(childEntries);
+      recordDirectoryNavigation(childPath);
     } catch (reason) { setError(String(reason)); }
     finally { setBusy(false); }
   }
@@ -772,6 +804,12 @@ export default function App() {
     if (!active) return;
     if (dragSelectionTimer.current !== null) window.clearTimeout(dragSelectionTimer.current);
     setSelectedRemoteFile({ connectionId: active.id, remotePath: joinPath(basePath, entry.name) });
+    // Preparing a directory downloads its entire tree while holding the remote
+    // connection. Do that only after an actual drag gesture, never on selection.
+    if (entry.file_type === 'Directory') {
+      dragSelectionTimer.current = null;
+      return;
+    }
     dragSelectionTimer.current = window.setTimeout(() => {
       dragSelectionTimer.current = null;
       void prepareRemoteDrag(entry, basePath);
@@ -915,9 +953,9 @@ export default function App() {
             <button onClick={() => void openSyncPreview()}><FolderSync size={17}/>{syncText.button}</button><button onClick={createDirectory}><FolderPlus size={17}/>{t.newFolder}</button><button onClick={() => void uploadDirectory()}><FolderUp size={16}/>{t.uploadFolder}</button><button className="primary" onClick={() => void uploadFiles()}><Upload size={16}/>{t.upload}</button>
           </div>
           <div className="path-toolbar">
-            <button aria-label={accessibilityCopy[language].back} disabled><ChevronLeft size={18}/></button><button aria-label={accessibilityCopy[language].forward} disabled><ChevronRight size={18}/></button>
-            <button aria-label={accessibilityCopy[language].parent} onClick={() => void loadDirectory(active, parentPath(path))}><Folder size={18}/></button>
-            <div className="path-field"><span>{t.path}</span><input value={path} onChange={(event) => setPath(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void loadDirectory()} /></div>
+            <button aria-label={accessibilityCopy[language].back} title={accessibilityCopy[language].back} disabled={directoryHistoryIndex <= 0} onClick={() => void navigateDirectoryHistory(-1)}><ChevronLeft size={18}/></button><button aria-label={accessibilityCopy[language].forward} title={accessibilityCopy[language].forward} disabled={directoryHistoryIndex < 0 || directoryHistoryIndex >= directoryHistory.length - 1} onClick={() => void navigateDirectoryHistory(1)}><ChevronRight size={18}/></button>
+            <button className="parent-directory-button" aria-label={accessibilityCopy[language].parent} title={accessibilityCopy[language].parent} disabled={path === '/'} onClick={() => void navigateDirectory(active, parentPath(path))}><ArrowUpToLine size={18}/></button>
+            <div className="path-field"><span>{t.path}</span><input value={path} onChange={(event) => setPath(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void navigateDirectory()} /></div>
             <button className="copy-path-button" aria-label={t.copyPath} title={t.copyPath} onClick={() => void copyCurrentPath()}>{pathCopied ? <Check size={17}/> : <Copy size={17}/>}</button>
           </div>
           {error && <div className="error-banner"><strong>{t.error}:</strong> {error}</div>}
@@ -929,14 +967,14 @@ export default function App() {
               <ResizableColumnHeader label={t.modified} column="modified" width={columnWidths.modified} resizeLabel={columnsText.resize} onStart={startColumnResize} onAdjust={adjustColumnWidth}/>
               <ResizableColumnHeader label={columnsText.permissions} column="permissions" width={columnWidths.permissions} resizeLabel={columnsText.resize} onStart={startColumnResize} onAdjust={adjustColumnWidth}/><span />
             </div>
-            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`file-row interactive ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="row" aria-selected={selected} tabIndex={0} draggable={entry.file_type !== 'Symlink'} onClick={() => scheduleRemoteDragPreparation(entry)} onKeyDown={(event) => { if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(entry); } if (event.key === 'Enter') { entry.file_type === 'Directory' ? void loadDirectory(active, remotePath) : void downloadFile(entry); } }} onDragStart={(event) => startRemoteDrag(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void loadDirectory(active, remotePath) : void downloadFile(entry); }}>
+            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`file-row interactive ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="row" aria-selected={selected} tabIndex={0} draggable={entry.file_type !== 'Symlink'} onClick={() => scheduleRemoteDragPreparation(entry)} onKeyDown={(event) => { if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(entry); } if (event.key === 'Enter') { entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); } }} onDragStart={(event) => startRemoteDrag(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }}>
               <span className="file-name">{entry.file_type === 'Directory' ? <Folder fill="currentColor" size={18}/> : <Cloud size={18}/>} {entry.name}</span><span>{entry.file_type === 'Directory' ? '—' : formatBytes(entry.size)}</span><span>{entry.modified ?? '—'}</span><span className="permissions-cell">{entry.permissions ?? '—'}</span><button aria-label={accessibilityCopy[language].more} onClick={(event) => { event.stopPropagation(); void manageEntry(entry); }}><MoreHorizontal size={18}/></button>
             </div>; })}
           </div>}
           {viewMode === 'icons' && <div className="icon-grid" role="grid">
             {filteredEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
             {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`icon-entry ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} role="gridcell" key={entry.name} draggable={entry.file_type !== 'Symlink'} onDragStart={(event) => startRemoteDrag(event, entry)}>
-              <button className="icon-entry-main" title={entry.name} onClick={() => scheduleRemoteDragPreparation(entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void loadDirectory(active, remotePath) : void downloadFile(entry); }} onKeyDown={(event) => { if (event.key !== 'Enter') return; entry.file_type === 'Directory' ? void loadDirectory(active, remotePath) : void downloadFile(entry); }}>
+              <button className="icon-entry-main" title={entry.name} onClick={() => scheduleRemoteDragPreparation(entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }} onKeyDown={(event) => { if (event.key !== 'Enter') return; entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }}>
                 {entry.file_type === 'Directory' ? <Folder className="entry-art folder-art" fill="currentColor" size={46}/> : <File className="entry-art" size={44}/>}
                 <strong>{entry.name}</strong><small>{entry.file_type === 'Directory' ? entry.permissions ?? '—' : formatBytes(entry.size)}</small>
               </button>
@@ -950,7 +988,7 @@ export default function App() {
                 <div className="directory-column-title" title={level.path}>{level.path}</div>
                 {visibleLevelEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
                 {visibleLevelEntries.map((entry) => { const remotePath = joinPath(level.path, entry.name); const selectedForDrag = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`column-entry ${level.selectedName === entry.name || selectedForDrag ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="option" aria-selected={level.selectedName === entry.name || selectedForDrag} draggable={entry.file_type !== 'Symlink'} onDragStart={(event) => startRemoteDrag(event, entry, level.path)}>
-                  <button className="column-entry-main" title={entry.name} onClick={(event) => { if (event.detail <= 1) { void openColumnEntry(levelIndex, entry); scheduleRemoteDragPreparation(entry, level.path); } }} onDoubleClick={() => { cancelScheduledDragPreparation(); if (entry.file_type !== 'Directory') void downloadFile(entry, level.path); }}>
+                  <button className="column-entry-main" title={entry.name} onClick={(event) => { if (event.detail <= 1) { cancelScheduledDragPreparation(); setSelectedRemoteFile({ connectionId: active.id, remotePath }); void openColumnEntry(levelIndex, entry); } }} onDoubleClick={() => { cancelScheduledDragPreparation(); if (entry.file_type !== 'Directory') void downloadFile(entry, level.path); }}>
                     {entry.file_type === 'Directory' ? <Folder fill="currentColor" size={17}/> : <File size={16}/>}<span>{entry.name}</span>{entry.file_type === 'Directory' ? <ChevronRight size={14}/> : <small>{formatBytes(entry.size)}</small>}
                   </button>
                   <button className="column-entry-more" aria-label={accessibilityCopy[language].more} onClick={(event) => { event.stopPropagation(); void manageEntry(entry, level.path); }}><MoreHorizontal size={15}/></button>
@@ -961,7 +999,7 @@ export default function App() {
           <nav className="breadcrumb-bar" aria-label={t.breadcrumbs}>
             {breadcrumbs.map((crumb, index) => <span className="breadcrumb-item" key={crumb.path}>
               {index > 0 && <ChevronRight size={13} aria-hidden="true"/>}
-              <button title={crumb.path} aria-current={index === breadcrumbs.length - 1 ? 'location' : undefined} onClick={() => void loadDirectory(active, crumb.path)}>{crumb.label}</button>
+              <button title={crumb.path} aria-current={index === breadcrumbs.length - 1 ? 'location' : undefined} onClick={() => void navigateDirectory(active, crumb.path)}>{crumb.label}</button>
             </span>)}
           </nav>
         </> : <div className="welcome"><Cloud size={46}/><h1>{t.empty}</h1><p>{t.emptyDetail}</p><button className="primary" onClick={() => { setConnectingBookmark(null); setSelectedKeyPath(''); setConnectSheetMode('connect'); setShowConnect(true); }}>{t.connect}</button></div>}
@@ -993,7 +1031,7 @@ export default function App() {
       });
       setNotice(t.bookmarkSaved);
       setShowConnect(false);
-    }} onConnected={(connection) => { setConnections((current) => [connection, ...current.filter((item) => item.id !== connection.id)]); void Promise.all([invoke('bookmark_save', { bookmark: connection }), invoke('connection_history_record', { bookmark: connection })]).then(() => invoke<ConnectionHistory[]>('connection_history_list')).then(setHistory).catch((reason) => setError(String(reason))); setActive(connection); setShowConnect(false); void loadDirectory(connection, connection.initialPath); }} />}
+    }} onConnected={(connection) => { setConnections((current) => [connection, ...current.filter((item) => item.id !== connection.id)]); void Promise.all([invoke('bookmark_save', { bookmark: connection }), invoke('connection_history_record', { bookmark: connection })]).then(() => invoke<ConnectionHistory[]>('connection_history_list')).then(setHistory).catch((reason) => setError(String(reason))); setActive(connection); setShowConnect(false); void navigateDirectory(connection, connection.initialPath, true); }} />}
     {showPreferences && <PreferencesSheet value={preferences} language={language} t={t} onClose={() => setShowPreferences(false)} onSave={(next) => { setPreferences(next); setShowPreferences(false); }} />}
     {syncLocalDirectory && <SyncPreviewSheet preview={syncPreview} localDirectory={syncLocalDirectory} remoteDirectory={path} direction={syncDirection} busy={syncPreviewBusy} executionBusy={syncExecutionBusy} error={syncPreviewError} exclusions={syncExclusions} conflictChoices={syncConflictChoices} progress={syncExecutionProgress} result={syncExecutionResult} history={syncHistory} t={t} text={syncText} onClose={() => { if (syncExecutionBusy) return; setSyncLocalDirectory(''); setSyncPreview(null); }} onDirection={(direction) => { setSyncDirection(direction); setSyncExecutionResult(null); void calculateSyncPreview(syncLocalDirectory, direction); }} onExclusions={(value) => { setSyncExclusions(value); setSyncPreview(null); setSyncExecutionResult(null); }} onConflict={(itemPath, choice) => setSyncConflictChoices((current) => ({ ...current, [itemPath]: choice }))} onRefresh={() => void calculateSyncPreview()} onExecute={() => void executeSync()} onCancelExecution={() => void cancelSyncExecution()} onClearHistory={() => void clearSyncHistory()} />}
   </main>;
@@ -1022,7 +1060,7 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phas
   const [bookmarkName, setBookmarkName] = useState(bookmark?.name ?? '');
   const [protocol, setProtocol] = useState<Protocol>(bookmark?.protocol ?? defaultProtocol);
   const [host, setHost] = useState(bookmark?.host ?? '');
-  const [port, setPort] = useState(bookmark?.port ?? (defaultProtocol === 'sftp' ? 22 : 21));
+  const [port, setPort] = useState(bookmark?.port ?? defaultPort(defaultProtocol));
   const [initialDirectory, setInitialDirectory] = useState(bookmark?.initialPath ?? '/');
   const [username, setUsername] = useState(bookmark?.username ?? '');
   const [password, setPassword] = useState('');
@@ -1031,7 +1069,7 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phas
   const [localDirectory, setLocalDirectory] = useState(bookmark?.localDirectory ?? '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  function updateProtocol(value: Protocol) { setProtocol(value); setPort(value === 'sftp' ? 22 : 21); }
+  function updateProtocol(value: Protocol) { setProtocol(value); setPort(defaultPort(value)); }
   async function selectLocalDirectory() {
     const selected = await open({ multiple: false, directory: true });
     if (selected && !Array.isArray(selected)) setLocalDirectory(selected);
@@ -1054,7 +1092,7 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phas
         onSaved(connection);
         return;
       }
-      await invoke('connection_connect', { request: { connectionId: connection.id, protocol, host, port, username, password: password || null, keyPath: keyPath || null, passphrase: null, expectedHostKey: hostKey ?? null } });
+      await invoke('connection_connect', { request: { connectionId: connection.id, protocol, host, port, username, password: password || null, keyPath: keyPath || null, passphrase: null, expectedHostKey: hostKey ?? null, initialPath: connection.initialPath } });
       if (password) await invoke('credential_save', { bookmarkId: connection.id, password });
       onConnected(connection);
     } catch (reason) { setError(String(reason)); }
@@ -1064,10 +1102,11 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phas
     <div className="sheet-title"><div><h2>{mode === 'edit' ? t.editBookmarkTitle : t.connectTitle}</h2><p>{mode === 'edit' ? t.editBookmark : t.connect}</p></div><button type="button" onClick={onClose}>×</button></div>
     <div className="bookmark-sheet-scroll">
       <label>{t.bookmarkName}<input required value={bookmarkName} onChange={(event) => setBookmarkName(event.target.value)} placeholder={t.bookmarkNameHint}/></label>
-      <label>{t.protocol}<select value={protocol} onChange={(event) => updateProtocol(event.target.value as Protocol)}><option value="sftp">SFTP</option><option value="ftp">FTP</option><option value="ftps">Explicit FTPS</option></select></label>
+      <label>{t.protocol}<select value={protocol} onChange={(event) => updateProtocol(event.target.value as Protocol)}><option value="sftp">SFTP</option><option value="ftp">FTP</option><option value="ftps">Explicit FTPS</option><option value="webdav">WebDAV (HTTPS)</option></select></label>
       <div className="form-grid"><label>{t.host}<input required value={host} onChange={(event) => setHost(event.target.value)} placeholder="example.com"/></label><label>{t.port}<input required type="number" value={port} onChange={(event) => setPort(Number(event.target.value))}/></label></div>
+      {protocol === 'webdav' && <p className="protocol-security-hint">{phaseCopy.webdavHint}</p>}
       <label>{t.initialDirectory}<input required value={initialDirectory} onChange={(event) => setInitialDirectory(event.target.value)} placeholder={t.initialDirectoryHint}/></label>
-      <label>{t.user}<input required value={username} onChange={(event) => setUsername(event.target.value)}/></label><label>{t.password}<input type="password" value={password} onChange={(event) => setPassword(event.target.value)}/></label>
+      <label>{t.user}<input required value={username} onChange={(event) => setUsername(event.target.value)}/></label><label>{t.password}<input required={protocol === 'webdav'} type="password" value={password} onChange={(event) => setPassword(event.target.value)}/></label>
       {protocol === 'sftp' && <label>{t.key}<input value={keyPath} onChange={(event) => setKeyPath(event.target.value)} placeholder="~/.ssh/id_ed25519"/></label>}
       <label>{phaseCopy.tags}<input value={tags} onChange={(event) => setTags(event.target.value)} placeholder={phaseCopy.tagHint}/></label>
       <section className="bookmark-local-directory-section">
@@ -1092,7 +1131,7 @@ function PreferencesSheet({ value, language, t, onClose, onSave }: { value: Pref
     <div className="preferences-sheet-scroll">
       <fieldset><legend>{text.general}</legend>
         <label>{text.language}<select value={draft.language} onChange={(event) => setDraft((current) => ({ ...current, language: event.target.value as Language }))}><option value="ja">日本語</option><option value="en">English</option><option value="zh-CN">简体中文</option></select></label>
-        <label>{text.defaultProtocol}<select value={draft.defaultProtocol} onChange={(event) => setDraft((current) => ({ ...current, defaultProtocol: event.target.value as Protocol }))}><option value="sftp">SFTP</option><option value="ftp">FTP</option><option value="ftps">Explicit FTPS</option></select></label>
+        <label>{text.defaultProtocol}<select value={draft.defaultProtocol} onChange={(event) => setDraft((current) => ({ ...current, defaultProtocol: event.target.value as Protocol }))}><option value="sftp">SFTP</option><option value="ftp">FTP</option><option value="ftps">Explicit FTPS</option><option value="webdav">WebDAV (HTTPS)</option></select></label>
       </fieldset>
       <fieldset><legend>{text.appearance}</legend><label>{text.theme}<select value={draft.theme} onChange={(event) => setDraft((current) => ({ ...current, theme: event.target.value as Preferences['theme'] }))}><option value="system">{text.system}</option><option value="light">{text.light}</option><option value="dark">{text.dark}</option></select></label></fieldset>
       <fieldset><legend>{text.editor}</legend><p className="preferences-field-detail">{text.editorDetail}</p><div className="editor-picker"><input readOnly value={draft.editorPath} placeholder={text.noEditor}/><button type="button" onClick={() => void selectEditor()}>{text.chooseEditor}</button>{draft.editorPath && <button type="button" onClick={() => setDraft((current) => ({ ...current, editorPath: '' }))}>{text.clearEditor}</button>}</div></fieldset>
