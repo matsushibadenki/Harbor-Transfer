@@ -1,0 +1,63 @@
+# Reference project: never include it in this repository.
+/r-shell_reference/
+
+# JavaScript / pnpm
+/node_modules/
+/.pnpm-store/
+/dist/
+/dist-ssr/
+/.vite/
+*.tsbuildinfo
+
+# Rust / Tauri build output
+/target/
+/src-tauri/target/
+/src-tauri/gen/schemas/
+
+# Local application data
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+
+# Environment files and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Logs, test output, and temporary files
+*.log
+/coverage/
+/.nyc_output/
+/tmp/
+/temp/
+*.tmp
+*.swp
+*.swo
+
+# macOS / Windows metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Desktop.ini
+
+# Editors and local development tools
+/.idea/
+/.vscode/
+/.fleet/
+/.codex/
+/.agents/
+/.claude/
+*.iml
+
+# Local signing and packaging artifacts
+/src-tauri/target/release/bundle/
+*.dmg
+*.msi
+*.app

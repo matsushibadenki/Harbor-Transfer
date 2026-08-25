@@ -1,0 +1,73 @@
+use crate::ftp_client::FtpClient;
+use crate::sftp_client::{FileEntry, StandaloneSftpClient};
+use anyhow::Result;
+use async_trait::async_trait;
+
+/// Protocol-neutral remote file operations used by browsing, transfers, and sync planning.
+#[async_trait]
+pub trait RemoteFileSystem: Send {
+    async fn list_dir(&mut self, path: &str) -> Result<Vec<FileEntry>>;
+    async fn upload_file(&mut self, local_path: &str, remote_path: &str) -> Result<u64>;
+    async fn download_file(&mut self, remote_path: &str, local_path: &str) -> Result<u64>;
+    async fn create_dir(&mut self, path: &str) -> Result<()>;
+    async fn rename(&mut self, old_path: &str, new_path: &str) -> Result<()>;
+    async fn delete_file(&mut self, path: &str) -> Result<()>;
+    async fn delete_dir(&mut self, path: &str) -> Result<()>;
+    async fn disconnect(&mut self) -> Result<()>;
+}
+
+#[async_trait]
+impl RemoteFileSystem for StandaloneSftpClient {
+    async fn list_dir(&mut self, path: &str) -> Result<Vec<FileEntry>> {
+        StandaloneSftpClient::list_dir(self, path).await
+    }
+    async fn upload_file(&mut self, local_path: &str, remote_path: &str) -> Result<u64> {
+        StandaloneSftpClient::upload_file(self, local_path, remote_path).await
+    }
+    async fn download_file(&mut self, remote_path: &str, local_path: &str) -> Result<u64> {
+        StandaloneSftpClient::download_file(self, remote_path, local_path).await
+    }
+    async fn create_dir(&mut self, path: &str) -> Result<()> {
+        StandaloneSftpClient::create_dir(self, path).await
+    }
+    async fn rename(&mut self, old_path: &str, new_path: &str) -> Result<()> {
+        StandaloneSftpClient::rename(self, old_path, new_path).await
+    }
+    async fn delete_file(&mut self, path: &str) -> Result<()> {
+        StandaloneSftpClient::delete_file(self, path).await
+    }
+    async fn delete_dir(&mut self, path: &str) -> Result<()> {
+        StandaloneSftpClient::delete_dir(self, path).await
+    }
+    async fn disconnect(&mut self) -> Result<()> {
+        StandaloneSftpClient::disconnect(self).await
+    }
+}
+
+#[async_trait]
+impl RemoteFileSystem for FtpClient {
+    async fn list_dir(&mut self, path: &str) -> Result<Vec<FileEntry>> {
+        FtpClient::list_dir(self, path).await
+    }
+    async fn upload_file(&mut self, local_path: &str, remote_path: &str) -> Result<u64> {
+        FtpClient::upload_file(self, local_path, remote_path).await
+    }
+    async fn download_file(&mut self, remote_path: &str, local_path: &str) -> Result<u64> {
+        FtpClient::download_file(self, remote_path, local_path).await
+    }
+    async fn create_dir(&mut self, path: &str) -> Result<()> {
+        FtpClient::create_dir(self, path).await
+    }
+    async fn rename(&mut self, old_path: &str, new_path: &str) -> Result<()> {
+        FtpClient::rename(self, old_path, new_path).await
+    }
+    async fn delete_file(&mut self, path: &str) -> Result<()> {
+        FtpClient::delete_file(self, path).await
+    }
+    async fn delete_dir(&mut self, path: &str) -> Result<()> {
+        FtpClient::delete_dir(self, path).await
+    }
+    async fn disconnect(&mut self) -> Result<()> {
+        FtpClient::disconnect(self).await
+    }
+}
