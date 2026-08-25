@@ -3,6 +3,7 @@ mod commands;
 mod diagnostics;
 mod ftp_client;
 mod remote_fs;
+mod s3_client;
 mod sftp_client;
 mod ssh;
 mod sync;

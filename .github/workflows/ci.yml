@@ -36,7 +36,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Tauri Linux prerequisites
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
-      - name: Run FTP, Explicit FTPS, SFTP, and HTTPS WebDAV tests
+      - name: Run FTP, Explicit FTPS, SFTP, HTTPS WebDAV, and S3 tests
         run: sh tests/integration/run.sh
 
   macos-bundle:

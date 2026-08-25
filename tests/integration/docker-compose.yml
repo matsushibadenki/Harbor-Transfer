@@ -84,3 +84,16 @@ services:
       interval: 3s
       timeout: 3s
       retries: 30
+  s3:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --address :9000
+    environment:
+      MINIO_ROOT_USER: harboraccess
+      MINIO_ROOT_PASSWORD: harborsecret123
+    ports:
+      - "9000:9000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/minio/health/live"]
+      interval: 2s
+      timeout: 2s
+      retries: 30

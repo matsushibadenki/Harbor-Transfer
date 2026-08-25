@@ -18,6 +18,12 @@ pub struct Bookmark {
     pub local_directory: Option<String>,
     #[serde(default)]
     pub tags: String,
+    #[serde(default)]
+    pub s3_region: Option<String>,
+    #[serde(default)]
+    pub s3_endpoint: Option<String>,
+    #[serde(default)]
+    pub s3_force_path_style: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -84,6 +90,9 @@ impl BookmarkStore {
                     host_key TEXT,
                     local_directory TEXT,
                     tags TEXT NOT NULL DEFAULT '',
+                    s3_region TEXT,
+                    s3_endpoint TEXT,
+                    s3_force_path_style INTEGER NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE TABLE IF NOT EXISTS connection_history (
@@ -121,6 +130,12 @@ impl BookmarkStore {
             let _ = connection.execute("ALTER TABLE bookmarks ADD COLUMN host_key TEXT", []);
             let _ = connection.execute("ALTER TABLE bookmarks ADD COLUMN local_directory TEXT", []);
             let _ = connection.execute("ALTER TABLE bookmarks ADD COLUMN tags TEXT NOT NULL DEFAULT ''", []);
+            let _ = connection.execute("ALTER TABLE bookmarks ADD COLUMN s3_region TEXT", []);
+            let _ = connection.execute("ALTER TABLE bookmarks ADD COLUMN s3_endpoint TEXT", []);
+            let _ = connection.execute(
+                "ALTER TABLE bookmarks ADD COLUMN s3_force_path_style INTEGER NOT NULL DEFAULT 0",
+                [],
+            );
             Ok(())
         })?;
         Ok(store)
@@ -137,7 +152,8 @@ impl BookmarkStore {
     pub fn list(&self) -> Result<Vec<Bookmark>, String> {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
-                "SELECT id, name, protocol, host, port, username, initial_path, key_path, host_key, local_directory, tags
+                "SELECT id, name, protocol, host, port, username, initial_path, key_path, host_key, local_directory, tags,
+                        s3_region, s3_endpoint, s3_force_path_style
                  FROM bookmarks ORDER BY updated_at DESC, name COLLATE NOCASE",
             )?;
             let bookmarks = statement
@@ -154,6 +170,9 @@ impl BookmarkStore {
                         host_key: row.get(8)?,
                         local_directory: row.get(9)?,
                         tags: row.get(10)?,
+                        s3_region: row.get(11)?,
+                        s3_endpoint: row.get(12)?,
+                        s3_force_path_style: row.get(13)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -164,15 +183,18 @@ impl BookmarkStore {
     pub fn save(&self, bookmark: &Bookmark) -> Result<(), String> {
         self.with_connection(|connection| {
             connection.execute(
-                "INSERT INTO bookmarks (id, name, protocol, host, port, username, initial_path, key_path, host_key, local_directory, tags, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, CURRENT_TIMESTAMP)
+                "INSERT INTO bookmarks (id, name, protocol, host, port, username, initial_path, key_path, host_key, local_directory, tags, s3_region, s3_endpoint, s3_force_path_style, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, CURRENT_TIMESTAMP)
                  ON CONFLICT(id) DO UPDATE SET name=excluded.name, protocol=excluded.protocol,
                  host=excluded.host, port=excluded.port, username=excluded.username,
                  initial_path=excluded.initial_path, key_path=excluded.key_path, host_key=excluded.host_key,
-                 local_directory=excluded.local_directory, tags=excluded.tags, updated_at=CURRENT_TIMESTAMP",
+                 local_directory=excluded.local_directory, tags=excluded.tags,
+                 s3_region=excluded.s3_region, s3_endpoint=excluded.s3_endpoint,
+                 s3_force_path_style=excluded.s3_force_path_style, updated_at=CURRENT_TIMESTAMP",
                 params![bookmark.id, bookmark.name, bookmark.protocol, bookmark.host, bookmark.port,
                     bookmark.username, bookmark.initial_path, bookmark.key_path, bookmark.host_key,
-                    bookmark.local_directory, bookmark.tags],
+                    bookmark.local_directory, bookmark.tags, bookmark.s3_region, bookmark.s3_endpoint,
+                    bookmark.s3_force_path_style],
             )?;
             Ok(())
         })
@@ -374,6 +396,9 @@ mod tests {
             host_key: Some("SHA256:example".to_string()),
             local_directory: Some("/Users/alice/Sites/example".to_string()),
             tags: "production,web".to_string(),
+            s3_region: None,
+            s3_endpoint: None,
+            s3_force_path_style: false,
         }
     }
 

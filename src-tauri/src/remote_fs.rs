@@ -1,4 +1,5 @@
 use crate::ftp_client::FtpClient;
+use crate::s3_client::S3Client;
 use crate::sftp_client::{FileEntry, StandaloneSftpClient};
 use crate::webdav_client::WebDavClient;
 use anyhow::Result;
@@ -98,5 +99,33 @@ impl RemoteFileSystem for WebDavClient {
     }
     async fn disconnect(&mut self) -> Result<()> {
         WebDavClient::disconnect(self).await
+    }
+}
+
+#[async_trait]
+impl RemoteFileSystem for S3Client {
+    async fn list_dir(&mut self, path: &str) -> Result<Vec<FileEntry>> {
+        S3Client::list_dir(self, path).await
+    }
+    async fn upload_file(&mut self, local_path: &str, remote_path: &str) -> Result<u64> {
+        S3Client::upload_file(self, local_path, remote_path).await
+    }
+    async fn download_file(&mut self, remote_path: &str, local_path: &str) -> Result<u64> {
+        S3Client::download_file(self, remote_path, local_path).await
+    }
+    async fn create_dir(&mut self, path: &str) -> Result<()> {
+        S3Client::create_dir(self, path).await
+    }
+    async fn rename(&mut self, old_path: &str, new_path: &str) -> Result<()> {
+        S3Client::rename(self, old_path, new_path).await
+    }
+    async fn delete_file(&mut self, path: &str) -> Result<()> {
+        S3Client::delete_file(self, path).await
+    }
+    async fn delete_dir(&mut self, path: &str) -> Result<()> {
+        S3Client::delete_dir(self, path).await
+    }
+    async fn disconnect(&mut self) -> Result<()> {
+        S3Client::disconnect(self).await
     }
 }

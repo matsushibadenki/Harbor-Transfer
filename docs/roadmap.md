@@ -24,7 +24,9 @@
 - [Done] 同期プレビューからの安全な実行、除外パターン、競合選択、停止、実行ログを実装
 - [Done] Phase 4 の統合テスト、CI、耐障害性、アクセシビリティ、配布準備を完了
 - [Done] Phase 5 の HTTPS WebDAV アダプタ、UI統合、標準サーバー／Nextcloud統合テストを完了
-- [Next] Phase 6 として S3 の安全なオブジェクトストレージ設計とアダプタを実装
+- [Done] Phase 6 の S3 安全設計、Keychain 認証、prefix 一覧アダプタ、ストリーミング転送と接続 UI を実装
+- [Done] MinIOのS3互換テスト環境でmultipart・取消・Unicode key・1,000件超一覧を統合検証
+- [Next] S3向けフォルダアップロードを転送キューへ統合
 - [Later] rsync 互換の高度な差分同期を段階的に実装
 
 ## Phase 0 — プロジェクト基盤 [Done]
@@ -97,10 +99,16 @@
 
 **完了条件:** オブジェクトストレージ固有の制約を明示し、誤削除を避けながら閲覧・転送できる。
 
-- [Next] AWS SDK、認証情報のKeychain保存、リージョン／エンドポイント設定、バケット選択の設計を確定
-- [Later] prefixを仮想ディレクトリとして扱うS3アダプタとmultipart転送を実装
+- [Done] AWS SDK、認証情報のKeychain保存、リージョン／HTTPSエンドポイント設定、バケット指定の安全設計を確定
+- [Done] prefixを仮想ディレクトリとして扱う、ページネーション対応の読み取り専用S3アダプタを実装
+- [Done] S3 / S3互換接続を新規接続、ブックマーク、履歴、既定プロトコル、一覧UIへ統合
+- [Done] ストリーミングダウンロードと、10,000 part上限に応じてpartサイズを調整するmultipartアップロードを進捗・停止・取消可能な転送キューへ統合
+- [Done] 取消・失敗したmultipart uploadのabortと、未完了ダウンロード一時ファイルの削除を実装
+- [Done] MinIOのS3互換テスト環境をCIへ追加し、17 MiB超multipart、取消後abort、Unicode key、1,001件一覧を統合検証
+- [Next] S3向けフォルダアップロードを、不要なprefixマーカーを作らず転送キューへ統合
+- [Later] 空フォルダを表現する明示的なprefixマーカーの扱いを設定可能にする
 - [Later] rename相当のcopy＋delete、競合、安全な同期プレビューをS3向けに検証
 
 ## 次の実装単位
 
-次は S3 の認証・バケット／prefix表現・multipart転送・copy＋deleteの安全境界を設計し、まず読み取り専用の一覧アダプタから実装する。
+次は、S3向けの再帰フォルダアップロードを既存の転送キューへ統合する。通常フォルダはprefixマーカーを作らずファイルのobject keyだけで表現し、空フォルダの扱いは明示設定ができるまで勝手に0 byte objectを作らない。rename・削除・同期はcopy＋deleteの安全条件が固まるまで有効化しない。

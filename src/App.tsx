@@ -11,9 +11,9 @@ import {
   FileDown, FileUp, FolderSync, FolderUp, KeyRound, List, LoaderCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, RefreshCw, Search, Settings, Trash2, Upload,
 } from 'lucide-react';
 
-type Protocol = 'sftp' | 'ftp' | 'ftps' | 'webdav';
+type Protocol = 'sftp' | 'ftp' | 'ftps' | 'webdav' | 's3';
 type FileEntry = { name: string; size: number; modified?: string; permissions?: string; file_type: 'File' | 'Directory' | 'Symlink' };
-type Connection = { id: string; name: string; protocol: Protocol; host: string; port: number; username: string; initialPath: string; keyPath?: string; hostKey?: string; localDirectory?: string; tags: string };
+type Connection = { id: string; name: string; protocol: Protocol; host: string; port: number; username: string; initialPath: string; keyPath?: string; hostKey?: string; localDirectory?: string; tags: string; s3Region?: string; s3Endpoint?: string; s3ForcePathStyle?: boolean };
 type ConnectionHistory = { bookmarkId: string; name: string; protocol: Protocol; host: string; port: number; username: string; connectedAt: string };
 type Transfer = { id: string; name: string; direction: 'Upload' | 'Download'; status: 'Running' | 'Completed' | 'Failed' | 'Cancelled'; detail: string; localPath?: string; remotePath?: string; connectionId?: string; transferredBytes?: number; totalBytes?: number; speed?: number; etaSeconds?: number };
 type SshKey = { name: string; path: string; publicKeyPath?: string; kind: string };
@@ -64,6 +64,12 @@ const bookmarkLocalCopy = {
   ja: { title: 'ローカルディレクトリ', detail: '将来の差分同期で、この接続先と組み合わせるフォルダです。', select: 'フォルダを選択', clear: '解除', none: '選択されていません' },
   en: { title: 'Local directory', detail: 'Pair a folder with this connection for future differential sync.', select: 'Choose Folder', clear: 'Clear', none: 'Not selected' },
   'zh-CN': { title: '本地目录', detail: '为今后的差异同步将文件夹与此连接配对。', select: '选择文件夹', clear: '清除', none: '未选择' },
+} as const;
+
+const s3Copy = {
+  ja: { bucket: 'バケット', accessKey: 'Access Key ID', secretKey: 'Secret Access Key', sessionToken: 'Session Token（任意）', region: 'リージョン', endpoint: 'カスタムエンドポイント（任意・HTTPS）', pathStyle: 'パス形式のURLを使用', readOnly: 'S3は単一ファイルのアップロード／ダウンロードに対応しています。フォルダ作成、編集、削除、同期はまだ無効です。' },
+  en: { bucket: 'Bucket', accessKey: 'Access Key ID', secretKey: 'Secret Access Key', sessionToken: 'Session Token (optional)', region: 'Region', endpoint: 'Custom endpoint (optional, HTTPS)', pathStyle: 'Use path-style URLs', readOnly: 'S3 supports single-file uploads and downloads. Directory creation, editing, deletion, and sync remain disabled.' },
+  'zh-CN': { bucket: '存储桶', accessKey: 'Access Key ID', secretKey: 'Secret Access Key', sessionToken: 'Session Token（可选）', region: '区域', endpoint: '自定义端点（可选，仅HTTPS）', pathStyle: '使用路径样式 URL', readOnly: 'S3支持单文件上传和下载。创建文件夹、编辑、删除和同步仍处于禁用状态。' },
 } as const;
 
 const phaseTwoCopy = {
@@ -121,7 +127,8 @@ const syncCopy = {
 } as const;
 
 function joinPath(base: string, name: string) { return base === '/' ? `/${name}` : `${base.replace(/\/$/, '')}/${name}`; }
-function defaultPort(protocol: Protocol) { return protocol === 'sftp' ? 22 : protocol === 'webdav' ? 443 : 21; }
+function defaultPort(protocol: Protocol) { return protocol === 'sftp' ? 22 : protocol === 'webdav' || protocol === 's3' ? 443 : 21; }
+function connectionTargetChanged(left: Connection, right: Connection) { return left.protocol !== right.protocol || left.host !== right.host || left.port !== right.port || left.username !== right.username || left.s3Region !== right.s3Region || left.s3Endpoint !== right.s3Endpoint || Boolean(left.s3ForcePathStyle) !== Boolean(right.s3ForcePathStyle); }
 function parentPath(path: string) { const parts = path.split('/').filter(Boolean); parts.pop(); return `/${parts.join('/')}` || '/'; }
 function formatBytes(bytes: number) { if (!bytes) return '—'; const units = ['B', 'KB', 'MB', 'GB']; const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), 3); return `${(bytes / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`; }
 function formatDuration(seconds?: number) { if (seconds === undefined || !Number.isFinite(seconds)) return '—'; if (seconds < 60) return `${Math.ceil(seconds)}s`; return `${Math.floor(seconds / 60)}m ${Math.ceil(seconds % 60)}s`; }
@@ -140,12 +147,12 @@ function parseBookmarkExport(raw: string): Connection[] | null {
       const port = bookmark.port;
       const requiredStrings = ['id', 'name', 'host', 'username', 'initialPath', 'tags'] as const;
       if (!requiredStrings.every((key) => typeof bookmark[key] === 'string' && (bookmark[key] as string).length <= 4096)) return null;
-      if (!(protocol === 'sftp' || protocol === 'ftp' || protocol === 'ftps' || protocol === 'webdav') || !Number.isInteger(port) || (port as number) < 1 || (port as number) > 65535) return null;
+      if (!(protocol === 'sftp' || protocol === 'ftp' || protocol === 'ftps' || protocol === 'webdav' || protocol === 's3') || !Number.isInteger(port) || (port as number) < 1 || (port as number) > 65535) return null;
       if (!(bookmark.keyPath === undefined || (typeof bookmark.keyPath === 'string' && bookmark.keyPath.length <= 4096)) || !(bookmark.hostKey === undefined || (typeof bookmark.hostKey === 'string' && bookmark.hostKey.length <= 4096)) || !(bookmark.localDirectory === undefined || (typeof bookmark.localDirectory === 'string' && bookmark.localDirectory.length <= 4096))) return null;
       const id = (bookmark.id as string).trim();
       const host = (bookmark.host as string).trim();
       const username = (bookmark.username as string).trim();
-      if (!id || !host || !username) return null;
+      if (!id || !host || (protocol !== 's3' && !username)) return null;
       imported.set(id, {
         id,
         name: (bookmark.name as string).trim() || host,
@@ -158,6 +165,9 @@ function parseBookmarkExport(raw: string): Connection[] | null {
         hostKey: typeof bookmark.hostKey === 'string' && bookmark.hostKey ? bookmark.hostKey : undefined,
         localDirectory: typeof bookmark.localDirectory === 'string' && bookmark.localDirectory ? bookmark.localDirectory : undefined,
         tags: bookmark.tags as string,
+        s3Region: typeof bookmark.s3Region === 'string' ? bookmark.s3Region : undefined,
+        s3Endpoint: typeof bookmark.s3Endpoint === 'string' ? bookmark.s3Endpoint : undefined,
+        s3ForcePathStyle: bookmark.s3ForcePathStyle === true,
       });
     }
     return [...imported.values()];
@@ -542,7 +552,7 @@ export default function App() {
       if (!imported) { setError(t.invalidBookmarkFile); return; }
       const prepared = imported.map((bookmark) => {
         const existing = connections.find((connection) => connection.id === bookmark.id);
-        const targetChanged = existing && (existing.protocol !== bookmark.protocol || existing.host !== bookmark.host || existing.port !== bookmark.port || existing.username !== bookmark.username);
+        const targetChanged = existing && connectionTargetChanged(existing, bookmark);
         return targetChanged ? { ...bookmark, id: crypto.randomUUID() } : bookmark;
       });
       for (const bookmark of prepared) await invoke('bookmark_save', { bookmark });
@@ -553,7 +563,7 @@ export default function App() {
         if (!current) return current;
         const updated = saved.find((bookmark) => bookmark.id === current.id);
         if (!updated) return current;
-        const targetChanged = current.protocol !== updated.protocol || current.host !== updated.host || current.port !== updated.port || current.username !== updated.username;
+        const targetChanged = connectionTargetChanged(current, updated);
         return targetChanged ? null : { ...current, name: updated.name, initialPath: updated.initialPath, keyPath: updated.keyPath, localDirectory: updated.localDirectory, tags: updated.tags };
       });
       setNotice(t.bookmarksImported.replace('{{count}}', String(imported.length)));
@@ -950,7 +960,7 @@ export default function App() {
               <button className={viewMode === 'columns' ? 'active' : ''} aria-label={viewsText.columns} title={viewsText.columns} aria-pressed={viewMode === 'columns'} onClick={() => selectViewMode('columns')}><Columns3 size={16}/></button>
             </div>
             <div className="browser-toolbar-spacer" />
-            <button onClick={() => void openSyncPreview()}><FolderSync size={17}/>{syncText.button}</button><button onClick={createDirectory}><FolderPlus size={17}/>{t.newFolder}</button><button onClick={() => void uploadDirectory()}><FolderUp size={16}/>{t.uploadFolder}</button><button className="primary" onClick={() => void uploadFiles()}><Upload size={16}/>{t.upload}</button>
+            <button disabled={active.protocol === 's3'} title={active.protocol === 's3' ? s3Copy[language].readOnly : undefined} onClick={() => void openSyncPreview()}><FolderSync size={17}/>{syncText.button}</button><button disabled={active.protocol === 's3'} title={active.protocol === 's3' ? s3Copy[language].readOnly : undefined} onClick={createDirectory}><FolderPlus size={17}/>{t.newFolder}</button><button disabled={active.protocol === 's3'} title={active.protocol === 's3' ? s3Copy[language].readOnly : undefined} onClick={() => void uploadDirectory()}><FolderUp size={16}/>{t.uploadFolder}</button><button className="primary" onClick={() => void uploadFiles()}><Upload size={16}/>{t.upload}</button>
           </div>
           <div className="path-toolbar">
             <button aria-label={accessibilityCopy[language].back} title={accessibilityCopy[language].back} disabled={directoryHistoryIndex <= 0} onClick={() => void navigateDirectoryHistory(-1)}><ChevronLeft size={18}/></button><button aria-label={accessibilityCopy[language].forward} title={accessibilityCopy[language].forward} disabled={directoryHistoryIndex < 0 || directoryHistoryIndex >= directoryHistory.length - 1} onClick={() => void navigateDirectoryHistory(1)}><ChevronRight size={18}/></button>
@@ -967,18 +977,18 @@ export default function App() {
               <ResizableColumnHeader label={t.modified} column="modified" width={columnWidths.modified} resizeLabel={columnsText.resize} onStart={startColumnResize} onAdjust={adjustColumnWidth}/>
               <ResizableColumnHeader label={columnsText.permissions} column="permissions" width={columnWidths.permissions} resizeLabel={columnsText.resize} onStart={startColumnResize} onAdjust={adjustColumnWidth}/><span />
             </div>
-            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`file-row interactive ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="row" aria-selected={selected} tabIndex={0} draggable={entry.file_type !== 'Symlink'} onClick={() => scheduleRemoteDragPreparation(entry)} onKeyDown={(event) => { if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(entry); } if (event.key === 'Enter') { entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); } }} onDragStart={(event) => startRemoteDrag(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }}>
-              <span className="file-name">{entry.file_type === 'Directory' ? <Folder fill="currentColor" size={18}/> : <Cloud size={18}/>} {entry.name}</span><span>{entry.file_type === 'Directory' ? '—' : formatBytes(entry.size)}</span><span>{entry.modified ?? '—'}</span><span className="permissions-cell">{entry.permissions ?? '—'}</span><button aria-label={accessibilityCopy[language].more} onClick={(event) => { event.stopPropagation(); void manageEntry(entry); }}><MoreHorizontal size={18}/></button>
+            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; const mutationsAvailable = active.protocol !== 's3'; return <div className={`file-row interactive ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="row" aria-selected={selected} tabIndex={0} draggable={entry.file_type !== 'Symlink'} onClick={() => scheduleRemoteDragPreparation(entry)} onKeyDown={(event) => { if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(entry); } if (event.key === 'Enter') { entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); } }} onDragStart={(event) => startRemoteDrag(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }}>
+              <span className="file-name">{entry.file_type === 'Directory' ? <Folder fill="currentColor" size={18}/> : <Cloud size={18}/>} {entry.name}</span><span>{entry.file_type === 'Directory' ? '—' : formatBytes(entry.size)}</span><span>{entry.modified ?? '—'}</span><span className="permissions-cell">{entry.permissions ?? '—'}</span>{mutationsAvailable ? <button aria-label={accessibilityCopy[language].more} onClick={(event) => { event.stopPropagation(); void manageEntry(entry); }}><MoreHorizontal size={18}/></button> : <span/>}
             </div>; })}
           </div>}
           {viewMode === 'icons' && <div className="icon-grid" role="grid">
             {filteredEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
-            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`icon-entry ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} role="gridcell" key={entry.name} draggable={entry.file_type !== 'Symlink'} onDragStart={(event) => startRemoteDrag(event, entry)}>
+            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; const mutationsAvailable = active.protocol !== 's3'; return <div className={`icon-entry ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} role="gridcell" key={entry.name} draggable={entry.file_type !== 'Symlink'} onDragStart={(event) => startRemoteDrag(event, entry)}>
               <button className="icon-entry-main" title={entry.name} onClick={() => scheduleRemoteDragPreparation(entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }} onKeyDown={(event) => { if (event.key !== 'Enter') return; entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }}>
                 {entry.file_type === 'Directory' ? <Folder className="entry-art folder-art" fill="currentColor" size={46}/> : <File className="entry-art" size={44}/>}
                 <strong>{entry.name}</strong><small>{entry.file_type === 'Directory' ? entry.permissions ?? '—' : formatBytes(entry.size)}</small>
               </button>
-              <button className="icon-entry-more" aria-label={accessibilityCopy[language].more} onClick={(event) => { event.stopPropagation(); void manageEntry(entry); }}><MoreHorizontal size={16}/></button>
+              {mutationsAvailable && <button className="icon-entry-more" aria-label={accessibilityCopy[language].more} onClick={(event) => { event.stopPropagation(); void manageEntry(entry); }}><MoreHorizontal size={16}/></button>}
             </div>; })}
           </div>}
           {viewMode === 'columns' && <div className="column-browser" role="listbox" aria-label={viewsText.columns}>
@@ -987,11 +997,11 @@ export default function App() {
               return <section className="directory-column" key={`${level.path}-${levelIndex}`} aria-label={level.path}>
                 <div className="directory-column-title" title={level.path}>{level.path}</div>
                 {visibleLevelEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
-                {visibleLevelEntries.map((entry) => { const remotePath = joinPath(level.path, entry.name); const selectedForDrag = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`column-entry ${level.selectedName === entry.name || selectedForDrag ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="option" aria-selected={level.selectedName === entry.name || selectedForDrag} draggable={entry.file_type !== 'Symlink'} onDragStart={(event) => startRemoteDrag(event, entry, level.path)}>
+                {visibleLevelEntries.map((entry) => { const remotePath = joinPath(level.path, entry.name); const selectedForDrag = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; const mutationsAvailable = active.protocol !== 's3'; return <div className={`column-entry ${level.selectedName === entry.name || selectedForDrag ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="option" aria-selected={level.selectedName === entry.name || selectedForDrag} draggable={entry.file_type !== 'Symlink'} onDragStart={(event) => startRemoteDrag(event, entry, level.path)}>
                   <button className="column-entry-main" title={entry.name} onClick={(event) => { if (event.detail <= 1) { cancelScheduledDragPreparation(); setSelectedRemoteFile({ connectionId: active.id, remotePath }); void openColumnEntry(levelIndex, entry); } }} onDoubleClick={() => { cancelScheduledDragPreparation(); if (entry.file_type !== 'Directory') void downloadFile(entry, level.path); }}>
                     {entry.file_type === 'Directory' ? <Folder fill="currentColor" size={17}/> : <File size={16}/>}<span>{entry.name}</span>{entry.file_type === 'Directory' ? <ChevronRight size={14}/> : <small>{formatBytes(entry.size)}</small>}
                   </button>
-                  <button className="column-entry-more" aria-label={accessibilityCopy[language].more} onClick={(event) => { event.stopPropagation(); void manageEntry(entry, level.path); }}><MoreHorizontal size={15}/></button>
+                  {mutationsAvailable && <button className="column-entry-more" aria-label={accessibilityCopy[language].more} onClick={(event) => { event.stopPropagation(); void manageEntry(entry, level.path); }}><MoreHorizontal size={15}/></button>}
                 </div>; })}
               </section>;
             })}
@@ -1022,11 +1032,11 @@ export default function App() {
         </div>)}
       </div>
     </section>
-    {showConnect && <ConnectSheet mode={connectSheetMode} bookmark={connectingBookmark} initialKeyPath={selectedKeyPath} defaultProtocol={preferences.defaultProtocol} t={t} phaseCopy={p1} localCopy={bookmarkLocalText} onClose={() => setShowConnect(false)} onSaved={(connection) => {
+    {showConnect && <ConnectSheet mode={connectSheetMode} bookmark={connectingBookmark} initialKeyPath={selectedKeyPath} defaultProtocol={preferences.defaultProtocol} t={t} phaseCopy={p1} localCopy={bookmarkLocalText} s3Text={s3Copy[language]} onClose={() => setShowConnect(false)} onSaved={(connection) => {
       setConnections((current) => [connection, ...current.filter((item) => item.id !== connection.id)]);
       setActive((current) => {
         if (current?.id !== connection.id) return current;
-        const targetChanged = current.protocol !== connection.protocol || current.host !== connection.host || current.port !== connection.port || current.username !== connection.username;
+        const targetChanged = connectionTargetChanged(current, connection);
         return targetChanged ? null : { ...current, name: connection.name, initialPath: connection.initialPath, keyPath: connection.keyPath, localDirectory: connection.localDirectory, tags: connection.tags };
       });
       setNotice(t.bookmarkSaved);
@@ -1056,7 +1066,7 @@ function SyncPreviewSheet({ preview, localDirectory, remoteDirectory, direction,
   </section></div>;
 }
 
-function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phaseCopy, localCopy, onClose, onSaved, onConnected }: { mode: 'connect' | 'edit'; bookmark: Connection | null; initialKeyPath: string; defaultProtocol: Protocol; t: typeof copy[keyof typeof copy]; phaseCopy: typeof phaseOneCopy[keyof typeof phaseOneCopy]; localCopy: typeof bookmarkLocalCopy[keyof typeof bookmarkLocalCopy]; onClose: () => void; onSaved: (connection: Connection) => void; onConnected: (connection: Connection) => void }) {
+function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phaseCopy, localCopy, s3Text, onClose, onSaved, onConnected }: { mode: 'connect' | 'edit'; bookmark: Connection | null; initialKeyPath: string; defaultProtocol: Protocol; t: typeof copy[keyof typeof copy]; phaseCopy: typeof phaseOneCopy[keyof typeof phaseOneCopy]; localCopy: typeof bookmarkLocalCopy[keyof typeof bookmarkLocalCopy]; s3Text: typeof s3Copy[keyof typeof s3Copy]; onClose: () => void; onSaved: (connection: Connection) => void; onConnected: (connection: Connection) => void }) {
   const [bookmarkName, setBookmarkName] = useState(bookmark?.name ?? '');
   const [protocol, setProtocol] = useState<Protocol>(bookmark?.protocol ?? defaultProtocol);
   const [host, setHost] = useState(bookmark?.host ?? '');
@@ -1064,6 +1074,10 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phas
   const [initialDirectory, setInitialDirectory] = useState(bookmark?.initialPath ?? '/');
   const [username, setUsername] = useState(bookmark?.username ?? '');
   const [password, setPassword] = useState('');
+  const [s3SessionToken, setS3SessionToken] = useState('');
+  const [s3Region, setS3Region] = useState(bookmark?.s3Region ?? 'ap-northeast-1');
+  const [s3Endpoint, setS3Endpoint] = useState(bookmark?.s3Endpoint ?? '');
+  const [s3ForcePathStyle, setS3ForcePathStyle] = useState(bookmark?.s3ForcePathStyle ?? false);
   const [keyPath, setKeyPath] = useState(initialKeyPath || bookmark?.keyPath || '');
   const [tags, setTags] = useState(bookmark?.tags ?? '');
   const [localDirectory, setLocalDirectory] = useState(bookmark?.localDirectory ?? '');
@@ -1074,7 +1088,7 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phas
     const selected = await open({ multiple: false, directory: true });
     if (selected && !Array.isArray(selected)) setLocalDirectory(selected);
   }
-  useEffect(() => { if (bookmark) void invoke<string | null>('credential_load', { bookmarkId: bookmark.id }).then((saved) => { if (saved) setPassword(saved); }).catch(() => undefined); }, [bookmark]);
+  useEffect(() => { if (bookmark) void invoke<string | null>('credential_load', { bookmarkId: bookmark.id }).then((saved) => { if (!saved) return; if (bookmark.protocol === 's3') { try { const value = JSON.parse(saved) as { accessKeyId?: string; secretAccessKey?: string; sessionToken?: string }; setUsername(value.accessKeyId ?? ''); setPassword(value.secretAccessKey ?? ''); setS3SessionToken(value.sessionToken ?? ''); } catch { setUsername(''); setPassword(''); } } else setPassword(saved); }).catch(() => undefined); }, [bookmark]);
   async function submit(event: React.FormEvent) {
     event.preventDefault(); setBusy(true); setError('');
     try {
@@ -1085,15 +1099,16 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phas
         if (bookmark?.hostKey && endpointUnchanged && bookmark.hostKey !== hostKey) { setError(t.hostKeyChanged); return; }
         if (hostKey && (!bookmark?.hostKey || !endpointUnchanged) && !window.confirm(t.trustHostKey.replace('{{fingerprint}}', hostKey))) return;
       }
-      const connection: Connection = { id: bookmark?.id ?? crypto.randomUUID(), name: bookmarkName.trim() || host, protocol, host, port, username, initialPath: initialDirectory.trim() || '/', keyPath: keyPath || undefined, hostKey, localDirectory: localDirectory || undefined, tags };
+      const connection: Connection = { id: bookmark?.id ?? crypto.randomUUID(), name: bookmarkName.trim() || host, protocol, host, port, username: protocol === 's3' ? '' : username, initialPath: initialDirectory.trim() || '/', keyPath: keyPath || undefined, hostKey, localDirectory: localDirectory || undefined, tags, s3Region: protocol === 's3' ? s3Region.trim() : undefined, s3Endpoint: protocol === 's3' && s3Endpoint.trim() ? s3Endpoint.trim() : undefined, s3ForcePathStyle: protocol === 's3' && s3ForcePathStyle };
+      const storedCredential = protocol === 's3' ? JSON.stringify({ accessKeyId: username, secretAccessKey: password, sessionToken: s3SessionToken || undefined }) : password;
       if (mode === 'edit') {
-        if (password) await invoke('credential_save', { bookmarkId: connection.id, password });
+        if (password) await invoke('credential_save', { bookmarkId: connection.id, password: storedCredential });
         await invoke('bookmark_save', { bookmark: connection });
         onSaved(connection);
         return;
       }
-      await invoke('connection_connect', { request: { connectionId: connection.id, protocol, host, port, username, password: password || null, keyPath: keyPath || null, passphrase: null, expectedHostKey: hostKey ?? null, initialPath: connection.initialPath } });
-      if (password) await invoke('credential_save', { bookmarkId: connection.id, password });
+      await invoke('connection_connect', { request: { connectionId: connection.id, protocol, host, port, username, password: password || null, keyPath: keyPath || null, passphrase: null, expectedHostKey: hostKey ?? null, initialPath: connection.initialPath, s3Region: connection.s3Region ?? null, s3Endpoint: connection.s3Endpoint ?? null, s3SessionToken: s3SessionToken || null, s3ForcePathStyle: connection.s3ForcePathStyle ?? false } });
+      if (password) await invoke('credential_save', { bookmarkId: connection.id, password: storedCredential });
       onConnected(connection);
     } catch (reason) { setError(String(reason)); }
     finally { setBusy(false); }
@@ -1102,11 +1117,13 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phas
     <div className="sheet-title"><div><h2>{mode === 'edit' ? t.editBookmarkTitle : t.connectTitle}</h2><p>{mode === 'edit' ? t.editBookmark : t.connect}</p></div><button type="button" onClick={onClose}>×</button></div>
     <div className="bookmark-sheet-scroll">
       <label>{t.bookmarkName}<input required value={bookmarkName} onChange={(event) => setBookmarkName(event.target.value)} placeholder={t.bookmarkNameHint}/></label>
-      <label>{t.protocol}<select value={protocol} onChange={(event) => updateProtocol(event.target.value as Protocol)}><option value="sftp">SFTP</option><option value="ftp">FTP</option><option value="ftps">Explicit FTPS</option><option value="webdav">WebDAV (HTTPS)</option></select></label>
-      <div className="form-grid"><label>{t.host}<input required value={host} onChange={(event) => setHost(event.target.value)} placeholder="example.com"/></label><label>{t.port}<input required type="number" value={port} onChange={(event) => setPort(Number(event.target.value))}/></label></div>
+      <label>{t.protocol}<select value={protocol} onChange={(event) => updateProtocol(event.target.value as Protocol)}><option value="sftp">SFTP</option><option value="ftp">FTP</option><option value="ftps">Explicit FTPS</option><option value="webdav">WebDAV (HTTPS)</option><option value="s3">Amazon S3 / S3-compatible (read-only)</option></select></label>
+      <div className="form-grid"><label>{protocol === 's3' ? s3Text.bucket : t.host}<input required value={host} onChange={(event) => setHost(event.target.value)} placeholder={protocol === 's3' ? 'example-bucket' : 'example.com'}/></label>{protocol !== 's3' && <label>{t.port}<input required type="number" value={port} onChange={(event) => setPort(Number(event.target.value))}/></label>}</div>
       {protocol === 'webdav' && <p className="protocol-security-hint">{phaseCopy.webdavHint}</p>}
       <label>{t.initialDirectory}<input required value={initialDirectory} onChange={(event) => setInitialDirectory(event.target.value)} placeholder={t.initialDirectoryHint}/></label>
-      <label>{t.user}<input required value={username} onChange={(event) => setUsername(event.target.value)}/></label><label>{t.password}<input required={protocol === 'webdav'} type="password" value={password} onChange={(event) => setPassword(event.target.value)}/></label>
+      {protocol === 's3' && <><p className="protocol-security-hint">{s3Text.readOnly}</p><div className="form-grid"><label>{s3Text.region}<input required value={s3Region} onChange={(event) => setS3Region(event.target.value)} placeholder="ap-northeast-1"/></label><label>{s3Text.endpoint}<input type="url" value={s3Endpoint} onChange={(event) => setS3Endpoint(event.target.value)} placeholder="https://s3.example.com"/></label></div></>}
+      <label>{protocol === 's3' ? s3Text.accessKey : t.user}<input required value={username} onChange={(event) => setUsername(event.target.value)}/></label><label>{protocol === 's3' ? s3Text.secretKey : t.password}<input required={protocol === 'webdav' || protocol === 's3'} type="password" value={password} onChange={(event) => setPassword(event.target.value)}/></label>
+      {protocol === 's3' && <><label>{s3Text.sessionToken}<input type="password" value={s3SessionToken} onChange={(event) => setS3SessionToken(event.target.value)}/></label><label className="check-row"><input type="checkbox" checked={s3ForcePathStyle} onChange={(event) => setS3ForcePathStyle(event.target.checked)}/><span>{s3Text.pathStyle}</span></label></>}
       {protocol === 'sftp' && <label>{t.key}<input value={keyPath} onChange={(event) => setKeyPath(event.target.value)} placeholder="~/.ssh/id_ed25519"/></label>}
       <label>{phaseCopy.tags}<input value={tags} onChange={(event) => setTags(event.target.value)} placeholder={phaseCopy.tagHint}/></label>
       <section className="bookmark-local-directory-section">
@@ -1131,7 +1148,7 @@ function PreferencesSheet({ value, language, t, onClose, onSave }: { value: Pref
     <div className="preferences-sheet-scroll">
       <fieldset><legend>{text.general}</legend>
         <label>{text.language}<select value={draft.language} onChange={(event) => setDraft((current) => ({ ...current, language: event.target.value as Language }))}><option value="ja">日本語</option><option value="en">English</option><option value="zh-CN">简体中文</option></select></label>
-        <label>{text.defaultProtocol}<select value={draft.defaultProtocol} onChange={(event) => setDraft((current) => ({ ...current, defaultProtocol: event.target.value as Protocol }))}><option value="sftp">SFTP</option><option value="ftp">FTP</option><option value="ftps">Explicit FTPS</option><option value="webdav">WebDAV (HTTPS)</option></select></label>
+        <label>{text.defaultProtocol}<select value={draft.defaultProtocol} onChange={(event) => setDraft((current) => ({ ...current, defaultProtocol: event.target.value as Protocol }))}><option value="sftp">SFTP</option><option value="ftp">FTP</option><option value="ftps">Explicit FTPS</option><option value="webdav">WebDAV (HTTPS)</option><option value="s3">Amazon S3 / S3-compatible</option></select></label>
       </fieldset>
       <fieldset><legend>{text.appearance}</legend><label>{text.theme}<select value={draft.theme} onChange={(event) => setDraft((current) => ({ ...current, theme: event.target.value as Preferences['theme'] }))}><option value="system">{text.system}</option><option value="light">{text.light}</option><option value="dark">{text.dark}</option></select></label></fieldset>
       <fieldset><legend>{text.editor}</legend><p className="preferences-field-detail">{text.editorDetail}</p><div className="editor-picker"><input readOnly value={draft.editorPath} placeholder={text.noEditor}/><button type="button" onClick={() => void selectEditor()}>{text.chooseEditor}</button>{draft.editorPath && <button type="button" onClick={() => setDraft((current) => ({ ...current, editorPath: '' }))}>{text.clearEditor}</button>}</div></fieldset>

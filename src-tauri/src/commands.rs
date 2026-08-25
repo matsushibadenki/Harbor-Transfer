@@ -1,6 +1,7 @@
 use crate::bookmarks::{Bookmark, BookmarkStore, ConnectionHistory, SyncHistory, TransferHistory};
 use crate::ftp_client::{FtpClient, FtpConfig};
 use crate::remote_fs::RemoteFileSystem;
+use crate::s3_client::{S3Client, S3Config};
 use crate::sftp_client::{FileEntry, SftpAuthMethod, SftpConfig, StandaloneSftpClient};
 use crate::ssh;
 use crate::sync::{filter_snapshot, plan_sync, SnapshotEntry, SyncAction, SyncDirection, SyncPreview};
@@ -79,13 +80,14 @@ impl TransferControl {
         }
     }
     async fn wait_until_running(&self) -> Result<(), String> {
-        while self.paused.load(Ordering::Acquire) {
+        loop {
+            if self.cancelled.load(Ordering::Acquire) {
+                return Err("Transfer cancelled.".to_string());
+            }
+            if !self.paused.load(Ordering::Acquire) {
+                return Ok(());
+            }
             self.resumed.notified().await;
-        }
-        if self.cancelled.load(Ordering::Acquire) {
-            Err("Transfer cancelled.".to_string())
-        } else {
-            Ok(())
         }
     }
 }
@@ -94,6 +96,7 @@ enum RemoteConnection {
     Sftp(StandaloneSftpClient),
     Ftp { client: FtpClient, protocol: Protocol },
     WebDav(WebDavClient),
+    S3(S3Client),
 }
 
 impl RemoteConnection {
@@ -102,6 +105,7 @@ impl RemoteConnection {
             Self::Sftp(client) => client,
             Self::Ftp { client, .. } => client,
             Self::WebDav(client) => client,
+            Self::S3(client) => client,
         }
     }
 
@@ -110,11 +114,13 @@ impl RemoteConnection {
             Self::Sftp(_) => Protocol::Sftp,
             Self::Ftp { protocol, .. } => *protocol,
             Self::WebDav(_) => Protocol::Webdav,
+            Self::S3(_) => Protocol::S3,
         }
     }
 }
 
-#[derive(Debug, Deserialize)]
+// Do not derive `Debug`: the request carries passwords and S3 credentials.
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectRequest {
     pub connection_id: String,
@@ -127,6 +133,11 @@ pub struct ConnectRequest {
     pub passphrase: Option<String>,
     pub expected_host_key: Option<String>,
     pub initial_path: Option<String>,
+    pub s3_region: Option<String>,
+    pub s3_endpoint: Option<String>,
+    pub s3_session_token: Option<String>,
+    #[serde(default)]
+    pub s3_force_path_style: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy)]
@@ -136,6 +147,7 @@ pub enum Protocol {
     Ftp,
     Ftps,
     Webdav,
+    S3,
 }
 
 #[derive(Debug, Serialize)]
@@ -959,6 +971,20 @@ pub async fn connection_connect(
             .await
             .map_err(|error| error.to_string())?,
         ),
+        Protocol::S3 => RemoteConnection::S3(
+            S3Client::connect(&S3Config {
+                region: request.s3_region.ok_or("An S3 region is required.")?,
+                bucket: request.host,
+                endpoint: request.s3_endpoint.filter(|value| !value.trim().is_empty()),
+                access_key_id: request.username,
+                secret_access_key: request.password.ok_or("An S3 Secret Access Key is required.")?,
+                session_token: request.s3_session_token.filter(|value| !value.trim().is_empty()),
+                force_path_style: request.s3_force_path_style,
+                probe_path: request.initial_path.unwrap_or_else(|| "/".to_string()),
+            })
+            .await
+            .map_err(|error| error.to_string())?,
+        ),
     };
 
     state.connections.lock().await.insert(request.connection_id.clone(), connection);
@@ -1345,6 +1371,31 @@ pub async fn transfer_upload(
         RemoteConnection::WebDav(client) => {
             client.upload_file(&request.local_path, &request.remote_path).await
         }
+        RemoteConnection::S3(client) => {
+            let event_app = app.clone();
+            let event_id = transfer_id.clone();
+            client
+                .upload_file_with_progress(&request.local_path, &request.remote_path, move |done, total| {
+                    let event_app = event_app.clone();
+                    let event_id = event_id.clone();
+                    let control = control.clone();
+                    async move {
+                        control.wait_until_running().await.map_err(anyhow::Error::msg)?;
+                        let _ = event_app.emit(
+                            "transfer://file-progress",
+                            FileTransferProgress {
+                                transfer_id: event_id,
+                                transferred_bytes: done,
+                                total_bytes: total,
+                                elapsed_ms: started.elapsed().as_millis() as u64,
+                                status: "running".to_string(),
+                            },
+                        );
+                        Ok(())
+                    }
+                })
+                .await
+        }
     };
     drop(connections);
     state.transfer_controls.lock().await.remove(&transfer_id);
@@ -1404,6 +1455,31 @@ pub async fn transfer_download(
         }
         RemoteConnection::WebDav(client) => {
             client.download_file(&request.remote_path, &request.local_path).await
+        }
+        RemoteConnection::S3(client) => {
+            let event_app = app.clone();
+            let event_id = transfer_id.clone();
+            client
+                .download_file_with_progress(&request.remote_path, &request.local_path, move |done, total| {
+                    let event_app = event_app.clone();
+                    let event_id = event_id.clone();
+                    let control = control.clone();
+                    async move {
+                        control.wait_until_running().await.map_err(anyhow::Error::msg)?;
+                        let _ = event_app.emit(
+                            "transfer://file-progress",
+                            FileTransferProgress {
+                                transfer_id: event_id,
+                                transferred_bytes: done,
+                                total_bytes: total,
+                                elapsed_ms: started.elapsed().as_millis() as u64,
+                                status: "running".to_string(),
+                            },
+                        );
+                        Ok(())
+                    }
+                })
+                .await
         }
     };
     drop(connections);
@@ -1493,7 +1569,9 @@ pub async fn transfer_upload_directory(
 
 #[cfg(test)]
 mod tests {
-    use super::{content_hash, reject_symlink_ancestors, safe_relative_path};
+    use super::{content_hash, reject_symlink_ancestors, safe_relative_path, TransferControl};
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
 
     #[test]
     fn editing_cache_hash_changes_with_file_contents() {
@@ -1503,6 +1581,22 @@ mod tests {
         let before = content_hash(&file).expect("initial hash");
         std::fs::write(&file, b"after").expect("edited cache");
         assert_ne!(before, content_hash(&file).expect("edited hash"));
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_paused_transfer_unblocks_the_waiter() {
+        let control = Arc::new(TransferControl::new());
+        control.paused.store(true, Ordering::Release);
+        let waiter_control = control.clone();
+        let waiter = tokio::spawn(async move { waiter_control.wait_until_running().await });
+        tokio::task::yield_now().await;
+        control.cancelled.store(true, Ordering::Release);
+        control.resumed.notify_waiters();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("cancelled wait should finish")
+            .expect("wait task should not panic");
+        assert_eq!(result.unwrap_err(), "Transfer cancelled.");
     }
 
     #[test]
