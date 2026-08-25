@@ -22,7 +22,7 @@ type FileProgress = { transferId: string; transferredBytes: number; totalBytes: 
 type LocalPathInfo = { name: string; isDirectory: boolean };
 type TransferHistory = { id: string; name: string; direction: 'Upload' | 'Download'; status: 'Completed' | 'Failed' | 'Cancelled'; detail: string; bytes: number; completedAt: string };
 type Language = 'ja' | 'en' | 'zh-CN';
-type Preferences = { language: Language; defaultProtocol: Protocol; conflictPolicy: 'ask' | 'overwrite' | 'skip'; confirmDelete: boolean; transferNotifications: boolean; editorPath: string };
+type Preferences = { language: Language; theme: 'system' | 'light' | 'dark'; defaultProtocol: Protocol; conflictPolicy: 'ask' | 'overwrite' | 'skip'; confirmDelete: boolean; transferNotifications: boolean; editorPath: string };
 type RemoteEdit = { editId: string; connectionId: string; name: string; remotePath: string; status: 'watching' | 'waiting' | 'failed'; detail?: string };
 type RemoteEditOpenResult = { editId: string; name: string; remotePath: string };
 type RemoteEditPollResult = { editId: string; remotePath: string; status: 'clean' | 'waiting' | 'uploaded'; bytes: number };
@@ -42,7 +42,7 @@ type SyncExecutionProgress = { syncId: string; completedItems: number; totalItem
 type SyncHistory = { id: string; direction: SyncDirection; localDirectory: string; remoteDirectory: string; status: string; completedItems: number; totalItems: number; bytes: number; detail: string; completedAt: string };
 type BookmarkExportFile = { format: 'harbor-transfer-bookmarks'; version: 1; exportedAt: string; bookmarks: Connection[] };
 
-const defaultPreferences: Preferences = { language: 'ja', defaultProtocol: 'sftp', conflictPolicy: 'ask', confirmDelete: true, transferNotifications: true, editorPath: '' };
+const defaultPreferences: Preferences = { language: 'ja', theme: 'system', defaultProtocol: 'sftp', conflictPolicy: 'ask', confirmDelete: true, transferNotifications: true, editorPath: '' };
 function loadPreferences(): Preferences { try { return { ...defaultPreferences, ...JSON.parse(localStorage.getItem('harbor-transfer.preferences') ?? '{}') }; } catch { return defaultPreferences; } }
 const minimumColumnWidths: ColumnWidths = { name: 160, size: 76, modified: 150, permissions: 104 };
 const defaultColumnWidths: ColumnWidths = { name: 320, size: 76, modified: 150, permissions: 104 };
@@ -73,9 +73,15 @@ const phaseTwoCopy = {
 } as const;
 
 const preferencesCopy = {
-  ja: { title: '環境設定', detail: 'すべての接続に適用する共通設定です。', general: '一般', transfers: '転送', security: '安全性', editor: 'リモートファイルエディタ', editorDetail: 'キャッシュを開くアプリケーションです。保存を検知すると、同名のリモートファイルを自動的に上書きします。', chooseEditor: 'エディタを選択', clearEditor: '解除', noEditor: '選択されていません', language: '表示言語', defaultProtocol: '新規接続の既定プロトコル', conflictPolicy: '同名ファイルの既定動作', ask: '毎回確認', overwrite: '上書き', skip: 'スキップ', confirmDelete: '削除前に確認する', notifications: '転送結果を画面内に通知する', save: '保存' },
-  en: { title: 'Preferences', detail: 'These settings apply to every connection.', general: 'General', transfers: 'Transfers', security: 'Safety', editor: 'Remote File Editor', editorDetail: 'This application opens cached copies. Saving automatically overwrites the file at the same remote path.', chooseEditor: 'Choose Editor', clearEditor: 'Clear', noEditor: 'Not selected', language: 'Display language', defaultProtocol: 'Default protocol for new connections', conflictPolicy: 'Default duplicate-file action', ask: 'Ask every time', overwrite: 'Overwrite', skip: 'Skip', confirmDelete: 'Confirm before deleting', notifications: 'Show in-app transfer notifications', save: 'Save' },
-  'zh-CN': { title: '偏好设置', detail: '这些设置适用于所有连接。', general: '通用', transfers: '传输', security: '安全性', editor: '远程文件编辑器', editorDetail: '此应用用于打开缓存副本。保存后会自动覆盖同一路径下的远程文件。', chooseEditor: '选择编辑器', clearEditor: '清除', noEditor: '未选择', language: '显示语言', defaultProtocol: '新连接的默认协议', conflictPolicy: '同名文件的默认操作', ask: '每次询问', overwrite: '覆盖', skip: '跳过', confirmDelete: '删除前确认', notifications: '在应用内显示传输结果通知', save: '保存' },
+  ja: { title: '環境設定', detail: 'すべての接続に適用する共通設定です。', general: '一般', appearance: '外観', theme: 'カラーテーマ', system: 'システム設定', light: 'ライト', dark: 'ダーク', transfers: '転送', security: '安全性', editor: 'リモートファイルエディタ', editorDetail: 'キャッシュを開くアプリケーションです。保存を検知すると、同名のリモートファイルを自動的に上書きします。', chooseEditor: 'エディタを選択', clearEditor: '解除', noEditor: '選択されていません', language: '表示言語', defaultProtocol: '新規接続の既定プロトコル', conflictPolicy: '同名ファイルの既定動作', ask: '毎回確認', overwrite: '上書き', skip: 'スキップ', confirmDelete: '削除前に確認する', notifications: '転送結果を画面内に通知する', save: '保存' },
+  en: { title: 'Preferences', detail: 'These settings apply to every connection.', general: 'General', appearance: 'Appearance', theme: 'Color theme', system: 'System', light: 'Light', dark: 'Dark', transfers: 'Transfers', security: 'Safety', editor: 'Remote File Editor', editorDetail: 'This application opens cached copies. Saving automatically overwrites the file at the same remote path.', chooseEditor: 'Choose Editor', clearEditor: 'Clear', noEditor: 'Not selected', language: 'Display language', defaultProtocol: 'Default protocol for new connections', conflictPolicy: 'Default duplicate-file action', ask: 'Ask every time', overwrite: 'Overwrite', skip: 'Skip', confirmDelete: 'Confirm before deleting', notifications: 'Show in-app transfer notifications', save: 'Save' },
+  'zh-CN': { title: '偏好设置', detail: '这些设置适用于所有连接。', general: '通用', appearance: '外观', theme: '颜色主题', system: '跟随系统', light: '浅色', dark: '深色', transfers: '传输', security: '安全性', editor: '远程文件编辑器', editorDetail: '此应用用于打开缓存副本。保存后会自动覆盖同一路径下的远程文件。', chooseEditor: '选择编辑器', clearEditor: '清除', noEditor: '未选择', language: '显示语言', defaultProtocol: '新连接的默认协议', conflictPolicy: '同名文件的默认操作', ask: '每次询问', overwrite: '覆盖', skip: '跳过', confirmDelete: '删除前确认', notifications: '在应用内显示传输结果通知', save: '保存' },
+} as const;
+
+const accessibilityCopy = {
+  ja: { back: '戻る', forward: '進む', parent: '親フォルダ', more: 'その他の操作' },
+  en: { back: 'Back', forward: 'Forward', parent: 'Parent folder', more: 'More actions' },
+  'zh-CN': { back: '后退', forward: '前进', parent: '上级文件夹', more: '更多操作' },
 } as const;
 
 const remoteEditCopy = {
@@ -255,7 +261,21 @@ export default function App() {
 
   useEffect(() => {
     localStorage.setItem('harbor-transfer.preferences', JSON.stringify(preferences));
+    document.documentElement.dataset.theme = preferences.theme;
   }, [preferences]);
+
+  useEffect(() => {
+    const onShortcut = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey)) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.matches('input, textarea, select, [contenteditable="true"]')) return;
+      if (event.key === ',') { event.preventDefault(); setShowPreferences(true); }
+      if (event.key.toLowerCase() === 'n') { event.preventDefault(); setConnectingBookmark(null); setConnectSheetMode('connect'); setShowConnect(true); }
+      if (event.key.toLowerCase() === 'r' && active) { event.preventDefault(); void loadDirectory(active, path); }
+    };
+    window.addEventListener('keydown', onShortcut);
+    return () => window.removeEventListener('keydown', onShortcut);
+  }, [active, path]);
 
   useEffect(() => {
     localStorage.setItem('harbor-transfer.column-widths-v2', JSON.stringify(columnWidths));
@@ -895,8 +915,8 @@ export default function App() {
             <button onClick={() => void openSyncPreview()}><FolderSync size={17}/>{syncText.button}</button><button onClick={createDirectory}><FolderPlus size={17}/>{t.newFolder}</button><button onClick={() => void uploadDirectory()}><FolderUp size={16}/>{t.uploadFolder}</button><button className="primary" onClick={() => void uploadFiles()}><Upload size={16}/>{t.upload}</button>
           </div>
           <div className="path-toolbar">
-            <button aria-label="Back" disabled><ChevronLeft size={18}/></button><button aria-label="Forward" disabled><ChevronRight size={18}/></button>
-            <button aria-label="Parent folder" onClick={() => void loadDirectory(active, parentPath(path))}><Folder size={18}/></button>
+            <button aria-label={accessibilityCopy[language].back} disabled><ChevronLeft size={18}/></button><button aria-label={accessibilityCopy[language].forward} disabled><ChevronRight size={18}/></button>
+            <button aria-label={accessibilityCopy[language].parent} onClick={() => void loadDirectory(active, parentPath(path))}><Folder size={18}/></button>
             <div className="path-field"><span>{t.path}</span><input value={path} onChange={(event) => setPath(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void loadDirectory()} /></div>
             <button className="copy-path-button" aria-label={t.copyPath} title={t.copyPath} onClick={() => void copyCurrentPath()}>{pathCopied ? <Check size={17}/> : <Copy size={17}/>}</button>
           </div>
@@ -909,8 +929,8 @@ export default function App() {
               <ResizableColumnHeader label={t.modified} column="modified" width={columnWidths.modified} resizeLabel={columnsText.resize} onStart={startColumnResize} onAdjust={adjustColumnWidth}/>
               <ResizableColumnHeader label={columnsText.permissions} column="permissions" width={columnWidths.permissions} resizeLabel={columnsText.resize} onStart={startColumnResize} onAdjust={adjustColumnWidth}/><span />
             </div>
-            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`file-row interactive ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="row" draggable={entry.file_type !== 'Symlink'} onClick={() => scheduleRemoteDragPreparation(entry)} onDragStart={(event) => startRemoteDrag(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void loadDirectory(active, remotePath) : void downloadFile(entry); }}>
-              <span className="file-name">{entry.file_type === 'Directory' ? <Folder fill="currentColor" size={18}/> : <Cloud size={18}/>} {entry.name}</span><span>{entry.file_type === 'Directory' ? '—' : formatBytes(entry.size)}</span><span>{entry.modified ?? '—'}</span><span className="permissions-cell">{entry.permissions ?? '—'}</span><button aria-label="More actions" onClick={(event) => { event.stopPropagation(); void manageEntry(entry); }}><MoreHorizontal size={18}/></button>
+            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`file-row interactive ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="row" aria-selected={selected} tabIndex={0} draggable={entry.file_type !== 'Symlink'} onClick={() => scheduleRemoteDragPreparation(entry)} onKeyDown={(event) => { if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(entry); } if (event.key === 'Enter') { entry.file_type === 'Directory' ? void loadDirectory(active, remotePath) : void downloadFile(entry); } }} onDragStart={(event) => startRemoteDrag(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void loadDirectory(active, remotePath) : void downloadFile(entry); }}>
+              <span className="file-name">{entry.file_type === 'Directory' ? <Folder fill="currentColor" size={18}/> : <Cloud size={18}/>} {entry.name}</span><span>{entry.file_type === 'Directory' ? '—' : formatBytes(entry.size)}</span><span>{entry.modified ?? '—'}</span><span className="permissions-cell">{entry.permissions ?? '—'}</span><button aria-label={accessibilityCopy[language].more} onClick={(event) => { event.stopPropagation(); void manageEntry(entry); }}><MoreHorizontal size={18}/></button>
             </div>; })}
           </div>}
           {viewMode === 'icons' && <div className="icon-grid" role="grid">
@@ -920,7 +940,7 @@ export default function App() {
                 {entry.file_type === 'Directory' ? <Folder className="entry-art folder-art" fill="currentColor" size={46}/> : <File className="entry-art" size={44}/>}
                 <strong>{entry.name}</strong><small>{entry.file_type === 'Directory' ? entry.permissions ?? '—' : formatBytes(entry.size)}</small>
               </button>
-              <button className="icon-entry-more" aria-label="More actions" onClick={(event) => { event.stopPropagation(); void manageEntry(entry); }}><MoreHorizontal size={16}/></button>
+              <button className="icon-entry-more" aria-label={accessibilityCopy[language].more} onClick={(event) => { event.stopPropagation(); void manageEntry(entry); }}><MoreHorizontal size={16}/></button>
             </div>; })}
           </div>}
           {viewMode === 'columns' && <div className="column-browser" role="listbox" aria-label={viewsText.columns}>
@@ -933,7 +953,7 @@ export default function App() {
                   <button className="column-entry-main" title={entry.name} onClick={(event) => { if (event.detail <= 1) { void openColumnEntry(levelIndex, entry); scheduleRemoteDragPreparation(entry, level.path); } }} onDoubleClick={() => { cancelScheduledDragPreparation(); if (entry.file_type !== 'Directory') void downloadFile(entry, level.path); }}>
                     {entry.file_type === 'Directory' ? <Folder fill="currentColor" size={17}/> : <File size={16}/>}<span>{entry.name}</span>{entry.file_type === 'Directory' ? <ChevronRight size={14}/> : <small>{formatBytes(entry.size)}</small>}
                   </button>
-                  <button className="column-entry-more" aria-label="More actions" onClick={(event) => { event.stopPropagation(); void manageEntry(entry, level.path); }}><MoreHorizontal size={15}/></button>
+                  <button className="column-entry-more" aria-label={accessibilityCopy[language].more} onClick={(event) => { event.stopPropagation(); void manageEntry(entry, level.path); }}><MoreHorizontal size={15}/></button>
                 </div>; })}
               </section>;
             })}
@@ -1074,6 +1094,7 @@ function PreferencesSheet({ value, language, t, onClose, onSave }: { value: Pref
         <label>{text.language}<select value={draft.language} onChange={(event) => setDraft((current) => ({ ...current, language: event.target.value as Language }))}><option value="ja">日本語</option><option value="en">English</option><option value="zh-CN">简体中文</option></select></label>
         <label>{text.defaultProtocol}<select value={draft.defaultProtocol} onChange={(event) => setDraft((current) => ({ ...current, defaultProtocol: event.target.value as Protocol }))}><option value="sftp">SFTP</option><option value="ftp">FTP</option><option value="ftps">Explicit FTPS</option></select></label>
       </fieldset>
+      <fieldset><legend>{text.appearance}</legend><label>{text.theme}<select value={draft.theme} onChange={(event) => setDraft((current) => ({ ...current, theme: event.target.value as Preferences['theme'] }))}><option value="system">{text.system}</option><option value="light">{text.light}</option><option value="dark">{text.dark}</option></select></label></fieldset>
       <fieldset><legend>{text.editor}</legend><p className="preferences-field-detail">{text.editorDetail}</p><div className="editor-picker"><input readOnly value={draft.editorPath} placeholder={text.noEditor}/><button type="button" onClick={() => void selectEditor()}>{text.chooseEditor}</button>{draft.editorPath && <button type="button" onClick={() => setDraft((current) => ({ ...current, editorPath: '' }))}>{text.clearEditor}</button>}</div></fieldset>
       <fieldset><legend>{text.transfers}</legend>
         <label>{text.conflictPolicy}<select value={draft.conflictPolicy} onChange={(event) => setDraft((current) => ({ ...current, conflictPolicy: event.target.value as Preferences['conflictPolicy'] }))}><option value="ask">{text.ask}</option><option value="overwrite">{text.overwrite}</option><option value="skip">{text.skip}</option></select></label>

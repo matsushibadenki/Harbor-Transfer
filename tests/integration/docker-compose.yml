@@ -1,0 +1,45 @@
+name: harbor-transfer-integration
+services:
+  ftp:
+    build:
+      context: .
+      dockerfile: Dockerfile.ftp
+    environment:
+      PASV_MIN_PORT: "30000"
+      PASV_MAX_PORT: "30009"
+    ports:
+      - "2121:21"
+      - "30000-30009:30000-30009"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; socket.create_connection(('127.0.0.1', 21), 1).close()\""]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+  ftps:
+    build:
+      context: .
+      dockerfile: Dockerfile.ftp
+    environment:
+      FTP_TLS: "1"
+      PASV_MIN_PORT: "30100"
+      PASV_MAX_PORT: "30109"
+    ports:
+      - "2990:21"
+      - "30100-30109:30100-30109"
+    volumes:
+      - ./.certs:/certs:ro
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; socket.create_connection(('127.0.0.1', 21), 1).close()\""]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+  sftp:
+    image: atmoz/sftp:alpine
+    command: harbor:harbor:1001::upload
+    ports:
+      - "2222:22"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 22"]
+      interval: 2s
+      timeout: 2s
+      retries: 20

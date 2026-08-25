@@ -79,6 +79,18 @@ impl FtpClient {
             // but a copied development setting must never silently trust an
             // invalid FTPS certificate.
             let tls_connector = suppaftp::async_native_tls::TlsConnector::new();
+            #[cfg(test)]
+            let tls_connector = match std::env::var("FTP_TEST_CA_CERT") {
+                Ok(path) => {
+                    let pem = std::fs::read(&path).map_err(|error| {
+                        anyhow::anyhow!("Could not read FTP_TEST_CA_CERT '{}': {}", path, error)
+                    })?;
+                    let certificate = suppaftp::async_native_tls::Certificate::from_pem(&pem)
+                        .map_err(|error| anyhow::anyhow!("Invalid FTP_TEST_CA_CERT '{}': {}", path, error))?;
+                    tls_connector.add_root_certificate(certificate)
+                }
+                Err(_) => tls_connector,
+            };
             let secure_stream = ftp_stream
                 .into_secure(suppaftp::AsyncNativeTlsConnector::from(tls_connector), &config.host)
                 .await
@@ -464,7 +476,10 @@ mod tests {
         let user = std::env::var("FTP_TEST_USER").unwrap_or_else(|_| "xxxx".into());
         let pass = std::env::var("FTP_TEST_PASS").unwrap_or_else(|_| "xxxxxxx".into());
         let port: u16 = std::env::var("FTP_TEST_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(21);
-        Some(FtpConfig { host, port, username: user, password: pass, ftps_enabled: false, anonymous: false })
+        let ftps_enabled = std::env::var("FTP_TEST_TLS")
+            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+            .unwrap_or(false);
+        Some(FtpConfig { host, port, username: user, password: pass, ftps_enabled, anonymous: false })
     }
 
     // ---- 1. Connect & disconnect -----------------------------------------
@@ -482,6 +497,11 @@ mod tests {
 
         client.disconnect().await.expect("disconnect should succeed");
         assert!(!client.is_connected(), "client should be disconnected");
+
+        let mut recovered =
+            FtpClient::connect(&cfg).await.expect("reconnect after disconnect should succeed");
+        recovered.list_dir("/").await.expect("list after reconnect");
+        recovered.disconnect().await.expect("disconnect recovered session");
     }
 
     // ---- 2. Connect with wrong credentials --------------------------------
@@ -540,9 +560,9 @@ mod tests {
 
         let mut client = FtpClient::connect(&cfg).await.expect("connect");
 
-        let test_dir = "/rshell_e2e_test";
-        let test_file_remote = format!("{}/hello.txt", test_dir);
-        let renamed_file_remote = format!("{}/hello_renamed.txt", test_dir);
+        let test_dir = "/harbor_e2e_空フォルダ";
+        let test_file_remote = format!("{}/港便り.txt", test_dir);
+        let renamed_file_remote = format!("{}/港便り_確認済み.txt", test_dir);
 
         // --- Clean up from any previous failed run ---
         let _ = client.delete_file(&renamed_file_remote).await;
@@ -554,9 +574,9 @@ mod tests {
         eprintln!("Created directory: {}", test_dir);
 
         // 4b. Upload a file
-        let tmp_upload = std::env::temp_dir().join("rshell_e2e_upload.txt");
-        let upload_content = b"Hello from R-Shell E2E test!\nLine 2\n";
-        tokio::fs::write(&tmp_upload, upload_content).await.expect("write temp file");
+        let tmp_upload = std::env::temp_dir().join("harbor_e2e_upload.txt");
+        let upload_content = vec![b'H'; 2 * 1024 * 1024 + 17];
+        tokio::fs::write(&tmp_upload, &upload_content).await.expect("write temp file");
 
         let uploaded_bytes = client
             .upload_file(tmp_upload.to_str().unwrap(), &test_file_remote)
@@ -568,7 +588,7 @@ mod tests {
         // 4c. List directory — should contain our file
         let entries = client.list_dir(test_dir).await.expect("list test dir");
         eprintln!("Directory {} contains {} entries", test_dir, entries.len());
-        let found = entries.iter().any(|e| e.name == "hello.txt");
+        let found = entries.iter().any(|e| e.name == "港便り.txt");
         assert!(
             found,
             "uploaded file should appear in listing: {:?}",
@@ -576,7 +596,7 @@ mod tests {
         );
 
         // 4d. Download the file and verify contents
-        let tmp_download = std::env::temp_dir().join("rshell_e2e_download.txt");
+        let tmp_download = std::env::temp_dir().join("harbor_e2e_download.txt");
         let downloaded_bytes = client
             .download_file(&test_file_remote, tmp_download.to_str().unwrap())
             .await
@@ -593,8 +613,8 @@ mod tests {
 
         // Verify rename: old name gone, new name present
         let entries_after = client.list_dir(test_dir).await.expect("list after rename");
-        assert!(!entries_after.iter().any(|e| e.name == "hello.txt"), "old file name should be gone");
-        assert!(entries_after.iter().any(|e| e.name == "hello_renamed.txt"), "renamed file should exist");
+        assert!(!entries_after.iter().any(|e| e.name == "港便り.txt"), "old file name should be gone");
+        assert!(entries_after.iter().any(|e| e.name == "港便り_確認済み.txt"), "renamed file should exist");
 
         // 4f. Delete the file
         client.delete_file(&renamed_file_remote).await.expect("delete_file should succeed");
@@ -607,7 +627,7 @@ mod tests {
         // Verify cleanup
         let root_entries = client.list_dir("/").await.expect("list root");
         assert!(
-            !root_entries.iter().any(|e| e.name == "rshell_e2e_test"),
+            !root_entries.iter().any(|e| e.name == "harbor_e2e_空フォルダ"),
             "test directory should be removed"
         );
         eprintln!("Cleanup verified: test directory removed from root listing");

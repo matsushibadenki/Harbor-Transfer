@@ -1,4 +1,7 @@
 :root { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; color: #25343b; background: #edf3f2; font-synthesis: none; }
+html[data-theme='light'] { color-scheme: light; }
+html[data-theme='dark'] { color-scheme: dark; }
+*:focus-visible { outline: 2px solid #2a9d8f; outline-offset: 2px; }
 * { box-sizing: border-box; } body { margin: 0; min-width: 900px; min-height: 100vh; } button, input, select { font: inherit; } button { border: 0; background: transparent; color: inherit; cursor: pointer; } button:disabled { opacity: .42; cursor: default; }
 .app-shell { height: 100vh; min-height: 620px; display: grid; grid-template-rows: 58px minmax(0, 1fr) 170px; padding-top: env(safe-area-inset-top); background: #f8fbfa; }
 .toolbar { display: flex; align-items: center; gap: 12px; padding: 0 20px; border-bottom: 1px solid #d9e4e1; background: rgba(255,255,255,.88); backdrop-filter: blur(20px); }.brand { display: flex; align-items: center; gap: 9px; color: #116d63; font-weight: 750; letter-spacing: -.02em; margin-right: 12px; }.toolbar-spacer { flex: 1; }.language { display: flex; gap: 6px; align-items: center; color: #6c7f7c; font-size: 12px; }.language select { border: 0; background: transparent; color: #33514c; }

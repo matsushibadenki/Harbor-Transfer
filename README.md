@@ -33,6 +33,7 @@ Harbor Transfer is a friendly desktop file-transfer client built with **Tauri 2*
 - Review and clear connection and transfer history.
 - Manage available SSH keys from the local `~/.ssh` directory.
 - Use the interface in English, Japanese, or Simplified Chinese.
+- Follow the system appearance or select an explicit light or dark theme, with keyboard-accessible file actions and shortcuts.
 
 ## Security and Privacy
 
@@ -89,6 +90,6 @@ pnpm tauri build
 
 ## Project Status
 
-Bookmark management, remote browsing, file operations, transfer controls, FTP/FTPS support, and safe one-way synchronization are implemented. Protocol integration testing, packaging, signing, and automatic updates remain planned work.
+Bookmark management, remote browsing, file operations, transfer controls, FTP/FTPS support, safe one-way synchronization, protocol CI, accessibility improvements, and macOS distribution preparation are implemented. WebDAV is the next planned protocol; automatic updates remain disabled until a signed production feed is available.
 
-See [the roadmap](docs/roadmap.md) and [the functional design](docs/functional-design.md) for more detail.
+See [the roadmap](docs/roadmap.md), [quality checklist](docs/quality-and-release.md), [macOS release guide](docs/macos-release.md), and [functional design](docs/functional-design.md) for more detail.

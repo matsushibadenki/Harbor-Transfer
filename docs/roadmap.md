@@ -22,8 +22,9 @@
 - [Done] ブックマークの表示名をホスト名から分離し、接続共通の環境設定画面と永続化基盤を実装
 - [Done] Phase 3 の SFTP / FTP / FTPS 共通ファイルシステム抽象化と双方向の同期プレビューを実装
 - [Done] 同期プレビューからの安全な実行、除外パターン、競合選択、停止、実行ログを実装
-- [Next] Phase 4 のプロトコル別統合テスト環境と CI を整備
-- [Later] 追加ストレージプロトコル、配布対応を段階的に実装
+- [Done] Phase 4 の統合テスト、CI、耐障害性、アクセシビリティ、配布準備を完了
+- [Next] Phase 5 として WebDAV アダプタと統合テストを実装
+- [Later] S3 と rsync 互換の高度な差分同期を段階的に実装
 
 ## Phase 0 — プロジェクト基盤 [Done]
 
@@ -71,16 +72,24 @@
 - [Done] 除外パターン、競合ごとのスキップ／転送元優先、安全な同期実行、停止、永続実行ログを実装
 - [Later] ブックマークのローカル／リモートディレクトリ設定を使う rsync 互換の差分同期方式を評価・実装
 
-## Phase 4 — 品質・配布
+## Phase 4 — 品質・配布 [Done]
 
 **完了条件:** 日常利用に耐える安定性と配布準備が整っている。
 
-- [Next] プロトコル別の統合テスト環境と CI を整備
-- [Later] 接続断復帰、大容量ファイル、Unicode パス、空フォルダの耐障害テスト
-- [Later] アクセシビリティ、キーボード操作、翻訳、ダークモードを監査
-- [Later] アプリ署名、notarization、更新配信、クラッシュログ方針を整備
-- [Later] WebDAV / S3 などの追加プロトコルを評価
+- [Done] Docker 上の SFTP / FTP / Explicit FTPS 統合テスト環境と GitHub Actions CI を整備
+- [Done] 再接続、大きなストリーミング転送、Unicode パス、空フォルダの耐障害テストを追加
+- [Done] キーボード操作、フォーカス表示、支援技術向けラベル、英語・日本語・简体中文、ライト／ダーク／システム外観を監査・改善
+- [Done] 安定したBundle ID、CSP、macOS署名・notarizationスクリプト、更新配信方針、ローカル限定クラッシュ診断を整備
+- [Done] WebDAV / S3 を評価し、既存抽象化に適合する WebDAV を次の実装対象に決定
+
+## Phase 5 — WebDAV [Next]
+
+**完了条件:** HTTPS WebDAV 接続で、既存の閲覧・転送・同期機能を安全に利用できる。
+
+- [Next] WebDAV の接続設定、Keychain資格情報、`RemoteFileSystem` アダプタを実装
+- [Later] PROPFIND、アップロード、ダウンロード、MOVE、DELETE、空コレクションを統合テスト
+- [Later] Nextcloud と標準WebDAVサーバーの相互運用性、Unicode／percent encodingを検証
 
 ## 次の実装単位
 
-次は SFTP / FTP / FTPS の再現可能な統合テスト環境を用意し、接続・一覧・転送・同期を CI で検証できるようにする。
+次は WebDAV の接続モデルと `RemoteFileSystem` アダプタを実装し、既存の一覧・転送・同期UIへ統合する。

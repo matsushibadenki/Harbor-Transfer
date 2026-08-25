@@ -1,5 +1,6 @@
 mod bookmarks;
 mod commands;
+mod diagnostics;
 mod ftp_client;
 mod remote_fs;
 mod sftp_client;
@@ -19,6 +20,8 @@ pub fn run() {
         .setup(|app| {
             let data_directory = app.path().app_data_dir().map_err(|error| error.to_string())?;
             let cache_directory = app.path().app_cache_dir().map_err(|error| error.to_string())?;
+            diagnostics::migrate_legacy_data_directory(&data_directory)?;
+            diagnostics::install_local_panic_reporter(&data_directory.join("diagnostics"));
             app.manage(Arc::new(
                 AppState::new(data_directory, cache_directory).map_err(|error| error.to_string())?,
             ));

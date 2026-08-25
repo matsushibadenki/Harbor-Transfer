@@ -1203,3 +1203,104 @@ input:disabled {
   font-size: 12px;
   font-weight: 650;
 }
+
+/* Phase 4 appearance audit: preserve hierarchy and contrast in macOS dark mode. */
+html[data-theme='dark'] body,
+html[data-theme='dark'] .app-shell,
+html[data-theme='dark'] .browser,
+html[data-theme='dark'] .transfer-panel {
+  color: #dbe7e4;
+  background: #18211f;
+}
+
+html[data-theme='dark'] .toolbar,
+html[data-theme='dark'] .sidebar,
+html[data-theme='dark'] .connect-sheet,
+html[data-theme='dark'] .preferences-sheet > .form-actions,
+html[data-theme='dark'] .bookmark-sheet > .form-actions {
+  color: #dbe7e4;
+  border-color: #394844;
+  background: #202b28;
+}
+
+html[data-theme='dark'] .file-row:nth-child(even),
+html[data-theme='dark'] .directory-column,
+html[data-theme='dark'] .sync-paths,
+html[data-theme='dark'] .search,
+html[data-theme='dark'] .local-directory-path {
+  background: #222e2b;
+}
+
+html[data-theme='dark'] .file-row:nth-child(odd),
+html[data-theme='dark'] input,
+html[data-theme='dark'] select,
+html[data-theme='dark'] .tag-filter button {
+  color: #dbe7e4;
+  border-color: #455651;
+  background: #192421;
+}
+
+html[data-theme='dark'] .file-row:hover,
+html[data-theme='dark'] button:hover:not(:disabled),
+html[data-theme='dark'] .bookmark:hover,
+html[data-theme='dark'] .bookmark.selected,
+html[data-theme='dark'] .file-row.selected,
+html[data-theme='dark'] .icon-entry.selected,
+html[data-theme='dark'] .column-entry.selected {
+  color: #dffff7;
+  background: #28443d !important;
+}
+
+html[data-theme='dark'] .file-name,
+html[data-theme='dark'] .sheet-title h2,
+html[data-theme='dark'] .welcome h1,
+html[data-theme='dark'] .transfer-row strong,
+html[data-theme='dark'] .preferences-sheet legend {
+  color: #e5f1ee;
+}
+
+html[data-theme='dark'] .muted,
+html[data-theme='dark'] .sheet-title p,
+html[data-theme='dark'] .preferences-field-detail,
+html[data-theme='dark'] .connection-strip,
+html[data-theme='dark'] .file-header {
+  color: #a8bbb6;
+}
+
+@media (prefers-color-scheme: dark) {
+  html[data-theme='system'] body,
+  html[data-theme='system'] .app-shell,
+  html[data-theme='system'] .browser,
+  html[data-theme='system'] .transfer-panel { color: #dbe7e4; background: #18211f; }
+  html[data-theme='system'] .toolbar,
+  html[data-theme='system'] .sidebar,
+  html[data-theme='system'] .connect-sheet,
+  html[data-theme='system'] .preferences-sheet > .form-actions,
+  html[data-theme='system'] .bookmark-sheet > .form-actions { color: #dbe7e4; border-color: #394844; background: #202b28; }
+  html[data-theme='system'] .file-row:nth-child(even),
+  html[data-theme='system'] .directory-column,
+  html[data-theme='system'] .sync-paths,
+  html[data-theme='system'] .search,
+  html[data-theme='system'] .local-directory-path { background: #222e2b; }
+  html[data-theme='system'] .file-row:nth-child(odd),
+  html[data-theme='system'] input,
+  html[data-theme='system'] select,
+  html[data-theme='system'] .tag-filter button { color: #dbe7e4; border-color: #455651; background: #192421; }
+  html[data-theme='system'] .file-row:hover,
+  html[data-theme='system'] button:hover:not(:disabled),
+  html[data-theme='system'] .bookmark:hover,
+  html[data-theme='system'] .bookmark.selected,
+  html[data-theme='system'] .file-row.selected,
+  html[data-theme='system'] .icon-entry.selected,
+  html[data-theme='system'] .column-entry.selected { color: #dffff7; background: #28443d !important; }
+  html[data-theme='system'] .file-name,
+  html[data-theme='system'] .sheet-title h2,
+  html[data-theme='system'] .welcome h1,
+  html[data-theme='system'] .transfer-row strong,
+  html[data-theme='system'] .preferences-sheet legend { color: #e5f1ee; }
+  html[data-theme='system'] .muted,
+  html[data-theme='system'] .sheet-title p,
+  html[data-theme='system'] .preferences-field-detail,
+  html[data-theme='system'] .connection-strip,
+  html[data-theme='system'] .file-header { color: #a8bbb6; }
+}

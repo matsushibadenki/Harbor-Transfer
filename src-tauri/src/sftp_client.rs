@@ -573,4 +573,53 @@ mod tests {
         assert!(result.is_ok());
         assert!(!client.is_connected());
     }
+
+    /// Live SFTP coverage is opt-in so normal unit tests never require a
+    /// network. `tests/integration/run.sh` provides the matching server.
+    #[tokio::test]
+    async fn test_sftp_live_crud_unicode_empty_directory_and_large_file() {
+        let Ok(host) = std::env::var("SFTP_TEST_HOST") else {
+            eprintln!("SKIP: SFTP_TEST_HOST not set");
+            return;
+        };
+        let port = std::env::var("SFTP_TEST_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(22);
+        let username = std::env::var("SFTP_TEST_USER").unwrap_or_else(|_| "harbor".into());
+        let password = std::env::var("SFTP_TEST_PASS").unwrap_or_else(|_| "harbor".into());
+        let expected_host_key = crate::ssh::probe_host_key(&host, port).await.expect("probe SFTP host key");
+        let config = SftpConfig {
+            host,
+            port,
+            username,
+            auth_method: SftpAuthMethod::Password { password },
+            expected_host_key: Some(expected_host_key),
+        };
+        let mut client = StandaloneSftpClient::connect(&config).await.expect("connect SFTP test server");
+        let directory = "/upload/harbor_空フォルダ";
+        let remote = format!("{directory}/港便り.bin");
+        let renamed = format!("{directory}/港便り_確認済み.bin");
+        let _ = client.delete_file(&renamed).await;
+        let _ = client.delete_file(&remote).await;
+        let _ = client.delete_dir(directory).await;
+
+        client.create_dir(directory).await.expect("create empty Unicode directory");
+        assert!(client.list_dir(directory).await.expect("list empty directory").is_empty());
+
+        let upload = std::env::temp_dir().join("harbor_sftp_large_upload.bin");
+        let download = std::env::temp_dir().join("harbor_sftp_large_download.bin");
+        let content = vec![0x5a; 2 * 1024 * 1024 + 17];
+        tokio::fs::write(&upload, &content).await.expect("write upload fixture");
+        client.upload_file(upload.to_str().unwrap(), &remote).await.expect("upload Unicode path");
+        client.rename(&remote, &renamed).await.expect("rename Unicode path");
+        client.download_file(&renamed, download.to_str().unwrap()).await.expect("download large file");
+        assert_eq!(tokio::fs::read(&download).await.expect("read download"), content);
+
+        client.delete_file(&renamed).await.expect("delete test file");
+        client.delete_dir(directory).await.expect("delete test directory");
+        let _ = tokio::fs::remove_file(upload).await;
+        let _ = tokio::fs::remove_file(download).await;
+        client.disconnect().await.expect("disconnect");
+        let mut recovered = StandaloneSftpClient::connect(&config).await.expect("reconnect after disconnect");
+        recovered.list_dir("/upload").await.expect("list after reconnect");
+        recovered.disconnect().await.expect("disconnect recovered session");
+    }
 }
