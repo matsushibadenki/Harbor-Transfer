@@ -7,7 +7,7 @@ use std::time::Duration;
 use suppaftp::tokio::{AsyncFtpStream, AsyncRustlsConnector, AsyncRustlsFtpStream};
 use suppaftp::types::Mode;
 use suppaftp::Status;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::sftp_client::{FileEntry, FileEntryType};
 
@@ -279,12 +279,47 @@ impl FtpClient {
             .map_err(|e| anyhow::anyhow!("Failed to read local file '{}': {}", local_path, e))?;
         let total_bytes = data.len() as u64;
 
-        ftp_stream!(self, s => {
-            let mut reader = Cursor::new(data);
-            s.put_file(remote_path, &mut reader).await.map_err(|e| {
-                anyhow::anyhow!("Failed to upload file '{}': {}", remote_path, e)
-            })?
-        });
+        let stream = self.stream.as_mut().ok_or_else(|| anyhow::anyhow!("FTP session not connected"))?;
+        let mut reader = Cursor::new(data);
+
+        match stream {
+            FtpStreamKind::Plain(stream) => {
+                stream
+                    .put_file(remote_path, &mut reader)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to upload file '{}': {}", remote_path, e))?;
+            }
+            FtpStreamKind::Secure(stream) => {
+                // tokio-rustls sends TLS close_notify on shutdown but deliberately
+                // keeps the underlying TCP socket open. Some FTPS servers wait for
+                // a TCP FIN before replying with 226, which made uploads stall until
+                // the server's ten-minute data timeout. Finish TLS first, unwrap the
+                // socket, and let suppaftp close the TCP write side before it waits
+                // for the control-channel completion response.
+                let mut data_stream = stream
+                    .put_with_stream(remote_path)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to start upload for '{}': {}", remote_path, e))?;
+                tokio::io::copy(&mut reader, &mut data_stream)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to upload file '{}': {}", remote_path, e))?;
+                data_stream.shutdown().await.map_err(|e| {
+                    anyhow::anyhow!("Failed to finish TLS upload for '{}': {}", remote_path, e)
+                })?;
+                let tcp_stream = data_stream.into_tcp_stream().map_err(|e| {
+                    anyhow::anyhow!("Failed to close FTPS data connection for '{}': {}", remote_path, e)
+                })?;
+                tokio::time::timeout(Duration::from_secs(30), stream.finalize_put_stream(tcp_stream))
+                    .await
+                    .map_err(|_| {
+                        anyhow::anyhow!(
+                            "FTPS server did not confirm upload '{}' within 30 seconds",
+                            remote_path
+                        )
+                    })?
+                    .map_err(|e| anyhow::anyhow!("Failed to finalize upload '{}': {}", remote_path, e))?;
+            }
+        }
 
         Ok(total_bytes)
     }
