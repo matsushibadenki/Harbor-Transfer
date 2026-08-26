@@ -8,11 +8,11 @@ import { getCurrentWebviewWindow, WebviewWindow } from '@tauri-apps/api/webviewW
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowUpToLine, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Cloud, Columns3, Copy, File, FileCog, Folder, FolderPlus, Grid2X2, HardDrive,
-  ClipboardPaste, Download, FileDown, FileUp, FolderSync, FolderUp, KeyRound, List, LoaderCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, RefreshCw, Scissors, Search, Settings, Trash2, Upload,
+  ClipboardPaste, Download, FileArchive, FileAudio, FileCode2, FileDown, FileImage, FileJson, FileSpreadsheet, FileText, FileUp, FileVideo, FolderSync, FolderUp, KeyRound, Link2, List, LoaderCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, RefreshCw, Scissors, Search, Settings, Trash2, Upload,
 } from 'lucide-react';
 
 type Protocol = 'sftp' | 'ftp' | 'ftps' | 'webdav' | 's3';
-type FileEntry = { name: string; size: number; modified?: string; permissions?: string; file_type: 'File' | 'Directory' | 'Symlink' };
+type FileEntry = { name: string; size: number; modified?: string; permissions?: string; owner?: string; group?: string; file_type: 'File' | 'Directory' | 'Symlink' };
 type Connection = { id: string; name: string; protocol: Protocol; host: string; port: number; username: string; initialPath: string; keyPath?: string; hostKey?: string; localDirectory?: string; tags: string; s3Region?: string; s3Endpoint?: string; s3ForcePathStyle?: boolean; s3PreserveEmptyDirectories?: boolean };
 type ConnectionHistory = { bookmarkId: string; name: string; protocol: Protocol; host: string; port: number; username: string; connectedAt: string };
 type Transfer = { id: string; name: string; direction: 'Upload' | 'Download'; status: 'Running' | 'Completed' | 'Failed' | 'Cancelled'; detail: string; localPath?: string; remotePath?: string; connectionId?: string; transferredBytes?: number; totalBytes?: number; speed?: number; etaSeconds?: number };
@@ -27,8 +27,12 @@ type RemoteEdit = { editId: string; connectionId: string; name: string; remotePa
 type RemoteEditOpenResult = { editId: string; name: string; remotePath: string };
 type RemoteEditPollResult = { editId: string; remotePath: string; status: 'clean' | 'waiting' | 'uploaded'; bytes: number };
 type DragExport = { exportId: string; name: string; remotePath: string; localPath: string; iconPath: string; connectionId: string };
-type ColumnKey = 'name' | 'size' | 'modified' | 'permissions';
+type ColumnKey = 'name' | 'size' | 'modified' | 'permissions' | 'owner' | 'group' | 'type';
 type ColumnWidths = Record<ColumnKey, number>;
+type OptionalColumnKey = Exclude<ColumnKey, 'name'>;
+type ColumnVisibility = Record<OptionalColumnKey, boolean>;
+type SortDirection = 'ascending' | 'descending';
+type ColumnMenuPosition = { x: number; y: number };
 type ViewMode = 'list' | 'icons' | 'columns';
 type ColumnLevel = { path: string; entries: FileEntry[]; selectedName?: string };
 type SyncDirection = 'localToRemote' | 'remoteToLocal';
@@ -44,13 +48,18 @@ type SyncHistory = { id: string; direction: SyncDirection; localDirectory: strin
 type BookmarkExportFile = { format: 'harbor-transfer-bookmarks'; version: 1; exportedAt: string; bookmarks: Connection[] };
 type EntryContextMenu = { x: number; y: number; entry: FileEntry; basePath: string };
 type RemoteClipboard = { connectionId: string; sourcePath: string; entry: FileEntry; mode: 'cut' | 'copy' };
-type FileInformationTarget = { entry: FileEntry; basePath: string };
+type SelectedRemoteItem = { connectionId: string; remotePath: string; basePath: string; entry: FileEntry };
+type FileInformationTarget = { items: SelectedRemoteItem[]; focus: 'name' | 'metadata' };
 
 const defaultPreferences: Preferences = { language: 'ja', theme: 'system', defaultProtocol: 'sftp', conflictPolicy: 'ask', confirmDelete: true, transferNotifications: true, editorPath: '' };
 function loadPreferences(): Preferences { try { return { ...defaultPreferences, ...JSON.parse(localStorage.getItem('harbor-transfer.preferences') ?? '{}') }; } catch { return defaultPreferences; } }
-const minimumColumnWidths: ColumnWidths = { name: 160, size: 76, modified: 150, permissions: 104 };
-const defaultColumnWidths: ColumnWidths = { name: 320, size: 76, modified: 150, permissions: 104 };
+const listColumnOrder: ColumnKey[] = ['name', 'size', 'modified', 'permissions', 'owner', 'group', 'type'];
+const optionalColumnOrder: OptionalColumnKey[] = ['size', 'modified', 'permissions', 'owner', 'group', 'type'];
+const minimumColumnWidths: ColumnWidths = { name: 160, size: 76, modified: 150, permissions: 104, owner: 90, group: 90, type: 84 };
+const defaultColumnWidths: ColumnWidths = { name: 320, size: 76, modified: 150, permissions: 104, owner: 110, group: 110, type: 92 };
+const defaultColumnVisibility: ColumnVisibility = { size: true, modified: true, permissions: true, owner: false, group: false, type: false };
 function loadColumnWidths(): ColumnWidths { try { return { ...defaultColumnWidths, ...JSON.parse(localStorage.getItem('harbor-transfer.column-widths-v2') ?? '{}') }; } catch { return defaultColumnWidths; } }
+function loadColumnVisibility(): ColumnVisibility { try { return { ...defaultColumnVisibility, ...JSON.parse(localStorage.getItem('harbor-transfer.column-visibility') ?? '{}') }; } catch { return defaultColumnVisibility; } }
 
 const copy = {
   ja: { title: 'Harbor Transfer', connect: '新規接続', bookmarks: 'ブックマーク', history: '履歴', transfer: '転送', refresh: '更新', upload: 'アップロード', uploadFolder: 'フォルダをアップロード', newFolder: '新規フォルダ', search: '検索', empty: '接続先を選択してください', emptyDetail: '新規接続を作成するか、ブックマークを選択して開始します。', path: 'パス', breadcrumbs: '現在のディレクトリ', copyPath: 'パスをコピー', pathCopied: 'パスをクリップボードにコピーしました', name: '名前', size: 'サイズ', modified: '更新日', status: '転送キュー', connectTitle: '新規接続', editBookmark: 'ブックマークを編集', editBookmarkTitle: 'ブックマークの編集', bookmarkSaved: 'ブックマークを更新しました', saveBookmark: '変更を保存', exportBookmarks: 'ブックマークを書き出す', importBookmarks: 'ブックマークを読み込む', bookmarksExported: 'ブックマークを書き出しました', bookmarksImported: '{{count}}件のブックマークを読み込みました', noBookmarksToExport: '書き出すブックマークがありません', invalidBookmarkFile: '有効なHarbor Transferブックマークファイルではありません', bookmarkName: 'ブックマーク名', bookmarkNameHint: '例：本番Webサーバー', initialDirectory: '接続時の初期ディレクトリ', initialDirectoryHint: '例：/var/www/html', cancel: 'キャンセル', pause: '停止', resume: '再開', retry: '再試行', start: '接続する', protocol: 'プロトコル', host: 'サーバー', port: 'ポート', user: 'ユーザー名', password: 'パスワード', key: 'SSH 鍵ファイル（任意）', keys: 'SSH キー', settings: '環境設定', keyManager: 'SSH キー・マネージャー', keyHint: '鍵の内容は読み込まず、ファイル情報だけを表示します。', useKey: 'この鍵を使用', noKeys: '~/.ssh に利用可能な秘密鍵がありません。', pairedKey: '公開鍵あり', hostKeyChanged: 'サーバーのホスト鍵が保存済みの鍵と一致しません。接続を中止しました。', trustHostKey: 'サーバーのホスト鍵を確認してください。\n\n{{fingerprint}}\n\nこのサーバーを信頼して接続しますか？', error: 'エラー', connected: '接続済み', download: 'ダウンロード' },
@@ -83,9 +92,9 @@ const phaseTwoCopy = {
 } as const;
 
 const contextMenuCopy = {
-  ja: { rename: '名前を変更', cut: 'カット', copy: 'コピー', paste: 'ペースト', delete: '削除', download: 'ダウンロード', information: 'ファイル情報を変更', copied: 'リモートクリップボードにコピーしました', cutReady: '移動する項目を選択しました', pasted: 'ペーストしました', title: 'ファイル情報', detail: '現在の情報を確認し、対応する属性を変更します。', kind: '種類', permissions: 'パーミッション', changePermissions: 'パーミッションを変更', modified: '更新日時', changeModified: '更新日時を変更', unsupported: 'この接続方式ではパーミッションと更新日時の変更に対応していません。', ftpSupport: 'FTPサーバーがSITE CHMOD／MFMTに対応している場合に変更できます。', save: '変更を保存', saved: 'ファイル情報を更新しました', chooseField: '変更する項目を選択してください。', invalidPermissions: 'パーミッションは0000〜7777の8進数で入力してください。', invalidDate: '有効な更新日時を入力してください。' },
-  en: { rename: 'Rename', cut: 'Cut', copy: 'Copy', paste: 'Paste', delete: 'Delete', download: 'Download', information: 'Change File Information', copied: 'Copied to the remote clipboard', cutReady: 'Item selected for moving', pasted: 'Item pasted', title: 'File Information', detail: 'Review the current information and change supported attributes.', kind: 'Kind', permissions: 'Permissions', changePermissions: 'Change permissions', modified: 'Modified date', changeModified: 'Change modified date', unsupported: 'This connection type cannot change POSIX permissions or the modified date.', ftpSupport: 'Changes require SITE CHMOD and MFMT support from the FTP server.', save: 'Save Changes', saved: 'File information updated', chooseField: 'Choose at least one field to change.', invalidPermissions: 'Enter permissions as an octal value from 0000 to 7777.', invalidDate: 'Enter a valid modified date.' },
-  'zh-CN': { rename: '重命名', cut: '剪切', copy: '复制', paste: '粘贴', delete: '删除', download: '下载', information: '更改文件信息', copied: '已复制到远程剪贴板', cutReady: '已选择要移动的项目', pasted: '已粘贴项目', title: '文件信息', detail: '查看当前信息并更改支持的属性。', kind: '类型', permissions: '权限', changePermissions: '更改权限', modified: '修改日期', changeModified: '更改修改日期', unsupported: '此连接类型不能更改POSIX权限或修改日期。', ftpSupport: 'FTP服务器需要支持SITE CHMOD和MFMT才能更改。', save: '保存更改', saved: '文件信息已更新', chooseField: '请至少选择一个要更改的字段。', invalidPermissions: '请输入0000到7777之间的八进制权限值。', invalidDate: '请输入有效的修改日期。' },
+  ja: { rename: '名前を変更', cut: 'カット', copy: 'コピー', paste: 'ペースト', delete: '削除', download: 'ダウンロード', information: 'ファイル情報を変更', copied: 'リモートクリップボードにコピーしました', cutReady: '移動する項目を選択しました', pasted: 'ペーストしました', title: 'ファイル情報', detail: '名称と現在の情報を確認し、対応する属性を変更します。', selectedCount: '{{count}}項目を選択中', mixed: '複数の値', multipleName: '複数選択ではファイル名を一括変更できません。共通属性だけを変更できます。', fileName: 'ファイル名', kind: '種類', owner: '所有者', group: 'グループ', changeOwnership: '所有者・グループを変更', permissions: 'パーミッション', changePermissions: 'パーミッションを変更', modified: '更新日時', changeModified: '更新日時を変更', unsupported: 'この接続方式ではパーミッションと更新日時の変更に対応していません。名称は変更できます。', ownershipSftp: '所有者・グループの変更はSFTPで数値UID/GIDを指定した場合だけ利用できます。', ftpSupport: 'FTPサーバーがSITE CHMOD／MFMTに対応している場合に変更できます。', save: '変更を保存', saved: 'ファイル情報を更新しました', chooseField: '名称を変更するか、変更する属性を選択してください。', invalidName: 'ファイル名に「/」、「.」、「..」は使用できません。', invalidOwnership: '所有者とグループは0以上の数値UID/GIDで入力してください。', invalidPermissions: 'パーミッションは0000〜7777の8進数で入力してください。', invalidDate: '有効な更新日時を入力してください。' },
+  en: { rename: 'Rename', cut: 'Cut', copy: 'Copy', paste: 'Paste', delete: 'Delete', download: 'Download', information: 'Change File Information', copied: 'Copied to the remote clipboard', cutReady: 'Item selected for moving', pasted: 'Item pasted', title: 'File Information', detail: 'Review the name and current information, then change supported attributes.', selectedCount: '{{count}} items selected', mixed: 'Mixed values', multipleName: 'File names cannot be changed as a group. Only shared attributes can be changed.', fileName: 'File name', kind: 'Kind', owner: 'Owner', group: 'Group', changeOwnership: 'Change owner and group', permissions: 'Permissions', changePermissions: 'Change permissions', modified: 'Modified date', changeModified: 'Change modified date', unsupported: 'This connection type cannot change POSIX permissions or the modified date. The name can still be changed.', ownershipSftp: 'Owner and group changes require SFTP and numeric UID/GID values.', ftpSupport: 'Changes require SITE CHMOD and MFMT support from the FTP server.', save: 'Save Changes', saved: 'File information updated', chooseField: 'Change the name or choose at least one attribute.', invalidName: 'The file name cannot contain “/” and cannot be “.” or “..”.', invalidOwnership: 'Enter owner and group as non-negative numeric UID/GID values.', invalidPermissions: 'Enter permissions as an octal value from 0000 to 7777.', invalidDate: 'Enter a valid modified date.' },
+  'zh-CN': { rename: '重命名', cut: '剪切', copy: '复制', paste: '粘贴', delete: '删除', download: '下载', information: '更改文件信息', copied: '已复制到远程剪贴板', cutReady: '已选择要移动的项目', pasted: '已粘贴项目', title: '文件信息', detail: '查看名称和当前信息，然后更改支持的属性。', selectedCount: '已选择{{count}}个项目', mixed: '多个值', multipleName: '多选时不能批量更改文件名，只能更改共有属性。', fileName: '文件名', kind: '类型', owner: '所有者', group: '组', changeOwnership: '更改所有者和组', permissions: '权限', changePermissions: '更改权限', modified: '修改日期', changeModified: '更改修改日期', unsupported: '此连接类型不能更改POSIX权限或修改日期，但仍可更改名称。', ownershipSftp: '更改所有者和组需要使用SFTP并指定数字UID/GID。', ftpSupport: 'FTP服务器需要支持SITE CHMOD和MFMT才能更改。', save: '保存更改', saved: '文件信息已更新', chooseField: '请更改名称或至少选择一个属性。', invalidName: '文件名不能包含“/”，也不能是“.”或“..”。', invalidOwnership: '请使用非负数字UID/GID输入所有者和组。', invalidPermissions: '请输入0000到7777之间的八进制权限值。', invalidDate: '请输入有效的修改日期。' },
 } as const;
 
 const preferencesCopy = {
@@ -119,9 +128,9 @@ const queueCopy = {
 } as const;
 
 const columnCopy = {
-  ja: { permissions: 'パーミッション', resize: '列幅を変更' },
-  en: { permissions: 'Permissions', resize: 'Resize column' },
-  'zh-CN': { permissions: '权限', resize: '调整列宽' },
+  ja: { permissions: 'パーミッション', owner: 'オーナー', group: 'グループ', type: '種類', file: 'ファイル', directory: 'フォルダ', symlink: 'シンボリックリンク', resize: '列幅を変更', displayColumns: '表示する項目', ascending: '昇順', descending: '降順' },
+  en: { permissions: 'Permissions', owner: 'Owner', group: 'Group', type: 'Kind', file: 'File', directory: 'Folder', symlink: 'Symbolic link', resize: 'Resize column', displayColumns: 'Show Columns', ascending: 'Ascending', descending: 'Descending' },
+  'zh-CN': { permissions: '权限', owner: '所有者', group: '组', type: '类型', file: '文件', directory: '文件夹', symlink: '符号链接', resize: '调整列宽', displayColumns: '显示项目', ascending: '升序', descending: '降序' },
 } as const;
 
 const viewCopy = {
@@ -154,6 +163,30 @@ function connectionTargetChanged(left: Connection, right: Connection) { return l
 function parentPath(path: string) { const parts = path.split('/').filter(Boolean); parts.pop(); return `/${parts.join('/')}` || '/'; }
 function formatBytes(bytes: number) { if (!bytes) return '—'; const units = ['B', 'KB', 'MB', 'GB']; const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), 3); return `${(bytes / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`; }
 function formatDuration(seconds?: number) { if (seconds === undefined || !Number.isFinite(seconds)) return '—'; if (seconds < 60) return `${Math.ceil(seconds)}s`; return `${Math.floor(seconds / 60)}m ${Math.ceil(seconds % 60)}s`; }
+type FileIconCategory = 'image' | 'video' | 'audio' | 'archive' | 'code' | 'data' | 'spreadsheet' | 'document' | 'generic';
+function fileIconCategory(name: string): FileIconCategory {
+  const lowerName = name.toLowerCase();
+  if (/^(readme|license|changelog|authors)(\..*)?$/.test(lowerName)) return 'document';
+  if (['makefile', 'dockerfile', 'gemfile', 'rakefile', 'cmakelists.txt'].includes(lowerName)) return 'code';
+  const extension = name.includes('.') ? name.split('.').pop()?.toLowerCase() ?? '' : '';
+  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'heic', 'heif', 'tif', 'tiff', 'bmp', 'ico', 'raw', 'psd', 'ai'].includes(extension)) return 'image';
+  if (['mp4', 'mov', 'm4v', 'avi', 'mkv', 'webm', 'mpg', 'mpeg', 'wmv'].includes(extension)) return 'video';
+  if (['mp3', 'wav', 'aac', 'flac', 'ogg', 'oga', 'm4a', 'aiff', 'wma'].includes(extension)) return 'audio';
+  if (['zip', 'tar', 'gz', 'tgz', 'bz2', 'xz', '7z', 'rar', 'dmg', 'pkg', 'iso'].includes(extension)) return 'archive';
+  if (['html', 'htm', 'css', 'scss', 'sass', 'less', 'js', 'jsx', 'mjs', 'cjs', 'ts', 'tsx', 'php', 'py', 'rb', 'rs', 'go', 'java', 'kt', 'c', 'cc', 'cpp', 'h', 'hpp', 'swift', 'sh', 'bash', 'zsh', 'vue', 'svelte', 'sql'].includes(extension)) return 'code';
+  if (['json', 'json5', 'yaml', 'yml', 'toml', 'xml', 'plist', 'env', 'ini', 'conf', 'config', 'lock'].includes(extension)) return 'data';
+  if (['csv', 'tsv', 'xls', 'xlsx', 'xlsm', 'numbers', 'ods'].includes(extension)) return 'spreadsheet';
+  if (['txt', 'md', 'markdown', 'rtf', 'pdf', 'doc', 'docx', 'pages', 'odt', 'epub'].includes(extension)) return 'document';
+  return 'generic';
+}
+function RemoteEntryIcon({ entry, size, className = '' }: { entry: FileEntry; size: number; className?: string }) {
+  if (entry.file_type === 'Directory') return <Folder className={`${className} folder-art remote-entry-icon`} fill="currentColor" size={size}/>;
+  if (entry.file_type === 'Symlink') return <Link2 className={`${className} file-type-icon file-type-link`} size={size}/>;
+  const category = fileIconCategory(entry.name);
+  const icons = { image: FileImage, video: FileVideo, audio: FileAudio, archive: FileArchive, code: FileCode2, data: FileJson, spreadsheet: FileSpreadsheet, document: FileText, generic: File };
+  const Icon = icons[category];
+  return <Icon className={`${className} file-type-icon file-type-${category}`} size={size}/>;
+}
 function transferFailureStatus(reason: unknown): 'Failed' | 'Cancelled' { return String(reason).toLowerCase().includes('cancel') ? 'Cancelled' : 'Failed'; }
 function permissionStringToOctal(value?: string) {
   if (!value) return '';
@@ -225,8 +258,8 @@ function parseBookmarkExport(raw: string): Connection[] | null {
   }
 }
 
-function ResizableColumnHeader({ label, column, width, resizeLabel, onStart, onAdjust }: { label: string; column: ColumnKey; width: number; resizeLabel: string; onStart: (event: React.PointerEvent, column: ColumnKey) => void; onAdjust: (column: ColumnKey, delta: number) => void }) {
-  return <span className="column-heading"><span>{label}</span><span className="column-resizer" role="separator" aria-label={`${resizeLabel}: ${label}`} aria-orientation="vertical" aria-valuenow={width} tabIndex={0} onPointerDown={(event) => onStart(event, column)} onKeyDown={(event) => { if (event.key === 'ArrowLeft') { event.preventDefault(); onAdjust(column, -10); } if (event.key === 'ArrowRight') { event.preventDefault(); onAdjust(column, 10); } }}/></span>;
+function ResizableColumnHeader({ label, column, width, resizeLabel, sorted, direction, onSort, onStart, onAdjust }: { label: string; column: ColumnKey; width: number; resizeLabel: string; sorted: boolean; direction: SortDirection; onSort: (column: ColumnKey) => void; onStart: (event: React.PointerEvent, column: ColumnKey) => void; onAdjust: (column: ColumnKey, delta: number) => void }) {
+  return <span className="column-heading" role="columnheader" aria-sort={sorted ? direction : 'none'}><button type="button" className="column-sort-button" onClick={() => onSort(column)}><span>{label}</span>{sorted && (direction === 'ascending' ? <ChevronUp size={13}/> : <ChevronDown size={13}/>)}</button><span className="column-resizer" role="separator" aria-label={`${resizeLabel}: ${label}`} aria-orientation="vertical" aria-valuenow={width} tabIndex={0} onPointerDown={(event) => { event.stopPropagation(); onStart(event, column); }} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === 'ArrowLeft') { event.preventDefault(); onAdjust(column, -10); } if (event.key === 'ArrowRight') { event.preventDefault(); onAdjust(column, 10); } }}/></span>;
 }
 
 export default function App() {
@@ -265,6 +298,10 @@ export default function App() {
   const [transferPanelCollapsed, setTransferPanelCollapsed] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('harbor-transfer.sidebar-collapsed') === 'true');
   const [columnWidths, setColumnWidths] = useState<ColumnWidths>(loadColumnWidths);
+  const [columnVisibility, setColumnVisibility] = useState<ColumnVisibility>(loadColumnVisibility);
+  const [sortColumn, setSortColumn] = useState<ColumnKey>('name');
+  const [sortDirection, setSortDirection] = useState<SortDirection>('ascending');
+  const [columnMenu, setColumnMenu] = useState<ColumnMenuPosition | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
     const saved = localStorage.getItem('harbor-transfer.view-mode');
     return saved === 'icons' || saved === 'columns' ? saved : 'list';
@@ -288,7 +325,7 @@ export default function App() {
   const [syncExecutionResult, setSyncExecutionResult] = useState<SyncExecutionResult | null>(null);
   const [syncHistory, setSyncHistory] = useState<SyncHistory[]>([]);
   const [remoteEdits, setRemoteEdits] = useState<RemoteEdit[]>([]);
-  const [selectedRemoteFile, setSelectedRemoteFile] = useState<{ connectionId: string; remotePath: string } | null>(null);
+  const [selectedRemoteItems, setSelectedRemoteItems] = useState<SelectedRemoteItem[]>([]);
   const [dragExport, setDragExport] = useState<DragExport | null>(null);
   const [dragPreparingPath, setDragPreparingPath] = useState('');
   const [entryContextMenu, setEntryContextMenu] = useState<EntryContextMenu | null>(null);
@@ -299,8 +336,32 @@ export default function App() {
   const dragExportRef = useRef<DragExport | null>(null);
   const dragPreparingRef = useRef('');
   const dragSelectionTimer = useRef<number | null>(null);
+  const selectionAnchor = useRef<{ basePath: string; index: number } | null>(null);
   const browserZoneRef = useRef<HTMLElement | null>(null);
-  const filteredEntries = useMemo(() => entries.filter((entry) => entry.name.toLowerCase().includes(query.toLowerCase())), [entries, query]);
+  const visibleColumns = useMemo(() => listColumnOrder.filter((column) => column === 'name' || columnVisibility[column]), [columnVisibility]);
+  const filteredEntries = useMemo(() => {
+    const collator = new Intl.Collator(language, { numeric: true, sensitivity: 'base' });
+    const value = (entry: FileEntry, column: ColumnKey): string | number => {
+      if (column === 'size') return entry.size;
+      if (column === 'modified') {
+        const parsed = Date.parse((entry.modified ?? '').replace(' ', 'T'));
+        return Number.isNaN(parsed) ? entry.modified ?? '' : parsed;
+      }
+      if (column === 'permissions') return entry.permissions ?? '';
+      if (column === 'owner') return entry.owner ?? '';
+      if (column === 'group') return entry.group ?? '';
+      if (column === 'type') return entry.file_type;
+      return entry.name;
+    };
+    const compare = (left: FileEntry, right: FileEntry) => {
+      const leftValue = value(left, sortColumn);
+      const rightValue = value(right, sortColumn);
+      const result = typeof leftValue === 'number' && typeof rightValue === 'number' ? leftValue - rightValue : collator.compare(String(leftValue), String(rightValue));
+      const ordered = result || collator.compare(left.name, right.name);
+      return sortDirection === 'ascending' ? ordered : -ordered;
+    };
+    return entries.filter((entry) => entry.name.toLowerCase().includes(query.toLowerCase())).sort(compare);
+  }, [entries, language, query, sortColumn, sortDirection]);
   const breadcrumbs = useMemo(() => {
     const segments = path.split('/').filter(Boolean);
     return [{ label: '/', path: '/' }, ...segments.map((segment, index) => ({ label: segment, path: `/${segments.slice(0, index + 1).join('/')}` }))];
@@ -322,10 +383,12 @@ export default function App() {
 
   useEffect(() => {
     const closeFromPointer = (event: PointerEvent) => {
-      if (!(event.target as Element | null)?.closest('.entry-context-menu')) setEntryContextMenu(null);
+      const target = event.target as Element | null;
+      if (!target?.closest('.entry-context-menu')) setEntryContextMenu(null);
+      if (!target?.closest('.column-visibility-menu')) setColumnMenu(null);
     };
-    const closeFromKey = (event: KeyboardEvent) => { if (event.key === 'Escape') setEntryContextMenu(null); };
-    const close = () => setEntryContextMenu(null);
+    const closeFromKey = (event: KeyboardEvent) => { if (event.key === 'Escape') { setEntryContextMenu(null); setColumnMenu(null); } };
+    const close = () => { setEntryContextMenu(null); setColumnMenu(null); };
     document.addEventListener('pointerdown', closeFromPointer);
     document.addEventListener('keydown', closeFromKey);
     window.addEventListener('blur', close);
@@ -367,6 +430,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('harbor-transfer.column-widths-v2', JSON.stringify(columnWidths));
   }, [columnWidths]);
+
+  useEffect(() => {
+    localStorage.setItem('harbor-transfer.column-visibility', JSON.stringify(columnVisibility));
+  }, [columnVisibility]);
 
   useEffect(() => {
     localStorage.setItem('harbor-transfer.view-mode', viewMode);
@@ -476,6 +543,7 @@ export default function App() {
     try {
       const result = await invoke<FileEntry[]>('remote_list', { request: { connectionId: connection.id, path: requestedPath } });
       setEntries(result); setPath(requestedPath); setColumnLevels([{ path: requestedPath, entries: result }]);
+      setSelectedRemoteItems([]); selectionAnchor.current = null;
       return true;
     } catch (reason) { setError(String(reason)); return false; }
     finally { setBusy(false); }
@@ -556,6 +624,47 @@ export default function App() {
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', stop);
     window.addEventListener('pointercancel', stop);
+  }
+
+  function sortByColumn(column: ColumnKey) {
+    if (sortColumn === column) setSortDirection((current) => current === 'ascending' ? 'descending' : 'ascending');
+    else { setSortColumn(column); setSortDirection('ascending'); }
+  }
+
+  function openColumnVisibilityMenu(event: React.MouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    setEntryContextMenu(null);
+    setColumnMenu({ x: Math.max(8, Math.min(event.clientX, window.innerWidth - 220)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - 300)) });
+  }
+
+  function toggleColumn(column: OptionalColumnKey) {
+    setColumnVisibility((current) => ({ ...current, [column]: !current[column] }));
+    if (sortColumn === column && columnVisibility[column]) { setSortColumn('name'); setSortDirection('ascending'); }
+    setColumnMenu(null);
+  }
+
+  function columnLabel(column: ColumnKey) {
+    if (column === 'name') return t.name;
+    if (column === 'size') return t.size;
+    if (column === 'modified') return t.modified;
+    return columnsText[column];
+  }
+
+  function entryKind(entry: FileEntry) {
+    if (entry.file_type === 'Directory') return columnsText.directory;
+    if (entry.file_type === 'Symlink') return columnsText.symlink;
+    return columnsText.file;
+  }
+
+  function renderListCell(entry: FileEntry, column: ColumnKey) {
+    if (column === 'name') return <span className="file-name"><span className="file-name-icon"><RemoteEntryIcon entry={entry} size={18}/></span><span className="file-name-text">{entry.name}</span></span>;
+    if (column === 'size') return <span className="size-cell">{entry.file_type === 'Directory' ? '—' : formatBytes(entry.size)}</span>;
+    if (column === 'modified') return <span className="modified-cell">{entry.modified ?? '—'}</span>;
+    if (column === 'permissions') return <span className="permissions-cell">{entry.permissions ?? '—'}</span>;
+    if (column === 'owner') return <span className="owner-cell">{entry.owner ?? '—'}</span>;
+    if (column === 'group') return <span className="group-cell">{entry.group ?? '—'}</span>;
+    return <span className="type-cell">{entryKind(entry)}</span>;
   }
 
   async function copyCurrentPath() {
@@ -888,10 +997,33 @@ export default function App() {
     catch (reason) { setError(String(reason)); }
   }
 
-  function scheduleRemoteDragPreparation(entry: FileEntry, basePath = path) {
+  function selectedItem(entry: FileEntry, basePath: string): SelectedRemoteItem | null {
+    if (!active) return null;
+    return { connectionId: active.id, remotePath: joinPath(basePath, entry.name), basePath, entry };
+  }
+
+  function selectRemoteEntry(event: { metaKey: boolean; ctrlKey: boolean; shiftKey: boolean }, entry: FileEntry, basePath: string, orderedEntries: FileEntry[]) {
+    const item = selectedItem(entry, basePath);
+    if (!item) return;
+    const index = orderedEntries.findIndex((candidate) => candidate.name === entry.name);
+    if (event.shiftKey && selectionAnchor.current?.basePath === basePath && index >= 0) {
+      const start = Math.min(selectionAnchor.current.index, index);
+      const end = Math.max(selectionAnchor.current.index, index);
+      const range = orderedEntries.slice(start, end + 1).map((candidate) => selectedItem(candidate, basePath)).filter((candidate): candidate is SelectedRemoteItem => candidate !== null);
+      setSelectedRemoteItems((current) => event.metaKey || event.ctrlKey ? [...current.filter((currentItem) => !range.some((rangeItem) => rangeItem.remotePath === currentItem.remotePath)), ...range] : range);
+      return;
+    }
+    selectionAnchor.current = { basePath, index: Math.max(index, 0) };
+    if (event.metaKey || event.ctrlKey) {
+      setSelectedRemoteItems((current) => current.some((currentItem) => currentItem.connectionId === item.connectionId && currentItem.remotePath === item.remotePath) ? current.filter((currentItem) => currentItem.connectionId !== item.connectionId || currentItem.remotePath !== item.remotePath) : [...current, item]);
+    } else setSelectedRemoteItems([item]);
+  }
+
+  function scheduleRemoteDragPreparation(event: { metaKey: boolean; ctrlKey: boolean; shiftKey: boolean }, entry: FileEntry, basePath = path, orderedEntries = filteredEntries) {
     if (!active) return;
     if (dragSelectionTimer.current !== null) window.clearTimeout(dragSelectionTimer.current);
-    setSelectedRemoteFile({ connectionId: active.id, remotePath: joinPath(basePath, entry.name) });
+    selectRemoteEntry(event, entry, basePath, orderedEntries);
+    if (event.metaKey || event.ctrlKey || event.shiftKey) { dragSelectionTimer.current = null; return; }
     // Preparing a directory downloads its entire tree while holding the remote
     // connection. Do that only after an actual drag gesture, never on selection.
     if (entry.file_type === 'Directory') {
@@ -912,7 +1044,8 @@ export default function App() {
   async function prepareRemoteDrag(entry: FileEntry, basePath = path) {
     if (!active) return;
     const remotePath = joinPath(basePath, entry.name);
-    setSelectedRemoteFile({ connectionId: active.id, remotePath });
+    const item = selectedItem(entry, basePath);
+    if (item) setSelectedRemoteItems([item]);
     if (entry.file_type === 'Symlink') {
       dragPreparationSequence.current += 1;
       dragPreparingRef.current = '';
@@ -984,7 +1117,10 @@ export default function App() {
     event.stopPropagation();
     cancelScheduledDragPreparation();
     const remotePath = joinPath(basePath, entry.name);
-    setSelectedRemoteFile({ connectionId: active.id, remotePath });
+    if (!selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath)) {
+      const item = selectedItem(entry, basePath);
+      if (item) setSelectedRemoteItems([item]);
+    }
     const target = event.currentTarget as HTMLElement;
     const rect = target.getBoundingClientRect();
     const requestedX = event.clientX || rect.right;
@@ -997,15 +1133,22 @@ export default function App() {
     });
   }
 
-  async function renameEntry(entry: FileEntry, basePath: string) {
+  function informationTargets(entry: FileEntry, basePath: string) {
+    const clicked = selectedItem(entry, basePath);
+    if (!clicked || !active) return [];
+    return selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === clicked.remotePath) ? selectedRemoteItems.filter((item) => item.connectionId === active.id) : [clicked];
+  }
+
+  function openFileInformation(event: React.MouseEvent, entry: FileEntry, basePath = path) {
     if (!active) return;
+    event.preventDefault();
+    event.stopPropagation();
+    cancelScheduledDragPreparation();
+    const items = informationTargets(entry, basePath);
+    if (items.length === 0) return;
+    setSelectedRemoteItems(items);
     setEntryContextMenu(null);
-    const newName = window.prompt(p2.renameTo, entry.name)?.trim();
-    if (!newName || newName === entry.name || newName.includes('/')) return;
-    try {
-      await invoke('remote_rename', { request: { connectionId: active.id, oldPath: joinPath(basePath, entry.name), newPath: joinPath(basePath, newName) } });
-      await loadDirectory(active, basePath);
-    } catch (reason) { setError(String(reason)); }
+    setFileInformationTarget({ items, focus: 'metadata' });
   }
 
   async function deleteEntry(entry: FileEntry, basePath: string) {
@@ -1095,25 +1238,22 @@ export default function App() {
           </div>
           {error && <div className="error-banner"><strong>{t.error}:</strong> {error}</div>}
           <div className="connection-strip"><span className="online-dot" />{active.name}<span>·</span><span>{active.username}@{active.host}</span><span className="connected">{t.connected}</span></div>
-          {viewMode === 'list' && <div className="file-table" role="table" style={{ '--column-name': `${columnWidths.name}px`, '--column-size': `${columnWidths.size}px`, '--column-modified': `${columnWidths.modified}px`, '--column-permissions': `${columnWidths.permissions}px` } as React.CSSProperties}>
-            <div className="file-header" role="row">
-              <ResizableColumnHeader label={t.name} column="name" width={columnWidths.name} resizeLabel={columnsText.resize} onStart={startColumnResize} onAdjust={adjustColumnWidth}/>
-              <ResizableColumnHeader label={t.size} column="size" width={columnWidths.size} resizeLabel={columnsText.resize} onStart={startColumnResize} onAdjust={adjustColumnWidth}/>
-              <ResizableColumnHeader label={t.modified} column="modified" width={columnWidths.modified} resizeLabel={columnsText.resize} onStart={startColumnResize} onAdjust={adjustColumnWidth}/>
-              <ResizableColumnHeader label={columnsText.permissions} column="permissions" width={columnWidths.permissions} resizeLabel={columnsText.resize} onStart={startColumnResize} onAdjust={adjustColumnWidth}/><span />
+          {viewMode === 'list' && <div className="file-table" role="table" style={{ '--file-columns': `${visibleColumns.map((column) => column === 'name' ? `minmax(${columnWidths[column]}px, 1fr)` : `${columnWidths[column]}px`).join(' ')} 30px`, '--file-min-width': `${visibleColumns.reduce((total, column) => total + columnWidths[column], 0) + 40 + visibleColumns.length * 8}px` } as React.CSSProperties}>
+            <div className="file-header" role="row" onContextMenu={openColumnVisibilityMenu}>
+              {visibleColumns.map((column) => <ResizableColumnHeader key={column} label={columnLabel(column)} column={column} width={columnWidths[column]} resizeLabel={columnsText.resize} sorted={sortColumn === column} direction={sortDirection} onSort={sortByColumn} onStart={startColumnResize} onAdjust={adjustColumnWidth}/>)}<span className="actions-column-heading" role="columnheader" />
             </div>
-            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`file-row interactive ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="row" aria-selected={selected} tabIndex={0} draggable={entry.file_type !== 'Symlink'} onContextMenu={(event) => openEntryContext(event, entry)} onClick={() => scheduleRemoteDragPreparation(entry)} onKeyDown={(event) => { if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(entry); } if (event.key === 'Enter') { entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); } }} onDragStart={(event) => startRemoteDrag(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }}>
-              <span className="file-name">{entry.file_type === 'Directory' ? <Folder fill="currentColor" size={18}/> : <Cloud size={18}/>} {entry.name}</span><span>{entry.file_type === 'Directory' ? '—' : formatBytes(entry.size)}</span><span>{entry.modified ?? '—'}</span><span className="permissions-cell">{entry.permissions ?? '—'}</span><button aria-label={accessibilityCopy[language].more} onClick={(event) => openEntryContext(event, entry)}><MoreHorizontal size={18}/></button>
+            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`file-row interactive ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="row" aria-selected={selected} tabIndex={0} draggable={entry.file_type !== 'Symlink'} onContextMenu={(event) => openEntryContext(event, entry)} onClick={(event) => scheduleRemoteDragPreparation(event, entry)} onKeyDown={(event) => { if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(event, entry); } if (event.key === 'Enter') { entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); } }} onDragStart={(event) => startRemoteDrag(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }}>
+              {visibleColumns.map((column) => <span className={`list-cell ${column}-column`} role="cell" key={column}>{renderListCell(entry, column)}</span>)}<button aria-label={menuText.information} title={menuText.information} onClick={(event) => openFileInformation(event, entry)}><MoreHorizontal size={18}/></button>
             </div>; })}
           </div>}
           {viewMode === 'icons' && <div className="icon-grid" role="grid">
             {filteredEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
-            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`icon-entry ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} role="gridcell" key={entry.name} draggable={entry.file_type !== 'Symlink'} onContextMenu={(event) => openEntryContext(event, entry)} onDragStart={(event) => startRemoteDrag(event, entry)}>
-              <button className="icon-entry-main" title={entry.name} onClick={() => scheduleRemoteDragPreparation(entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }} onKeyDown={(event) => { if (event.key !== 'Enter') return; entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }}>
-                {entry.file_type === 'Directory' ? <Folder className="entry-art folder-art" fill="currentColor" size={46}/> : <File className="entry-art" size={44}/>}
+            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`icon-entry ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} role="gridcell" aria-selected={selected} key={entry.name} draggable={entry.file_type !== 'Symlink'} onContextMenu={(event) => openEntryContext(event, entry)} onDragStart={(event) => startRemoteDrag(event, entry)}>
+              <button className="icon-entry-main" title={entry.name} onClick={(event) => scheduleRemoteDragPreparation(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }} onKeyDown={(event) => { if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(event, entry); } if (event.key !== 'Enter') return; entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }}>
+                <RemoteEntryIcon entry={entry} className="entry-art" size={entry.file_type === 'Directory' ? 46 : 44}/>
                 <strong>{entry.name}</strong><small>{entry.file_type === 'Directory' ? entry.permissions ?? '—' : formatBytes(entry.size)}</small>
               </button>
-              <button className="icon-entry-more" aria-label={accessibilityCopy[language].more} onClick={(event) => openEntryContext(event, entry)}><MoreHorizontal size={16}/></button>
+              <button className="icon-entry-more" aria-label={menuText.information} title={menuText.information} onClick={(event) => openFileInformation(event, entry)}><MoreHorizontal size={16}/></button>
             </div>; })}
           </div>}
           {viewMode === 'columns' && <div className="column-browser" role="listbox" aria-label={viewsText.columns}>
@@ -1122,11 +1262,11 @@ export default function App() {
               return <section className="directory-column" key={`${level.path}-${levelIndex}`} aria-label={level.path}>
                 <div className="directory-column-title" title={level.path}>{level.path}</div>
                 {visibleLevelEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
-                {visibleLevelEntries.map((entry) => { const remotePath = joinPath(level.path, entry.name); const selectedForDrag = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`column-entry ${level.selectedName === entry.name || selectedForDrag ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="option" aria-selected={level.selectedName === entry.name || selectedForDrag} draggable={entry.file_type !== 'Symlink'} onContextMenu={(event) => openEntryContext(event, entry, level.path)} onDragStart={(event) => startRemoteDrag(event, entry, level.path)}>
-                  <button className="column-entry-main" title={entry.name} onClick={(event) => { if (event.detail <= 1) { cancelScheduledDragPreparation(); setSelectedRemoteFile({ connectionId: active.id, remotePath }); void openColumnEntry(levelIndex, entry); } }} onDoubleClick={() => { cancelScheduledDragPreparation(); if (entry.file_type !== 'Directory') void downloadFile(entry, level.path); }}>
-                    {entry.file_type === 'Directory' ? <Folder fill="currentColor" size={17}/> : <File size={16}/>}<span>{entry.name}</span>{entry.file_type === 'Directory' ? <ChevronRight size={14}/> : <small>{formatBytes(entry.size)}</small>}
+                {visibleLevelEntries.map((entry) => { const remotePath = joinPath(level.path, entry.name); const selectedForAction = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`column-entry ${level.selectedName === entry.name || selectedForAction ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="option" aria-selected={level.selectedName === entry.name || selectedForAction} draggable={entry.file_type !== 'Symlink'} onContextMenu={(event) => openEntryContext(event, entry, level.path)} onDragStart={(event) => startRemoteDrag(event, entry, level.path)}>
+                  <button className="column-entry-main" title={entry.name} onClick={(event) => { if (event.detail <= 1) { cancelScheduledDragPreparation(); selectRemoteEntry(event, entry, level.path, visibleLevelEntries); if (!event.metaKey && !event.ctrlKey && !event.shiftKey) void openColumnEntry(levelIndex, entry); } }} onDoubleClick={() => { cancelScheduledDragPreparation(); if (entry.file_type !== 'Directory') void downloadFile(entry, level.path); }}>
+                    <RemoteEntryIcon entry={entry} size={entry.file_type === 'Directory' ? 17 : 16}/><span>{entry.name}</span>{entry.file_type === 'Directory' ? <ChevronRight size={14}/> : <small>{formatBytes(entry.size)}</small>}
                   </button>
-                  <button className="column-entry-more" aria-label={accessibilityCopy[language].more} onClick={(event) => openEntryContext(event, entry, level.path)}><MoreHorizontal size={15}/></button>
+                  <button className="column-entry-more" aria-label={menuText.information} title={menuText.information} onClick={(event) => openFileInformation(event, entry, level.path)}><MoreHorizontal size={15}/></button>
                 </div>; })}
               </section>;
             })}
@@ -1157,23 +1297,35 @@ export default function App() {
         </div>)}
       </div>
     </section>
+    {columnMenu && <div className="column-visibility-menu" role="menu" style={{ left: columnMenu.x, top: columnMenu.y }} onContextMenu={(event) => event.preventDefault()}>
+      <div className="context-menu-heading">{columnsText.displayColumns}</div>
+      <button type="button" role="menuitemcheckbox" aria-checked="true" disabled><Check size={14}/>{t.name}</button>
+      {optionalColumnOrder.map((column) => <button type="button" role="menuitemcheckbox" aria-checked={columnVisibility[column]} key={column} onClick={() => toggleColumn(column)}>{columnVisibility[column] ? <Check size={14}/> : <span className="menu-check-placeholder"/>}{columnLabel(column)}</button>)}
+      <button type="button" role="menuitemcheckbox" aria-checked="true" disabled><Check size={14}/>{accessibilityCopy[language].more}</button>
+    </div>}
     {entryContextMenu && active && <div className="entry-context-menu" role="menu" style={{ left: entryContextMenu.x, top: entryContextMenu.y }} onContextMenu={(event) => event.preventDefault()}>
       <div className="context-menu-heading" title={entryContextMenu.entry.name}>{entryContextMenu.entry.name}</div>
-      <button role="menuitem" onClick={() => void renameEntry(entryContextMenu.entry, entryContextMenu.basePath)}><Pencil size={15}/>{menuText.rename}</button>
-      <div className="context-menu-separator" role="separator"/>
       <button role="menuitem" disabled={entryContextMenu.entry.file_type === 'Symlink'} onClick={() => placeOnRemoteClipboard(entryContextMenu.entry, entryContextMenu.basePath, 'cut')}><Scissors size={15}/>{menuText.cut}</button>
       <button role="menuitem" disabled={entryContextMenu.entry.file_type === 'Symlink'} onClick={() => placeOnRemoteClipboard(entryContextMenu.entry, entryContextMenu.basePath, 'copy')}><Copy size={15}/>{menuText.copy}</button>
       <button role="menuitem" disabled={!remoteClipboard || remoteClipboard.connectionId !== active.id} onClick={() => void pasteRemote(entryContextMenu.basePath)}><ClipboardPaste size={15}/>{menuText.paste}</button>
       <button className="danger" role="menuitem" onClick={() => void deleteEntry(entryContextMenu.entry, entryContextMenu.basePath)}><Trash2 size={15}/>{menuText.delete}</button>
       <div className="context-menu-separator" role="separator"/>
       <button role="menuitem" disabled={entryContextMenu.entry.file_type !== 'File'} onClick={() => { const target = entryContextMenu; setEntryContextMenu(null); void downloadFile(target.entry, target.basePath); }}><Download size={15}/>{menuText.download}</button>
-      <button role="menuitem" disabled={entryContextMenu.entry.file_type === 'Symlink'} onClick={() => { setFileInformationTarget({ entry: entryContextMenu.entry, basePath: entryContextMenu.basePath }); setEntryContextMenu(null); }}><FileCog size={15}/>{menuText.information}</button>
+      <button role="menuitem" onClick={() => { const items = informationTargets(entryContextMenu.entry, entryContextMenu.basePath); if (items.length) { setSelectedRemoteItems(items); setFileInformationTarget({ items, focus: 'metadata' }); } setEntryContextMenu(null); }}><FileCog size={15}/>{menuText.information}</button>
     </div>}
-    {fileInformationTarget && active && <FileInformationSheet connection={active} target={fileInformationTarget} t={t} text={menuText} onClose={() => setFileInformationTarget(null)} onSave={async (permissions, modified) => {
-      await invoke('remote_set_metadata', { request: { connectionId: active.id, path: joinPath(fileInformationTarget.basePath, fileInformationTarget.entry.name), permissions, modified } });
+    {fileInformationTarget && active && <FileInformationSheet connection={active} target={fileInformationTarget} t={t} text={menuText} onClose={() => setFileInformationTarget(null)} onSave={async (name, permissions, modified, ownerId, groupId) => {
+      if (permissions !== null || modified !== null || ownerId !== null || groupId !== null) {
+        for (const item of fileInformationTarget.items) await invoke('remote_set_metadata', { request: { connectionId: active.id, path: item.remotePath, permissions, modified, ownerId, groupId } });
+      }
+      const singleItem = fileInformationTarget.items.length === 1 ? fileInformationTarget.items[0] : null;
+      if (singleItem && name !== null && name !== singleItem.entry.name) {
+        const destinationPath = joinPath(singleItem.basePath, name);
+        await invoke('remote_rename', { request: { connectionId: active.id, oldPath: singleItem.remotePath, newPath: destinationPath } });
+      }
       setFileInformationTarget(null);
+      setSelectedRemoteItems([]);
       setNotice(menuText.saved);
-      await loadDirectory(active, fileInformationTarget.basePath);
+      await loadDirectory(active, path);
     }}
     />}
     {showConnect && <ConnectSheet mode={connectSheetMode} bookmark={connectingBookmark} initialKeyPath={selectedKeyPath} defaultProtocol={preferences.defaultProtocol} t={t} phaseCopy={p1} localCopy={bookmarkLocalText} s3Text={s3Copy[language]} onClose={() => setShowConnect(false)} onSaved={(connection) => {
@@ -1191,18 +1343,37 @@ export default function App() {
   </main>;
 }
 
-function FileInformationSheet({ connection, target, t, text, onClose, onSave }: { connection: Connection; target: FileInformationTarget; t: typeof copy[keyof typeof copy]; text: typeof contextMenuCopy[keyof typeof contextMenuCopy]; onClose: () => void; onSave: (permissions: number | null, modified: number | null) => Promise<void> }) {
-  const editable = connection.protocol === 'sftp' || connection.protocol === 'ftp' || connection.protocol === 'ftps';
+function FileInformationSheet({ connection, target, t, text, onClose, onSave }: { connection: Connection; target: FileInformationTarget; t: typeof copy[keyof typeof copy]; text: typeof contextMenuCopy[keyof typeof contextMenuCopy]; onClose: () => void; onSave: (name: string | null, permissions: number | null, modified: number | null, ownerId: number | null, groupId: number | null) => Promise<void> }) {
+  const entries = target.items.map((item) => item.entry);
+  const first = entries[0];
+  const multiple = entries.length > 1;
+  const samePermissions = entries.every((entry) => entry.permissions === first.permissions);
+  const sameModified = entries.every((entry) => entry.modified === first.modified);
+  const sameOwner = entries.every((entry) => entry.owner === first.owner);
+  const sameGroup = entries.every((entry) => entry.group === first.group);
+  const commonPermissions = samePermissions ? first.permissions : undefined;
+  const commonModified = sameModified ? first.modified : undefined;
+  const commonOwner = sameOwner ? first.owner : undefined;
+  const commonGroup = sameGroup ? first.group : undefined;
+  const commonKind = entries.every((entry) => entry.file_type === first.file_type) ? first.file_type : undefined;
+  const metadataEditable = entries.every((entry) => entry.file_type !== 'Symlink') && (connection.protocol === 'sftp' || connection.protocol === 'ftp' || connection.protocol === 'ftps');
+  const ownershipEditable = entries.every((entry) => entry.file_type !== 'Symlink') && connection.protocol === 'sftp';
+  const [name, setName] = useState(multiple ? '' : first.name);
   const [changePermissions, setChangePermissions] = useState(false);
-  const [permissions, setPermissions] = useState(permissionStringToOctal(target.entry.permissions));
+  const [permissions, setPermissions] = useState(permissionStringToOctal(commonPermissions));
   const [changeModified, setChangeModified] = useState(false);
-  const [modified, setModified] = useState(toDateTimeLocal(target.entry.modified));
+  const [modified, setModified] = useState(toDateTimeLocal(commonModified));
+  const [changeOwnership, setChangeOwnership] = useState(false);
+  const [ownerId, setOwnerId] = useState(commonOwner ?? '');
+  const [groupId, setGroupId] = useState(commonGroup ?? '');
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState('');
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    if (!changePermissions && !changeModified) { setFormError(text.chooseField); return; }
+    const nextName = multiple ? null : name.trim();
+    if (!multiple && (!nextName || nextName === '.' || nextName === '..' || nextName.includes('/'))) { setFormError(text.invalidName); return; }
+    if ((multiple || nextName === first.name) && !changePermissions && !changeModified && !changeOwnership) { setFormError(text.chooseField); return; }
     let permissionValue: number | null = null;
     if (changePermissions) {
       if (!/^[0-7]{3,4}$/.test(permissions)) { setFormError(text.invalidPermissions); return; }
@@ -1214,21 +1385,32 @@ function FileInformationSheet({ connection, target, t, text, onClose, onSave }: 
       if (!modified || Number.isNaN(date.getTime())) { setFormError(text.invalidDate); return; }
       modifiedValue = Math.floor(date.getTime() / 1000);
     }
+    let ownerValue: number | null = null;
+    let groupValue: number | null = null;
+    if (changeOwnership) {
+      const validIdentifier = (value: string) => /^\d+$/.test(value) && Number(value) <= 4_294_967_295;
+      if ((!ownerId && !groupId) || (ownerId && !validIdentifier(ownerId)) || (groupId && !validIdentifier(groupId))) { setFormError(text.invalidOwnership); return; }
+      ownerValue = ownerId ? Number(ownerId) : null;
+      groupValue = groupId ? Number(groupId) : null;
+    }
     setBusy(true); setFormError('');
-    try { await onSave(permissionValue, modifiedValue); }
+    try { await onSave(nextName, permissionValue, modifiedValue, ownerValue, groupValue); }
     catch (reason) { setFormError(String(reason)); }
     finally { setBusy(false); }
   }
 
   return <div className="modal-backdrop" role="presentation"><form className="connect-sheet file-information-sheet" onSubmit={submit}>
     <div className="sheet-title"><div><h2>{text.title}</h2><p>{text.detail}</p></div><button type="button" onClick={onClose}>×</button></div>
-    <div className="file-information-summary"><FileCog size={28}/><div><strong>{target.entry.name}</strong><span>{text.kind}: {target.entry.file_type}</span><span>{target.entry.file_type === 'Directory' ? '—' : formatBytes(target.entry.size)}</span></div></div>
-    {!editable && <p className="protocol-support-note">{text.unsupported}</p>}
+    <div className="file-information-summary"><FileCog size={28}/><div><strong>{multiple ? text.selectedCount.replace('{{count}}', String(entries.length)) : first.name}</strong><span>{text.kind}: {commonKind ?? text.mixed}</span><span>{multiple || first.file_type === 'Directory' ? '—' : formatBytes(first.size)}</span></div></div>
+    {multiple ? <p className="protocol-support-note">{text.multipleName}</p> : <label className="file-information-name">{text.fileName}<input autoFocus={target.focus === 'name'} value={name} onChange={(event) => setName(event.target.value)}/></label>}
+    {!metadataEditable && <p className="protocol-support-note">{text.unsupported}</p>}
     {(connection.protocol === 'ftp' || connection.protocol === 'ftps') && <p className="protocol-support-note">{text.ftpSupport}</p>}
-    <label className="metadata-toggle"><span><input type="checkbox" disabled={!editable} checked={changePermissions} onChange={(event) => setChangePermissions(event.target.checked)}/>{text.changePermissions}</span><input aria-label={text.permissions} disabled={!editable || !changePermissions} value={permissions} onChange={(event) => setPermissions(event.target.value)} placeholder="0644" maxLength={4}/><small>{text.permissions}: {target.entry.permissions ?? '—'}</small></label>
-    <label className="metadata-toggle"><span><input type="checkbox" disabled={!editable} checked={changeModified} onChange={(event) => setChangeModified(event.target.checked)}/>{text.changeModified}</span><input aria-label={text.modified} type="datetime-local" step="1" disabled={!editable || !changeModified} value={modified} onChange={(event) => setModified(event.target.value)}/><small>{text.modified}: {target.entry.modified ?? '—'}</small></label>
+    <label className="metadata-toggle"><span><input type="checkbox" disabled={!metadataEditable} checked={changePermissions} onChange={(event) => setChangePermissions(event.target.checked)}/>{text.changePermissions}</span><input aria-label={text.permissions} disabled={!metadataEditable || !changePermissions} value={permissions} onChange={(event) => setPermissions(event.target.value)} placeholder="0644" maxLength={4}/><small>{text.permissions}: {samePermissions ? commonPermissions ?? '—' : text.mixed}</small></label>
+    <label className="metadata-toggle"><span><input type="checkbox" disabled={!metadataEditable} checked={changeModified} onChange={(event) => setChangeModified(event.target.checked)}/>{text.changeModified}</span><input aria-label={text.modified} type="datetime-local" step="1" disabled={!metadataEditable || !changeModified} value={modified} onChange={(event) => setModified(event.target.value)}/><small>{text.modified}: {sameModified ? commonModified ?? '—' : text.mixed}</small></label>
+    <div className="metadata-toggle ownership-toggle"><span><input id="change-ownership" type="checkbox" disabled={!ownershipEditable} checked={changeOwnership} onChange={(event) => setChangeOwnership(event.target.checked)}/><label htmlFor="change-ownership">{text.changeOwnership}</label></span><div className="ownership-fields"><label>{text.owner}<input inputMode="numeric" disabled={!ownershipEditable || !changeOwnership} value={ownerId} onChange={(event) => setOwnerId(event.target.value)} placeholder="UID"/></label><label>{text.group}<input inputMode="numeric" disabled={!ownershipEditable || !changeOwnership} value={groupId} onChange={(event) => setGroupId(event.target.value)} placeholder="GID"/></label></div><small>{text.owner}: {sameOwner ? commonOwner ?? '—' : text.mixed} · {text.group}: {sameGroup ? commonGroup ?? '—' : text.mixed}</small></div>
+    {ownershipEditable && <p className="protocol-support-note">{text.ownershipSftp}</p>}
     {formError && <p className="form-error">{formError}</p>}
-    <div className="form-actions"><button type="button" onClick={onClose}>{t.cancel}</button><button className="primary" disabled={!editable || busy}>{busy && <LoaderCircle className="spinning" size={15}/>} {text.save}</button></div>
+    <div className="form-actions"><button type="button" onClick={onClose}>{t.cancel}</button><button className="primary" disabled={busy}>{busy && <LoaderCircle className="spinning" size={15}/>} {text.save}</button></div>
   </form></div>;
 }
 

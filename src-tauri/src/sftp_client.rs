@@ -344,9 +344,17 @@ impl StandaloneSftpClient {
         path: &str,
         permissions: Option<u32>,
         modified: Option<u32>,
+        owner_id: Option<u32>,
+        group_id: Option<u32>,
     ) -> Result<()> {
         let sftp = self.sftp.as_ref().ok_or_else(|| anyhow::anyhow!("SFTP session not connected"))?;
-        let attributes = FileAttributes { permissions, mtime: modified, ..FileAttributes::default() };
+        let attributes = FileAttributes {
+            uid: owner_id,
+            gid: group_id,
+            permissions,
+            mtime: modified,
+            ..FileAttributes::default()
+        };
         sftp.set_metadata(path, attributes)
             .await
             .map_err(|error| anyhow::anyhow!("Failed to update file information for '{}': {}", path, error))
@@ -627,7 +635,10 @@ mod tests {
         let content = vec![0x5a; 2 * 1024 * 1024 + 17];
         tokio::fs::write(&upload, &content).await.expect("write upload fixture");
         client.upload_file(upload.to_str().unwrap(), &remote).await.expect("upload Unicode path");
-        client.set_metadata(&remote, Some(0o640), Some(1_787_706_123)).await.expect("set SFTP metadata");
+        client
+            .set_metadata(&remote, Some(0o640), Some(1_787_706_123), None, None)
+            .await
+            .expect("set SFTP metadata");
         let metadata_entry = client
             .list_dir(directory)
             .await

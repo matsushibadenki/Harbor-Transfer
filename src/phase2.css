@@ -1,4 +1,18 @@
 /* Hallmark · genre: modern-minimal · macrostructure: Workbench · dark-palette-audit */
+:root {
+  --ht-file-name: #000;
+  --ht-icon-image: #7c3aed;
+  --ht-icon-video: #db2777;
+  --ht-icon-audio: #d97706;
+  --ht-icon-archive: #a16207;
+  --ht-icon-code: #2563eb;
+  --ht-icon-data: #0891b2;
+  --ht-icon-spreadsheet: #16803c;
+  --ht-icon-document: #dc2626;
+  --ht-icon-generic: #52636f;
+  --ht-icon-link: #7c3aed;
+}
+
 .browser {
   position: relative;
   min-height: 0;
@@ -359,8 +373,12 @@ body.key-manager-body {
   text-align: left;
 }
 
-.column-entry-main > svg:first-child {
+.column-entry-main > .remote-entry-icon,
+.column-entry-main > .file-type-icon {
   flex: none;
+}
+
+.column-entry-main > .remote-entry-icon.folder-art {
   color: #55a98f;
 }
 
@@ -446,7 +464,6 @@ body.key-manager-body {
   box-shadow: inset 0 0 0 1px #9fcfc3;
 }
 
-.icon-entry.drag-ready,
 .column-entry.drag-ready {
   box-shadow: inset 3px 0 #2d927f;
 }
@@ -454,31 +471,33 @@ body.key-manager-body {
 .file-table .file-header,
 .file-table .file-row {
   width: 100%;
-  min-width: calc(var(--column-name) + var(--column-size) + var(--column-modified) + var(--column-permissions) + 102px);
-  grid-template-columns: minmax(var(--column-name), 1fr) var(--column-size) var(--column-modified) var(--column-permissions) 30px;
+  min-width: var(--file-min-width);
+  grid-template-columns: var(--file-columns);
   gap: 8px;
 }
 
-.file-row > span {
+.file-row > .list-cell {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.file-header .column-heading:nth-child(2),
-.file-header .column-heading:nth-child(3),
-.file-header .column-heading:nth-child(4) {
+.file-header .column-heading:not(:first-child) .column-sort-button {
   justify-content: center;
 }
 
-.file-row > span:nth-child(2),
-.file-row > span:nth-child(3),
-.file-row > span:nth-child(4) {
+.list-cell:not(.name-column) {
   text-align: center;
 }
 
-.file-row > span:nth-child(2) {
+.name-column,
+.file-header .column-heading:first-child .column-sort-button {
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.size-column {
   font-variant-numeric: tabular-nums;
 }
 
@@ -496,7 +515,47 @@ body.key-manager-body {
   align-items: center;
 }
 
-.column-heading > span:first-child {
+.column-sort-button {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 3px;
+  padding: 0 4px !important;
+  color: inherit;
+  border-radius: 4px;
+  background: transparent;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+}
+
+.column-sort-button > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.column-sort-button > svg {
+  flex: none;
+  color: var(--ht-accent-strong, #0e7366);
+}
+
+.file-name-icon {
+  display: inline-flex;
+  flex: none;
+}
+
+.name-column .file-name {
+  min-width: 0;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.file-name-text {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1238,6 +1297,17 @@ html[data-resolved-theme='dark'] {
   --ht-danger-surface: oklch(23% 0.04 30);
   --ht-warning-surface: oklch(23% 0.035 78);
   --ht-overlay: oklch(12% 0.01 175 / 72%);
+  --ht-file-name: oklch(98% 0 0);
+  --ht-icon-image: #c4b5fd;
+  --ht-icon-video: #f9a8d4;
+  --ht-icon-audio: #fbbf24;
+  --ht-icon-archive: #f0b66e;
+  --ht-icon-code: #7dd3fc;
+  --ht-icon-data: #67e8f9;
+  --ht-icon-spreadsheet: #6ee7b7;
+  --ht-icon-document: #fca5a5;
+  --ht-icon-generic: #cbd5e1;
+  --ht-icon-link: #c4b5fd;
 
 /* Global hierarchy */
 body,
@@ -1567,6 +1637,54 @@ button:not(.primary):hover:not(:disabled),
 }
 
 /* Entry context menu and file-information editor */
+.column-visibility-menu {
+  position: fixed;
+  z-index: 13;
+  width: 210px;
+  padding: 6px;
+  color: var(--ht-text-primary, #29453f);
+  border: 1px solid var(--ht-rule, #d7e2df);
+  border-radius: 10px;
+  background: var(--ht-surface-2, #fff);
+  box-shadow: 0 14px 38px oklch(8% 0.01 175 / 32%);
+  user-select: none;
+}
+
+.column-visibility-menu .context-menu-heading {
+  padding: 7px 10px 8px;
+  color: var(--ht-text-muted, #6f827e);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.column-visibility-menu > button {
+  width: 100%;
+  min-height: 31px;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 0 9px;
+  border-radius: 6px;
+  color: var(--ht-text-primary, #29453f);
+  font-size: 12px;
+  font-weight: 520;
+}
+
+.column-visibility-menu > button:hover:not(:disabled) {
+  background: var(--ht-selected, #dcefe9) !important;
+}
+
+.column-visibility-menu > button:disabled {
+  color: var(--ht-text-muted, #6f827e);
+  opacity: 1;
+  cursor: not-allowed;
+}
+
+.column-visibility-menu > button > svg,
+.menu-check-placeholder {
+  width: 14px;
+  min-width: 14px;
+}
+
 .entry-context-menu {
   position: fixed;
   z-index: 12;
@@ -1616,7 +1734,12 @@ button:not(.primary):hover:not(:disabled),
 }
 
 .file-information-sheet {
+  display: flex;
   width: min(500px, 100%);
+  max-height: calc(100dvh - 48px);
+  flex-direction: column;
+  overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .file-information-summary {
@@ -1654,6 +1777,10 @@ button:not(.primary):hover:not(:disabled),
   font-size: 11px;
 }
 
+.file-information-name {
+  flex: none;
+}
+
 .metadata-toggle {
   padding: 11px 0;
   border-bottom: 1px solid var(--ht-row-rule, #e5ecea);
@@ -1671,6 +1798,34 @@ button:not(.primary):hover:not(:disabled),
   margin: 0;
 }
 
+.ownership-toggle > span > label {
+  display: inline;
+  margin: 0;
+  cursor: pointer;
+}
+
+.ownership-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+}
+
+.ownership-fields label {
+  min-width: 0;
+  margin: 7px 0 0;
+}
+
+.file-information-sheet > .form-actions {
+  position: sticky;
+  bottom: -1px;
+  z-index: 1;
+  flex: none;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--ht-row-rule, #e5ecea);
+  background: var(--ht-surface-2, #fff);
+}
+
 .protocol-support-note {
   margin: 12px 0;
   padding: 9px 11px;
@@ -1681,3 +1836,22 @@ button:not(.primary):hover:not(:disabled),
   font-size: 11px;
   line-height: 1.5;
 }
+
+/* Remote files do not have a local NSWorkspace icon, so use a consistent,
+   extension-aware icon language without creating temporary local files. */
+.file-name-text,
+.icon-entry-main strong,
+.column-entry-main > span {
+  color: var(--ht-file-name) !important;
+}
+
+.file-type-icon.file-type-image { color: var(--ht-icon-image); }
+.file-type-icon.file-type-video { color: var(--ht-icon-video); }
+.file-type-icon.file-type-audio { color: var(--ht-icon-audio); }
+.file-type-icon.file-type-archive { color: var(--ht-icon-archive); }
+.file-type-icon.file-type-code { color: var(--ht-icon-code); }
+.file-type-icon.file-type-data { color: var(--ht-icon-data); }
+.file-type-icon.file-type-spreadsheet { color: var(--ht-icon-spreadsheet); }
+.file-type-icon.file-type-document { color: var(--ht-icon-document); }
+.file-type-icon.file-type-generic { color: var(--ht-icon-generic); }
+.file-type-icon.file-type-link { color: var(--ht-icon-link); }

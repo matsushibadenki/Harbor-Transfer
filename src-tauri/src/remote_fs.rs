@@ -18,6 +18,8 @@ pub trait RemoteFileSystem: Send {
         path: &str,
         permissions: Option<u32>,
         modified: Option<u32>,
+        owner_id: Option<u32>,
+        group_id: Option<u32>,
     ) -> Result<()>;
     async fn delete_file(&mut self, path: &str) -> Result<()>;
     async fn delete_dir(&mut self, path: &str) -> Result<()>;
@@ -46,8 +48,10 @@ impl RemoteFileSystem for StandaloneSftpClient {
         path: &str,
         permissions: Option<u32>,
         modified: Option<u32>,
+        owner_id: Option<u32>,
+        group_id: Option<u32>,
     ) -> Result<()> {
-        StandaloneSftpClient::set_metadata(self, path, permissions, modified).await
+        StandaloneSftpClient::set_metadata(self, path, permissions, modified, owner_id, group_id).await
     }
     async fn delete_file(&mut self, path: &str) -> Result<()> {
         StandaloneSftpClient::delete_file(self, path).await
@@ -82,8 +86,10 @@ impl RemoteFileSystem for FtpClient {
         path: &str,
         permissions: Option<u32>,
         modified: Option<u32>,
+        owner_id: Option<u32>,
+        group_id: Option<u32>,
     ) -> Result<()> {
-        FtpClient::set_metadata(self, path, permissions, modified).await
+        FtpClient::set_metadata(self, path, permissions, modified, owner_id, group_id).await
     }
     async fn delete_file(&mut self, path: &str) -> Result<()> {
         FtpClient::delete_file(self, path).await
@@ -118,6 +124,8 @@ impl RemoteFileSystem for WebDavClient {
         _path: &str,
         _permissions: Option<u32>,
         _modified: Option<u32>,
+        _owner_id: Option<u32>,
+        _group_id: Option<u32>,
     ) -> Result<()> {
         anyhow::bail!("WebDAV does not provide portable POSIX permission or modification-date changes.")
     }
@@ -154,6 +162,8 @@ impl RemoteFileSystem for S3Client {
         _path: &str,
         _permissions: Option<u32>,
         _modified: Option<u32>,
+        _owner_id: Option<u32>,
+        _group_id: Option<u32>,
     ) -> Result<()> {
         anyhow::bail!("S3 objects do not expose POSIX permissions or a writable Last-Modified value.")
     }

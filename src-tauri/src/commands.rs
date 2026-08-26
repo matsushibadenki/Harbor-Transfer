@@ -203,6 +203,8 @@ pub struct SetMetadataRequest {
     pub path: String,
     pub permissions: Option<u32>,
     pub modified: Option<u64>,
+    pub owner_id: Option<u32>,
+    pub group_id: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1534,7 +1536,11 @@ pub async fn remote_set_metadata(
     request: SetMetadataRequest,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    if request.permissions.is_none() && request.modified.is_none() {
+    if request.permissions.is_none()
+        && request.modified.is_none()
+        && request.owner_id.is_none()
+        && request.group_id.is_none()
+    {
         return Err("Choose at least one file-information field to change.".to_string());
     }
     if request.permissions.is_some_and(|mode| mode > 0o7777) {
@@ -1552,7 +1558,7 @@ pub async fn remote_set_metadata(
         .get_mut(&request.connection_id)
         .ok_or("Connection not found.")?
         .file_system()
-        .set_metadata(&request.path, request.permissions, modified)
+        .set_metadata(&request.path, request.permissions, modified, request.owner_id, request.group_id)
         .await
         .map_err(|error| error.to_string())
 }

@@ -304,7 +304,12 @@ impl FtpClient {
         path: &str,
         permissions: Option<u32>,
         modified: Option<u32>,
+        owner_id: Option<u32>,
+        group_id: Option<u32>,
     ) -> Result<()> {
+        if owner_id.is_some() || group_id.is_some() {
+            return Err(anyhow::anyhow!("FTP does not provide a portable owner or group change operation."));
+        }
         if let Some(mode) = permissions {
             ftp_stream!(self, s => {
                 s.site(format!("CHMOD {:03o} {}", mode, path)).await.map_err(|error| {
@@ -689,7 +694,7 @@ mod tests {
         assert_eq!(uploaded_bytes, upload_content.len() as u64);
         eprintln!("Uploaded {} bytes to {}", uploaded_bytes, test_file_remote);
         client
-            .set_metadata(&test_file_remote, Some(0o640), Some(1_787_706_123))
+            .set_metadata(&test_file_remote, Some(0o640), Some(1_787_706_123), None, None)
             .await
             .expect("set FTP metadata");
 
