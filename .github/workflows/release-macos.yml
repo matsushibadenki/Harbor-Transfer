@@ -1,0 +1,99 @@
+name: Release macOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      prerelease:
+        description: Publish as a pre-release
+        required: true
+        default: true
+        type: boolean
+      release_notes:
+        description: Optional release notes
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-macos
+  cancel-in-progress: false
+
+jobs:
+  signed-universal-dmg:
+    name: Signed and notarized universal DMG
+    runs-on: macos-14
+    timeout-minutes: 60
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: 3WH28SSRZC
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          components: rustfmt
+
+      - name: Verify signing and notarization secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_CERTIFICATE" || { echo "Missing APPLE_CERTIFICATE"; exit 1; }
+          test -n "$APPLE_CERTIFICATE_PASSWORD" || { echo "Missing APPLE_CERTIFICATE_PASSWORD"; exit 1; }
+          test -n "$APPLE_ID" || { echo "Missing APPLE_ID"; exit 1; }
+          test -n "$APPLE_PASSWORD" || { echo "Missing APPLE_PASSWORD"; exit 1; }
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+
+      - name: Resolve release version
+        shell: bash
+        run: echo "RELEASE_TAG=v$(node -p \"require('./src-tauri/tauri.conf.json').version\")" >> "$GITHUB_ENV"
+
+      - name: Build, sign, notarize, and upload draft
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: Harbor Transfer v__VERSION__
+          releaseBody: ${{ inputs.release_notes || 'Signed and notarized universal macOS release for Apple Silicon and Intel Macs.' }}
+          releaseDraft: true
+          prerelease: ${{ inputs.prerelease }}
+          args: --target universal-apple-darwin --bundles app,dmg
+
+      - name: Verify notarized artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="src-tauri/target/universal-apple-darwin/release/bundle/macos/Harbor Transfer.app"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          spctl --assess --type execute --verbose=2 "$APP_PATH"
+          find src-tauri/target/universal-apple-darwin/release/bundle/dmg -name '*.dmg' -print0 | xargs -0 -n1 xcrun stapler validate
+
+      - name: Publish verified release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if [[ "$PRERELEASE" == "true" ]]; then
+            gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
+          else
+            gh release edit "$RELEASE_TAG" --draft=false --latest
+          fi
