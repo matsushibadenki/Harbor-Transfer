@@ -7,8 +7,8 @@ import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { getCurrentWebviewWindow, WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowUpToLine, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Cloud, Columns3, Copy, File, Folder, FolderPlus, Grid2X2, HardDrive,
-  FileDown, FileUp, FolderSync, FolderUp, KeyRound, List, LoaderCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, RefreshCw, Search, Settings, Trash2, Upload,
+  ArrowUpToLine, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Cloud, Columns3, Copy, File, FileCog, Folder, FolderPlus, Grid2X2, HardDrive,
+  ClipboardPaste, Download, FileDown, FileUp, FolderSync, FolderUp, KeyRound, List, LoaderCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, RefreshCw, Scissors, Search, Settings, Trash2, Upload,
 } from 'lucide-react';
 
 type Protocol = 'sftp' | 'ftp' | 'ftps' | 'webdav' | 's3';
@@ -42,6 +42,9 @@ type SyncExecutionResult = { syncId: string; status: string; completedItems: num
 type SyncExecutionProgress = { syncId: string; completedItems: number; totalItems: number; currentPath: string; status: string };
 type SyncHistory = { id: string; direction: SyncDirection; localDirectory: string; remoteDirectory: string; status: string; completedItems: number; totalItems: number; bytes: number; detail: string; completedAt: string };
 type BookmarkExportFile = { format: 'harbor-transfer-bookmarks'; version: 1; exportedAt: string; bookmarks: Connection[] };
+type EntryContextMenu = { x: number; y: number; entry: FileEntry; basePath: string };
+type RemoteClipboard = { connectionId: string; sourcePath: string; entry: FileEntry; mode: 'cut' | 'copy' };
+type FileInformationTarget = { entry: FileEntry; basePath: string };
 
 const defaultPreferences: Preferences = { language: 'ja', theme: 'system', defaultProtocol: 'sftp', conflictPolicy: 'ask', confirmDelete: true, transferNotifications: true, editorPath: '' };
 function loadPreferences(): Preferences { try { return { ...defaultPreferences, ...JSON.parse(localStorage.getItem('harbor-transfer.preferences') ?? '{}') }; } catch { return defaultPreferences; } }
@@ -77,6 +80,12 @@ const phaseTwoCopy = {
   ja: { conflict: '同名の項目があります。「上書き」「スキップ」「別名」のいずれかを入力してください。', overwrite: '上書き', skip: 'スキップ', rename: '別名', action: '操作を入力してください: edit / download / rename / delete', renameTo: '新しい名前', deleteConfirm: 'この項目を削除しますか？', drop: 'ここにファイルやフォルダをドロップ', speed: '速度', eta: '残り', completed: '転送が完了しました', failed: '転送に失敗しました', cancelled: '転送を取り消しました' },
   en: { conflict: 'An item with this name exists. Enter overwrite, skip, or rename.', overwrite: 'overwrite', skip: 'skip', rename: 'rename', action: 'Enter action: edit / download / rename / delete', renameTo: 'New name', deleteConfirm: 'Delete this item?', drop: 'Drop files or folders here', speed: 'Speed', eta: 'ETA', completed: 'Transfer completed', failed: 'Transfer failed', cancelled: 'Transfer cancelled' },
   'zh-CN': { conflict: '存在同名项目。请输入 overwrite、skip 或 rename。', overwrite: 'overwrite', skip: 'skip', rename: 'rename', action: '输入操作：edit / download / rename / delete', renameTo: '新名称', deleteConfirm: '删除此项目吗？', drop: '将文件或文件夹拖放到这里', speed: '速度', eta: '剩余', completed: '传输完成', failed: '传输失败', cancelled: '传输已取消' },
+} as const;
+
+const contextMenuCopy = {
+  ja: { rename: '名前を変更', cut: 'カット', copy: 'コピー', paste: 'ペースト', delete: '削除', download: 'ダウンロード', information: 'ファイル情報を変更', copied: 'リモートクリップボードにコピーしました', cutReady: '移動する項目を選択しました', pasted: 'ペーストしました', title: 'ファイル情報', detail: '現在の情報を確認し、対応する属性を変更します。', kind: '種類', permissions: 'パーミッション', changePermissions: 'パーミッションを変更', modified: '更新日時', changeModified: '更新日時を変更', unsupported: 'この接続方式ではパーミッションと更新日時の変更に対応していません。', ftpSupport: 'FTPサーバーがSITE CHMOD／MFMTに対応している場合に変更できます。', save: '変更を保存', saved: 'ファイル情報を更新しました', chooseField: '変更する項目を選択してください。', invalidPermissions: 'パーミッションは0000〜7777の8進数で入力してください。', invalidDate: '有効な更新日時を入力してください。' },
+  en: { rename: 'Rename', cut: 'Cut', copy: 'Copy', paste: 'Paste', delete: 'Delete', download: 'Download', information: 'Change File Information', copied: 'Copied to the remote clipboard', cutReady: 'Item selected for moving', pasted: 'Item pasted', title: 'File Information', detail: 'Review the current information and change supported attributes.', kind: 'Kind', permissions: 'Permissions', changePermissions: 'Change permissions', modified: 'Modified date', changeModified: 'Change modified date', unsupported: 'This connection type cannot change POSIX permissions or the modified date.', ftpSupport: 'Changes require SITE CHMOD and MFMT support from the FTP server.', save: 'Save Changes', saved: 'File information updated', chooseField: 'Choose at least one field to change.', invalidPermissions: 'Enter permissions as an octal value from 0000 to 7777.', invalidDate: 'Enter a valid modified date.' },
+  'zh-CN': { rename: '重命名', cut: '剪切', copy: '复制', paste: '粘贴', delete: '删除', download: '下载', information: '更改文件信息', copied: '已复制到远程剪贴板', cutReady: '已选择要移动的项目', pasted: '已粘贴项目', title: '文件信息', detail: '查看当前信息并更改支持的属性。', kind: '类型', permissions: '权限', changePermissions: '更改权限', modified: '修改日期', changeModified: '更改修改日期', unsupported: '此连接类型不能更改POSIX权限或修改日期。', ftpSupport: 'FTP服务器需要支持SITE CHMOD和MFMT才能更改。', save: '保存更改', saved: '文件信息已更新', chooseField: '请至少选择一个要更改的字段。', invalidPermissions: '请输入0000到7777之间的八进制权限值。', invalidDate: '请输入有效的修改日期。' },
 } as const;
 
 const preferencesCopy = {
@@ -146,6 +155,32 @@ function parentPath(path: string) { const parts = path.split('/').filter(Boolean
 function formatBytes(bytes: number) { if (!bytes) return '—'; const units = ['B', 'KB', 'MB', 'GB']; const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), 3); return `${(bytes / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`; }
 function formatDuration(seconds?: number) { if (seconds === undefined || !Number.isFinite(seconds)) return '—'; if (seconds < 60) return `${Math.ceil(seconds)}s`; return `${Math.floor(seconds / 60)}m ${Math.ceil(seconds % 60)}s`; }
 function transferFailureStatus(reason: unknown): 'Failed' | 'Cancelled' { return String(reason).toLowerCase().includes('cancel') ? 'Cancelled' : 'Failed'; }
+function permissionStringToOctal(value?: string) {
+  if (!value) return '';
+  const body = value.replace(/[+.@]$/, '').slice(-9);
+  if (!/^[rwx-]{9}$/.test(body)) return '';
+  return [0, 3, 6].map((offset) => String((body[offset] === 'r' ? 4 : 0) + (body[offset + 1] === 'w' ? 2 : 0) + (body[offset + 2] === 'x' ? 1 : 0))).join('');
+}
+function toDateTimeLocal(value?: string) {
+  if (!value) return '';
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(value)) return value.slice(0, 16).replace(' ', 'T');
+  const numeric = Number(value);
+  const date = Number.isFinite(numeric) && value.trim() !== '' ? new Date(numeric * 1000) : new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+function nextCopyName(name: string, isDirectory: boolean, occupied: Set<string>) {
+  const dot = isDirectory ? -1 : name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const extension = dot > 0 ? name.slice(dot) : '';
+  for (let index = 1; index < 10_000; index += 1) {
+    const suffix = index === 1 ? ' copy' : ` copy ${index}`;
+    const candidate = `${stem}${suffix}${extension}`;
+    if (!occupied.has(candidate)) return candidate;
+  }
+  return `${stem} copy-${crypto.randomUUID()}${extension}`;
+}
 
 function parseBookmarkExport(raw: string): Connection[] | null {
   if (raw.length > 5_000_000) return null;
@@ -207,6 +242,7 @@ export default function App() {
   const syncText = syncUiCopy[language];
   const editText = remoteEditCopy[language];
   const dragText = dragOutCopy[language];
+  const menuText = contextMenuCopy[language];
   const [connections, setConnections] = useState<Connection[]>([]);
   const [history, setHistory] = useState<ConnectionHistory[]>([]);
   const [selectedTag, setSelectedTag] = useState('');
@@ -255,6 +291,9 @@ export default function App() {
   const [selectedRemoteFile, setSelectedRemoteFile] = useState<{ connectionId: string; remotePath: string } | null>(null);
   const [dragExport, setDragExport] = useState<DragExport | null>(null);
   const [dragPreparingPath, setDragPreparingPath] = useState('');
+  const [entryContextMenu, setEntryContextMenu] = useState<EntryContextMenu | null>(null);
+  const [remoteClipboard, setRemoteClipboard] = useState<RemoteClipboard | null>(null);
+  const [fileInformationTarget, setFileInformationTarget] = useState<FileInformationTarget | null>(null);
   const remoteEditPolling = useRef<Set<string>>(new Set());
   const dragPreparationSequence = useRef(0);
   const dragExportRef = useRef<DragExport | null>(null);
@@ -279,6 +318,26 @@ export default function App() {
       setTransfers(transferHistory.map((item) => ({ ...item, totalBytes: item.bytes, transferredBytes: item.bytes })));
       setSyncHistory(savedSyncHistory);
     }).catch((reason) => setError(String(reason)));
+  }, []);
+
+  useEffect(() => {
+    const closeFromPointer = (event: PointerEvent) => {
+      if (!(event.target as Element | null)?.closest('.entry-context-menu')) setEntryContextMenu(null);
+    };
+    const closeFromKey = (event: KeyboardEvent) => { if (event.key === 'Escape') setEntryContextMenu(null); };
+    const close = () => setEntryContextMenu(null);
+    document.addEventListener('pointerdown', closeFromPointer);
+    document.addEventListener('keydown', closeFromKey);
+    window.addEventListener('blur', close);
+    window.addEventListener('resize', close);
+    window.addEventListener('scroll', close, true);
+    return () => {
+      document.removeEventListener('pointerdown', closeFromPointer);
+      document.removeEventListener('keydown', closeFromKey);
+      window.removeEventListener('blur', close);
+      window.removeEventListener('resize', close);
+      window.removeEventListener('scroll', close, true);
+    };
   }, []);
 
   useEffect(() => {
@@ -919,25 +978,72 @@ export default function App() {
     } catch (reason) { setError(String(reason)); }
   }
 
-  async function manageEntry(entry: FileEntry, basePath = path) {
+  function openEntryContext(event: React.MouseEvent, entry: FileEntry, basePath = path) {
     if (!active) return;
-    const action = window.prompt(p2.action, entry.file_type === 'Directory' ? 'rename' : 'edit')?.toLowerCase();
-    if (action === 'edit') { await editRemoteFile(entry, basePath); return; }
-    if (action === 'download') { await downloadFile(entry, basePath); return; }
-    if (action === 'rename') {
-      const newName = window.prompt(p2.renameTo, entry.name);
-      if (!newName || newName === entry.name) return;
-      try {
-        await invoke('remote_rename', { request: { connectionId: active.id, oldPath: joinPath(basePath, entry.name), newPath: joinPath(basePath, newName) } });
-        await loadDirectory(active, basePath);
-      } catch (reason) { setError(String(reason)); }
+    event.preventDefault();
+    event.stopPropagation();
+    cancelScheduledDragPreparation();
+    const remotePath = joinPath(basePath, entry.name);
+    setSelectedRemoteFile({ connectionId: active.id, remotePath });
+    const target = event.currentTarget as HTMLElement;
+    const rect = target.getBoundingClientRect();
+    const requestedX = event.clientX || rect.right;
+    const requestedY = event.clientY || rect.bottom;
+    setEntryContextMenu({
+      x: Math.max(8, Math.min(requestedX, window.innerWidth - 230)),
+      y: Math.max(8, Math.min(requestedY, window.innerHeight - 330)),
+      entry,
+      basePath,
+    });
+  }
+
+  async function renameEntry(entry: FileEntry, basePath: string) {
+    if (!active) return;
+    setEntryContextMenu(null);
+    const newName = window.prompt(p2.renameTo, entry.name)?.trim();
+    if (!newName || newName === entry.name || newName.includes('/')) return;
+    try {
+      await invoke('remote_rename', { request: { connectionId: active.id, oldPath: joinPath(basePath, entry.name), newPath: joinPath(basePath, newName) } });
+      await loadDirectory(active, basePath);
+    } catch (reason) { setError(String(reason)); }
+  }
+
+  async function deleteEntry(entry: FileEntry, basePath: string) {
+    if (!active) return;
+    setEntryContextMenu(null);
+    if (preferences.confirmDelete && !window.confirm(p2.deleteConfirm)) return;
+    try {
+      await invoke('remote_delete', { request: { connectionId: active.id, path: joinPath(basePath, entry.name), isDirectory: entry.file_type === 'Directory' } });
+      await loadDirectory(active, basePath);
+    } catch (reason) { setError(String(reason)); }
+  }
+
+  function placeOnRemoteClipboard(entry: FileEntry, basePath: string, mode: 'cut' | 'copy') {
+    if (!active || entry.file_type === 'Symlink') return;
+    setRemoteClipboard({ connectionId: active.id, sourcePath: joinPath(basePath, entry.name), entry, mode });
+    setEntryContextMenu(null);
+    setNotice(`${mode === 'cut' ? menuText.cutReady : menuText.copied}: ${entry.name}`);
+  }
+
+  async function pasteRemote(basePath: string) {
+    if (!active || !remoteClipboard || remoteClipboard.connectionId !== active.id) return;
+    setEntryContextMenu(null);
+    const sourceParent = remoteClipboard.sourcePath.slice(0, remoteClipboard.sourcePath.lastIndexOf('/')) || '/';
+    if (remoteClipboard.mode === 'cut' && sourceParent === basePath) {
+      setRemoteClipboard(null);
+      setNotice(`${menuText.pasted}: ${remoteClipboard.entry.name}`);
+      return;
     }
-    if (action === 'delete' && (!preferences.confirmDelete || window.confirm(p2.deleteConfirm))) {
-      try {
-        await invoke('remote_delete', { request: { connectionId: active.id, path: joinPath(basePath, entry.name), isDirectory: entry.file_type === 'Directory' } });
-        await loadDirectory(active, basePath);
-      } catch (reason) { setError(String(reason)); }
-    }
+    const targetEntries = basePath === path ? entries : columnLevels.find((level) => level.path === basePath)?.entries ?? [];
+    const occupied = new Set(targetEntries.map((entry) => entry.name));
+    let destinationName = remoteClipboard.entry.name;
+    if (occupied.has(destinationName)) destinationName = nextCopyName(destinationName, remoteClipboard.entry.file_type === 'Directory', occupied);
+    try {
+      await invoke('remote_paste', { request: { connectionId: active.id, sourcePath: remoteClipboard.sourcePath, destinationPath: joinPath(basePath, destinationName), isDirectory: remoteClipboard.entry.file_type === 'Directory', cut: remoteClipboard.mode === 'cut' } });
+      if (remoteClipboard.mode === 'cut') setRemoteClipboard(null);
+      setNotice(`${menuText.pasted}: ${destinationName}`);
+      await loadDirectory(active, basePath);
+    } catch (reason) { setError(String(reason)); }
   }
 
   return <main className={`app-shell ${transferPanelCollapsed ? 'queue-collapsed' : ''}`}>
@@ -996,18 +1102,18 @@ export default function App() {
               <ResizableColumnHeader label={t.modified} column="modified" width={columnWidths.modified} resizeLabel={columnsText.resize} onStart={startColumnResize} onAdjust={adjustColumnWidth}/>
               <ResizableColumnHeader label={columnsText.permissions} column="permissions" width={columnWidths.permissions} resizeLabel={columnsText.resize} onStart={startColumnResize} onAdjust={adjustColumnWidth}/><span />
             </div>
-            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`file-row interactive ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="row" aria-selected={selected} tabIndex={0} draggable={entry.file_type !== 'Symlink'} onClick={() => scheduleRemoteDragPreparation(entry)} onKeyDown={(event) => { if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(entry); } if (event.key === 'Enter') { entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); } }} onDragStart={(event) => startRemoteDrag(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }}>
-              <span className="file-name">{entry.file_type === 'Directory' ? <Folder fill="currentColor" size={18}/> : <Cloud size={18}/>} {entry.name}</span><span>{entry.file_type === 'Directory' ? '—' : formatBytes(entry.size)}</span><span>{entry.modified ?? '—'}</span><span className="permissions-cell">{entry.permissions ?? '—'}</span><button aria-label={accessibilityCopy[language].more} onClick={(event) => { event.stopPropagation(); void manageEntry(entry); }}><MoreHorizontal size={18}/></button>
+            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`file-row interactive ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="row" aria-selected={selected} tabIndex={0} draggable={entry.file_type !== 'Symlink'} onContextMenu={(event) => openEntryContext(event, entry)} onClick={() => scheduleRemoteDragPreparation(entry)} onKeyDown={(event) => { if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(entry); } if (event.key === 'Enter') { entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); } }} onDragStart={(event) => startRemoteDrag(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }}>
+              <span className="file-name">{entry.file_type === 'Directory' ? <Folder fill="currentColor" size={18}/> : <Cloud size={18}/>} {entry.name}</span><span>{entry.file_type === 'Directory' ? '—' : formatBytes(entry.size)}</span><span>{entry.modified ?? '—'}</span><span className="permissions-cell">{entry.permissions ?? '—'}</span><button aria-label={accessibilityCopy[language].more} onClick={(event) => openEntryContext(event, entry)}><MoreHorizontal size={18}/></button>
             </div>; })}
           </div>}
           {viewMode === 'icons' && <div className="icon-grid" role="grid">
             {filteredEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
-            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`icon-entry ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} role="gridcell" key={entry.name} draggable={entry.file_type !== 'Symlink'} onDragStart={(event) => startRemoteDrag(event, entry)}>
+            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`icon-entry ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} role="gridcell" key={entry.name} draggable={entry.file_type !== 'Symlink'} onContextMenu={(event) => openEntryContext(event, entry)} onDragStart={(event) => startRemoteDrag(event, entry)}>
               <button className="icon-entry-main" title={entry.name} onClick={() => scheduleRemoteDragPreparation(entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }} onKeyDown={(event) => { if (event.key !== 'Enter') return; entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }}>
                 {entry.file_type === 'Directory' ? <Folder className="entry-art folder-art" fill="currentColor" size={46}/> : <File className="entry-art" size={44}/>}
                 <strong>{entry.name}</strong><small>{entry.file_type === 'Directory' ? entry.permissions ?? '—' : formatBytes(entry.size)}</small>
               </button>
-              <button className="icon-entry-more" aria-label={accessibilityCopy[language].more} onClick={(event) => { event.stopPropagation(); void manageEntry(entry); }}><MoreHorizontal size={16}/></button>
+              <button className="icon-entry-more" aria-label={accessibilityCopy[language].more} onClick={(event) => openEntryContext(event, entry)}><MoreHorizontal size={16}/></button>
             </div>; })}
           </div>}
           {viewMode === 'columns' && <div className="column-browser" role="listbox" aria-label={viewsText.columns}>
@@ -1016,11 +1122,11 @@ export default function App() {
               return <section className="directory-column" key={`${level.path}-${levelIndex}`} aria-label={level.path}>
                 <div className="directory-column-title" title={level.path}>{level.path}</div>
                 {visibleLevelEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
-                {visibleLevelEntries.map((entry) => { const remotePath = joinPath(level.path, entry.name); const selectedForDrag = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`column-entry ${level.selectedName === entry.name || selectedForDrag ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="option" aria-selected={level.selectedName === entry.name || selectedForDrag} draggable={entry.file_type !== 'Symlink'} onDragStart={(event) => startRemoteDrag(event, entry, level.path)}>
+                {visibleLevelEntries.map((entry) => { const remotePath = joinPath(level.path, entry.name); const selectedForDrag = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`column-entry ${level.selectedName === entry.name || selectedForDrag ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="option" aria-selected={level.selectedName === entry.name || selectedForDrag} draggable={entry.file_type !== 'Symlink'} onContextMenu={(event) => openEntryContext(event, entry, level.path)} onDragStart={(event) => startRemoteDrag(event, entry, level.path)}>
                   <button className="column-entry-main" title={entry.name} onClick={(event) => { if (event.detail <= 1) { cancelScheduledDragPreparation(); setSelectedRemoteFile({ connectionId: active.id, remotePath }); void openColumnEntry(levelIndex, entry); } }} onDoubleClick={() => { cancelScheduledDragPreparation(); if (entry.file_type !== 'Directory') void downloadFile(entry, level.path); }}>
                     {entry.file_type === 'Directory' ? <Folder fill="currentColor" size={17}/> : <File size={16}/>}<span>{entry.name}</span>{entry.file_type === 'Directory' ? <ChevronRight size={14}/> : <small>{formatBytes(entry.size)}</small>}
                   </button>
-                  <button className="column-entry-more" aria-label={accessibilityCopy[language].more} onClick={(event) => { event.stopPropagation(); void manageEntry(entry, level.path); }}><MoreHorizontal size={15}/></button>
+                  <button className="column-entry-more" aria-label={accessibilityCopy[language].more} onClick={(event) => openEntryContext(event, entry, level.path)}><MoreHorizontal size={15}/></button>
                 </div>; })}
               </section>;
             })}
@@ -1051,6 +1157,25 @@ export default function App() {
         </div>)}
       </div>
     </section>
+    {entryContextMenu && active && <div className="entry-context-menu" role="menu" style={{ left: entryContextMenu.x, top: entryContextMenu.y }} onContextMenu={(event) => event.preventDefault()}>
+      <div className="context-menu-heading" title={entryContextMenu.entry.name}>{entryContextMenu.entry.name}</div>
+      <button role="menuitem" onClick={() => void renameEntry(entryContextMenu.entry, entryContextMenu.basePath)}><Pencil size={15}/>{menuText.rename}</button>
+      <div className="context-menu-separator" role="separator"/>
+      <button role="menuitem" disabled={entryContextMenu.entry.file_type === 'Symlink'} onClick={() => placeOnRemoteClipboard(entryContextMenu.entry, entryContextMenu.basePath, 'cut')}><Scissors size={15}/>{menuText.cut}</button>
+      <button role="menuitem" disabled={entryContextMenu.entry.file_type === 'Symlink'} onClick={() => placeOnRemoteClipboard(entryContextMenu.entry, entryContextMenu.basePath, 'copy')}><Copy size={15}/>{menuText.copy}</button>
+      <button role="menuitem" disabled={!remoteClipboard || remoteClipboard.connectionId !== active.id} onClick={() => void pasteRemote(entryContextMenu.basePath)}><ClipboardPaste size={15}/>{menuText.paste}</button>
+      <button className="danger" role="menuitem" onClick={() => void deleteEntry(entryContextMenu.entry, entryContextMenu.basePath)}><Trash2 size={15}/>{menuText.delete}</button>
+      <div className="context-menu-separator" role="separator"/>
+      <button role="menuitem" disabled={entryContextMenu.entry.file_type !== 'File'} onClick={() => { const target = entryContextMenu; setEntryContextMenu(null); void downloadFile(target.entry, target.basePath); }}><Download size={15}/>{menuText.download}</button>
+      <button role="menuitem" disabled={entryContextMenu.entry.file_type === 'Symlink'} onClick={() => { setFileInformationTarget({ entry: entryContextMenu.entry, basePath: entryContextMenu.basePath }); setEntryContextMenu(null); }}><FileCog size={15}/>{menuText.information}</button>
+    </div>}
+    {fileInformationTarget && active && <FileInformationSheet connection={active} target={fileInformationTarget} t={t} text={menuText} onClose={() => setFileInformationTarget(null)} onSave={async (permissions, modified) => {
+      await invoke('remote_set_metadata', { request: { connectionId: active.id, path: joinPath(fileInformationTarget.basePath, fileInformationTarget.entry.name), permissions, modified } });
+      setFileInformationTarget(null);
+      setNotice(menuText.saved);
+      await loadDirectory(active, fileInformationTarget.basePath);
+    }}
+    />}
     {showConnect && <ConnectSheet mode={connectSheetMode} bookmark={connectingBookmark} initialKeyPath={selectedKeyPath} defaultProtocol={preferences.defaultProtocol} t={t} phaseCopy={p1} localCopy={bookmarkLocalText} s3Text={s3Copy[language]} onClose={() => setShowConnect(false)} onSaved={(connection) => {
       setConnections((current) => [connection, ...current.filter((item) => item.id !== connection.id)]);
       setActive((current) => {
@@ -1064,6 +1189,47 @@ export default function App() {
     {showPreferences && <PreferencesSheet value={preferences} language={language} t={t} onClose={() => setShowPreferences(false)} onSave={(next) => { setPreferences(next); setShowPreferences(false); }} />}
     {syncLocalDirectory && <SyncPreviewSheet preview={syncPreview} localDirectory={syncLocalDirectory} remoteDirectory={path} direction={syncDirection} comparison={syncComparison} busy={syncPreviewBusy} executionBusy={syncExecutionBusy} error={syncPreviewError} exclusions={syncExclusions} conflictChoices={syncConflictChoices} progress={syncExecutionProgress} result={syncExecutionResult} history={syncHistory} t={t} text={syncText} onClose={() => { if (syncExecutionBusy) return; setSyncLocalDirectory(''); setSyncPreview(null); }} onDirection={(direction) => { setSyncDirection(direction); setSyncExecutionResult(null); void calculateSyncPreview(syncLocalDirectory, direction); }} onComparison={(comparison) => { setSyncComparison(comparison); setSyncPreview(null); setSyncExecutionResult(null); void calculateSyncPreview(syncLocalDirectory, syncDirection, syncExclusions, comparison); }} onExclusions={(value) => { setSyncExclusions(value); setSyncPreview(null); setSyncExecutionResult(null); }} onConflict={(itemPath, choice) => setSyncConflictChoices((current) => ({ ...current, [itemPath]: choice }))} onRefresh={() => void calculateSyncPreview()} onExecute={() => void executeSync()} onCancelExecution={() => void cancelSyncExecution()} onClearHistory={() => void clearSyncHistory()} />}
   </main>;
+}
+
+function FileInformationSheet({ connection, target, t, text, onClose, onSave }: { connection: Connection; target: FileInformationTarget; t: typeof copy[keyof typeof copy]; text: typeof contextMenuCopy[keyof typeof contextMenuCopy]; onClose: () => void; onSave: (permissions: number | null, modified: number | null) => Promise<void> }) {
+  const editable = connection.protocol === 'sftp' || connection.protocol === 'ftp' || connection.protocol === 'ftps';
+  const [changePermissions, setChangePermissions] = useState(false);
+  const [permissions, setPermissions] = useState(permissionStringToOctal(target.entry.permissions));
+  const [changeModified, setChangeModified] = useState(false);
+  const [modified, setModified] = useState(toDateTimeLocal(target.entry.modified));
+  const [busy, setBusy] = useState(false);
+  const [formError, setFormError] = useState('');
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!changePermissions && !changeModified) { setFormError(text.chooseField); return; }
+    let permissionValue: number | null = null;
+    if (changePermissions) {
+      if (!/^[0-7]{3,4}$/.test(permissions)) { setFormError(text.invalidPermissions); return; }
+      permissionValue = Number.parseInt(permissions, 8);
+    }
+    let modifiedValue: number | null = null;
+    if (changeModified) {
+      const date = new Date(modified);
+      if (!modified || Number.isNaN(date.getTime())) { setFormError(text.invalidDate); return; }
+      modifiedValue = Math.floor(date.getTime() / 1000);
+    }
+    setBusy(true); setFormError('');
+    try { await onSave(permissionValue, modifiedValue); }
+    catch (reason) { setFormError(String(reason)); }
+    finally { setBusy(false); }
+  }
+
+  return <div className="modal-backdrop" role="presentation"><form className="connect-sheet file-information-sheet" onSubmit={submit}>
+    <div className="sheet-title"><div><h2>{text.title}</h2><p>{text.detail}</p></div><button type="button" onClick={onClose}>×</button></div>
+    <div className="file-information-summary"><FileCog size={28}/><div><strong>{target.entry.name}</strong><span>{text.kind}: {target.entry.file_type}</span><span>{target.entry.file_type === 'Directory' ? '—' : formatBytes(target.entry.size)}</span></div></div>
+    {!editable && <p className="protocol-support-note">{text.unsupported}</p>}
+    {(connection.protocol === 'ftp' || connection.protocol === 'ftps') && <p className="protocol-support-note">{text.ftpSupport}</p>}
+    <label className="metadata-toggle"><span><input type="checkbox" disabled={!editable} checked={changePermissions} onChange={(event) => setChangePermissions(event.target.checked)}/>{text.changePermissions}</span><input aria-label={text.permissions} disabled={!editable || !changePermissions} value={permissions} onChange={(event) => setPermissions(event.target.value)} placeholder="0644" maxLength={4}/><small>{text.permissions}: {target.entry.permissions ?? '—'}</small></label>
+    <label className="metadata-toggle"><span><input type="checkbox" disabled={!editable} checked={changeModified} onChange={(event) => setChangeModified(event.target.checked)}/>{text.changeModified}</span><input aria-label={text.modified} type="datetime-local" step="1" disabled={!editable || !changeModified} value={modified} onChange={(event) => setModified(event.target.value)}/><small>{text.modified}: {target.entry.modified ?? '—'}</small></label>
+    {formError && <p className="form-error">{formError}</p>}
+    <div className="form-actions"><button type="button" onClick={onClose}>{t.cancel}</button><button className="primary" disabled={!editable || busy}>{busy && <LoaderCircle className="spinning" size={15}/>} {text.save}</button></div>
+  </form></div>;
 }
 
 function SyncPreviewSheet({ preview, localDirectory, remoteDirectory, direction, comparison, busy, executionBusy, error, exclusions, conflictChoices, progress, result, history, t, text, onClose, onDirection, onComparison, onExclusions, onConflict, onRefresh, onExecute, onCancelExecution, onClearHistory }: { preview: SyncPreview | null; localDirectory: string; remoteDirectory: string; direction: SyncDirection; comparison: SyncComparison; busy: boolean; executionBusy: boolean; error: string; exclusions: string; conflictChoices: Record<string, SyncConflictChoice>; progress: SyncExecutionProgress | null; result: SyncExecutionResult | null; history: SyncHistory[]; t: typeof copy[keyof typeof copy]; text: typeof syncUiCopy[keyof typeof syncUiCopy]; onClose: () => void; onDirection: (direction: SyncDirection) => void; onComparison: (comparison: SyncComparison) => void; onExclusions: (value: string) => void; onConflict: (path: string, choice: SyncConflictChoice) => void; onRefresh: () => void; onExecute: () => void; onCancelExecution: () => void; onClearHistory: () => void }) {

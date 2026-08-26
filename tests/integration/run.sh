@@ -34,7 +34,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-docker compose -f "$compose_file" up --build --wait
+docker compose -f "$compose_file" up --build --wait ftp ftps
 
 FTP_TEST_HOST=127.0.0.1 FTP_TEST_PORT=2121 FTP_TEST_USER=harbor FTP_TEST_PASS=harbor \
   cargo test --manifest-path "$project_dir/src-tauri/Cargo.toml" ftp_client::tests::test_ftp_ -- --test-threads=1
@@ -42,14 +42,23 @@ FTP_TEST_HOST=127.0.0.1 FTP_TEST_PORT=2121 FTP_TEST_USER=harbor FTP_TEST_PASS=ha
 FTP_TEST_CA_CERT="$cert_dir/ca.crt" FTP_TEST_HOST=127.0.0.1 FTP_TEST_PORT=2990 FTP_TEST_USER=harbor FTP_TEST_PASS=harbor FTP_TEST_TLS=1 \
   cargo test --manifest-path "$project_dir/src-tauri/Cargo.toml" ftp_client::tests::test_ftp_ -- --test-threads=1
 
+docker compose -f "$compose_file" stop ftp ftps
+docker compose -f "$compose_file" up --wait sftp
+
 SFTP_TEST_HOST=127.0.0.1 SFTP_TEST_PORT=2222 SFTP_TEST_USER=harbor SFTP_TEST_PASS=harbor \
   cargo test --manifest-path "$project_dir/src-tauri/Cargo.toml" sftp_client::tests::test_sftp_live_ -- --test-threads=1
+
+docker compose -f "$compose_file" stop sftp
+docker compose -f "$compose_file" up --build --wait webdav nextcloud-https
 
 WEBDAV_TEST_CA_CERT="$cert_dir/ca.crt" WEBDAV_TEST_HOST=127.0.0.1 WEBDAV_TEST_PORT=8443 WEBDAV_TEST_USER=harbor WEBDAV_TEST_PASS=harbor \
   cargo test --manifest-path "$project_dir/src-tauri/Cargo.toml" webdav_client::tests::live_webdav_ -- --test-threads=1
 
 WEBDAV_TEST_CA_CERT="$cert_dir/ca.crt" WEBDAV_TEST_HOST=127.0.0.1 WEBDAV_TEST_PORT=8444 WEBDAV_TEST_USER=harbor WEBDAV_TEST_PASS=harbor WEBDAV_TEST_ROOT=/remote.php/dav/files/harbor \
   cargo test --manifest-path "$project_dir/src-tauri/Cargo.toml" webdav_client::tests::live_webdav_ -- --test-threads=1
+
+docker compose -f "$compose_file" stop webdav nextcloud-https nextcloud
+docker compose -f "$compose_file" up --wait s3
 
 S3_TEST_ENDPOINT=http://127.0.0.1:9000 S3_TEST_ACCESS_KEY=harboraccess S3_TEST_SECRET_KEY=harborsecret123 \
   cargo test --manifest-path "$project_dir/src-tauri/Cargo.toml" s3_client::tests::live_s3_ -- --test-threads=1

@@ -2,6 +2,7 @@ use anyhow::Result;
 use russh::*;
 use russh_keys::*;
 use russh_sftp::client::SftpSession;
+use russh_sftp::protocol::FileAttributes;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::sync::Arc;
@@ -336,6 +337,21 @@ impl StandaloneSftpClient {
         Ok(())
     }
 
+    /// Change POSIX mode bits and/or the modification time without replacing
+    /// the file contents. Fields left as `None` are not sent to the server.
+    pub async fn set_metadata(
+        &self,
+        path: &str,
+        permissions: Option<u32>,
+        modified: Option<u32>,
+    ) -> Result<()> {
+        let sftp = self.sftp.as_ref().ok_or_else(|| anyhow::anyhow!("SFTP session not connected"))?;
+        let attributes = FileAttributes { permissions, mtime: modified, ..FileAttributes::default() };
+        sftp.set_metadata(path, attributes)
+            .await
+            .map_err(|error| anyhow::anyhow!("Failed to update file information for '{}': {}", path, error))
+    }
+
     /// Delete a file on the remote server.
     pub async fn delete_file(&self, path: &str) -> Result<()> {
         let sftp = self.sftp.as_ref().ok_or_else(|| anyhow::anyhow!("SFTP session not connected"))?;
@@ -611,6 +627,16 @@ mod tests {
         let content = vec![0x5a; 2 * 1024 * 1024 + 17];
         tokio::fs::write(&upload, &content).await.expect("write upload fixture");
         client.upload_file(upload.to_str().unwrap(), &remote).await.expect("upload Unicode path");
+        client.set_metadata(&remote, Some(0o640), Some(1_787_706_123)).await.expect("set SFTP metadata");
+        let metadata_entry = client
+            .list_dir(directory)
+            .await
+            .expect("list metadata")
+            .into_iter()
+            .find(|entry| entry.name == "港便り.bin")
+            .expect("metadata entry");
+        assert_eq!(metadata_entry.permissions.as_deref(), Some("rw-r-----"));
+        assert_eq!(metadata_entry.modified.as_deref(), Some("2026-08-26 01:02:03"));
         client.rename(&remote, &renamed).await.expect("rename Unicode path");
         client.download_file(&renamed, download.to_str().unwrap()).await.expect("download large file");
         assert_eq!(tokio::fs::read(&download).await.expect("read download"), content);

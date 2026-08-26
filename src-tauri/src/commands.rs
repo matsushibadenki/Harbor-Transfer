@@ -22,6 +22,7 @@ use tokio::sync::Mutex;
 
 static EDIT_SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static DRAG_EXPORT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static REMOTE_COPY_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub struct AppState {
     connections: Mutex<HashMap<String, RemoteConnection>>,
@@ -183,6 +184,25 @@ pub struct DeleteRequest {
     pub connection_id: String,
     pub path: String,
     pub is_directory: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePasteRequest {
+    pub connection_id: String,
+    pub source_path: String,
+    pub destination_path: String,
+    pub is_directory: bool,
+    pub cut: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetMetadataRequest {
+    pub connection_id: String,
+    pub path: String,
+    pub permissions: Option<u32>,
+    pub modified: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1402,6 +1422,141 @@ pub async fn remote_rename(request: RenameRequest, state: State<'_, Arc<AppState
         .map_err(|error| error.to_string())
 }
 
+fn remote_parent_and_name(path: &str) -> Result<(String, String), String> {
+    let normalized = path.trim_end_matches('/');
+    if !normalized.starts_with('/') || normalized.is_empty() {
+        return Err("A remote path must be absolute.".to_string());
+    }
+    let separator = normalized.rfind('/').ok_or("Invalid remote path.")?;
+    let name = &normalized[separator + 1..];
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+        return Err("Invalid remote item name.".to_string());
+    }
+    let parent = if separator == 0 { "/" } else { &normalized[..separator] };
+    Ok((parent.to_string(), name.to_string()))
+}
+
+fn remote_child(parent: &str, name: &str) -> String {
+    if parent == "/" {
+        format!("/{name}")
+    } else {
+        format!("{}/{name}", parent.trim_end_matches('/'))
+    }
+}
+
+#[tauri::command]
+pub async fn remote_paste(
+    request: RemotePasteRequest,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    if request.source_path == "/" || request.destination_path == "/" {
+        return Err("The remote root cannot be copied or moved.".to_string());
+    }
+    let (destination_parent, destination_name) = remote_parent_and_name(&request.destination_path)?;
+    remote_parent_and_name(&request.source_path)?;
+    if request.source_path == request.destination_path {
+        return Err("The source and destination are the same.".to_string());
+    }
+    if request.is_directory
+        && request.destination_path.starts_with(&format!("{}/", request.source_path.trim_end_matches('/')))
+    {
+        return Err("A directory cannot be pasted inside itself.".to_string());
+    }
+
+    let mut connections = state.connections.lock().await;
+    let file_system =
+        connections.get_mut(&request.connection_id).ok_or("Connection not found.")?.file_system();
+    let destination_entries =
+        file_system.list_dir(&destination_parent).await.map_err(|error| error.to_string())?;
+    if destination_entries.iter().any(|entry| entry.name == destination_name) {
+        return Err(format!("An item named '{destination_name}' already exists at the destination."));
+    }
+
+    if request.cut {
+        return file_system
+            .rename(&request.source_path, &request.destination_path)
+            .await
+            .map_err(|error| error.to_string());
+    }
+
+    let copy_root = state
+        .drag_cache_directory
+        .join(format!("remote-copy-{}", REMOTE_COPY_SEQUENCE.fetch_add(1, Ordering::Relaxed)));
+    tokio::fs::create_dir_all(&copy_root).await.map_err(|error| error.to_string())?;
+    let result = async {
+        let mut pending =
+            vec![(request.source_path.clone(), request.destination_path.clone(), request.is_directory)];
+        let mut visited = 0usize;
+        while let Some((source, destination, is_directory)) = pending.pop() {
+            visited += 1;
+            if visited > 100_000 {
+                return Err("Remote copy stopped after 100,000 items.".to_string());
+            }
+            if is_directory {
+                file_system.create_dir(&destination).await.map_err(|error| error.to_string())?;
+                let children = file_system.list_dir(&source).await.map_err(|error| error.to_string())?;
+                for child in children.into_iter().rev() {
+                    if matches!(child.file_type, crate::sftp_client::FileEntryType::Symlink) {
+                        return Err(format!(
+                            "Copying symbolic links is not supported: {}",
+                            remote_child(&source, &child.name)
+                        ));
+                    }
+                    pending.push((
+                        remote_child(&source, &child.name),
+                        remote_child(&destination, &child.name),
+                        matches!(child.file_type, crate::sftp_client::FileEntryType::Directory),
+                    ));
+                }
+            } else {
+                let temporary = copy_root.join(format!("item-{visited}.tmp"));
+                file_system
+                    .download_file(&source, &temporary.to_string_lossy())
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let upload = file_system
+                    .upload_file(&temporary.to_string_lossy(), &destination)
+                    .await
+                    .map_err(|error| error.to_string());
+                let _ = tokio::fs::remove_file(&temporary).await;
+                upload?;
+            }
+        }
+        Ok(())
+    }
+    .await;
+    let _ = tokio::fs::remove_dir_all(&copy_root).await;
+    result
+}
+
+#[tauri::command]
+pub async fn remote_set_metadata(
+    request: SetMetadataRequest,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    if request.permissions.is_none() && request.modified.is_none() {
+        return Err("Choose at least one file-information field to change.".to_string());
+    }
+    if request.permissions.is_some_and(|mode| mode > 0o7777) {
+        return Err("Permissions must be an octal value between 0000 and 7777.".to_string());
+    }
+    let modified = request
+        .modified
+        .map(|value| {
+            u32::try_from(value)
+                .map_err(|_| "The modification date is outside the supported range.".to_string())
+        })
+        .transpose()?;
+    let mut connections = state.connections.lock().await;
+    connections
+        .get_mut(&request.connection_id)
+        .ok_or("Connection not found.")?
+        .file_system()
+        .set_metadata(&request.path, request.permissions, modified)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub async fn remote_delete(request: DeleteRequest, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let mut connections = state.connections.lock().await;
@@ -1668,7 +1823,8 @@ pub async fn transfer_upload_directory(
 #[cfg(test)]
 mod tests {
     use super::{
-        content_hash, parse_remote_modified, reject_symlink_ancestors, safe_relative_path, TransferControl,
+        content_hash, parse_remote_modified, reject_symlink_ancestors, remote_parent_and_name,
+        safe_relative_path, TransferControl,
     };
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
@@ -1714,6 +1870,20 @@ mod tests {
         assert!(safe_relative_path("/tmp/file.txt").is_err());
         assert!(safe_relative_path("../file.txt").is_err());
         assert!(safe_relative_path("folder/../file.txt").is_err());
+    }
+
+    #[test]
+    fn splits_remote_paste_destinations_safely() {
+        assert_eq!(
+            remote_parent_and_name("/documents/港便り.txt").unwrap(),
+            ("/documents".to_string(), "港便り.txt".to_string())
+        );
+        assert_eq!(
+            remote_parent_and_name("/港便り.txt").unwrap(),
+            ("/".to_string(), "港便り.txt".to_string())
+        );
+        assert!(remote_parent_and_name("relative.txt").is_err());
+        assert!(remote_parent_and_name("/").is_err());
     }
 
     #[cfg(unix)]

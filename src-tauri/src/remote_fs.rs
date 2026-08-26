@@ -13,6 +13,12 @@ pub trait RemoteFileSystem: Send {
     async fn download_file(&mut self, remote_path: &str, local_path: &str) -> Result<u64>;
     async fn create_dir(&mut self, path: &str) -> Result<()>;
     async fn rename(&mut self, old_path: &str, new_path: &str) -> Result<()>;
+    async fn set_metadata(
+        &mut self,
+        path: &str,
+        permissions: Option<u32>,
+        modified: Option<u32>,
+    ) -> Result<()>;
     async fn delete_file(&mut self, path: &str) -> Result<()>;
     async fn delete_dir(&mut self, path: &str) -> Result<()>;
     async fn disconnect(&mut self) -> Result<()>;
@@ -34,6 +40,14 @@ impl RemoteFileSystem for StandaloneSftpClient {
     }
     async fn rename(&mut self, old_path: &str, new_path: &str) -> Result<()> {
         StandaloneSftpClient::rename(self, old_path, new_path).await
+    }
+    async fn set_metadata(
+        &mut self,
+        path: &str,
+        permissions: Option<u32>,
+        modified: Option<u32>,
+    ) -> Result<()> {
+        StandaloneSftpClient::set_metadata(self, path, permissions, modified).await
     }
     async fn delete_file(&mut self, path: &str) -> Result<()> {
         StandaloneSftpClient::delete_file(self, path).await
@@ -63,6 +77,14 @@ impl RemoteFileSystem for FtpClient {
     async fn rename(&mut self, old_path: &str, new_path: &str) -> Result<()> {
         FtpClient::rename(self, old_path, new_path).await
     }
+    async fn set_metadata(
+        &mut self,
+        path: &str,
+        permissions: Option<u32>,
+        modified: Option<u32>,
+    ) -> Result<()> {
+        FtpClient::set_metadata(self, path, permissions, modified).await
+    }
     async fn delete_file(&mut self, path: &str) -> Result<()> {
         FtpClient::delete_file(self, path).await
     }
@@ -91,6 +113,14 @@ impl RemoteFileSystem for WebDavClient {
     async fn rename(&mut self, old_path: &str, new_path: &str) -> Result<()> {
         WebDavClient::rename(self, old_path, new_path).await
     }
+    async fn set_metadata(
+        &mut self,
+        _path: &str,
+        _permissions: Option<u32>,
+        _modified: Option<u32>,
+    ) -> Result<()> {
+        anyhow::bail!("WebDAV does not provide portable POSIX permission or modification-date changes.")
+    }
     async fn delete_file(&mut self, path: &str) -> Result<()> {
         WebDavClient::delete(self, path).await
     }
@@ -118,6 +148,14 @@ impl RemoteFileSystem for S3Client {
     }
     async fn rename(&mut self, old_path: &str, new_path: &str) -> Result<()> {
         S3Client::rename(self, old_path, new_path).await
+    }
+    async fn set_metadata(
+        &mut self,
+        _path: &str,
+        _permissions: Option<u32>,
+        _modified: Option<u32>,
+    ) -> Result<()> {
+        anyhow::bail!("S3 objects do not expose POSIX permissions or a writable Last-Modified value.")
     }
     async fn delete_file(&mut self, path: &str) -> Result<()> {
         S3Client::delete_file(self, path).await

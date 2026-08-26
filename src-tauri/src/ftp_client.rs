@@ -296,6 +296,38 @@ impl FtpClient {
         Ok(())
     }
 
+    /// Change metadata using the widely implemented SITE CHMOD and MFMT
+    /// extensions. Servers that do not support either extension return their
+    /// original protocol error to the UI instead of silently succeeding.
+    pub async fn set_metadata(
+        &mut self,
+        path: &str,
+        permissions: Option<u32>,
+        modified: Option<u32>,
+    ) -> Result<()> {
+        if let Some(mode) = permissions {
+            ftp_stream!(self, s => {
+                s.site(format!("CHMOD {:03o} {}", mode, path)).await.map_err(|error| {
+                    anyhow::anyhow!("The FTP server could not change permissions for '{}': {}", path, error)
+                })?
+            });
+        }
+        if let Some(timestamp) = modified {
+            let value = format_ftp_timestamp(timestamp as u64);
+            ftp_stream!(self, s => {
+                s.custom_command(
+                    format!("MFMT {} {}", value, path),
+                    &[Status::File, Status::RequestedFileActionOk],
+                )
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("The FTP server could not change the modification date for '{}': {}", path, error)
+                })?
+            });
+        }
+        Ok(())
+    }
+
     /// Delete a file on the remote server.
     pub async fn delete_file(&mut self, path: &str) -> Result<()> {
         ftp_stream!(self, s => {
@@ -504,6 +536,34 @@ fn is_leap_year(y: i64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
 }
 
+fn format_ftp_timestamp(timestamp: u64) -> String {
+    let days = timestamp / 86_400;
+    let seconds = timestamp % 86_400;
+    let (year, month, day) = days_to_ymd(days as i64);
+    format!(
+        "{:04}{:02}{:02}{:02}{:02}{:02}",
+        year,
+        month,
+        day,
+        seconds / 3_600,
+        (seconds % 3_600) / 60,
+        seconds % 60
+    )
+}
+
+fn days_to_ymd(mut days: i64) -> (i64, u32, u32) {
+    days += 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let doe = (days - era * 146_097) as u32;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe as i64 + era * 400;
+    let day_of_year = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = if month_prime < 10 { month_prime + 3 } else { month_prime - 9 };
+    (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
 // =============================================================================
 // Integration tests — require a live FTP server
 //
@@ -628,6 +688,10 @@ mod tests {
             .expect("upload_file should succeed");
         assert_eq!(uploaded_bytes, upload_content.len() as u64);
         eprintln!("Uploaded {} bytes to {}", uploaded_bytes, test_file_remote);
+        client
+            .set_metadata(&test_file_remote, Some(0o640), Some(1_787_706_123))
+            .await
+            .expect("set FTP metadata");
 
         // 4c. List directory — should contain our file
         let entries = client.list_dir(test_dir).await.expect("list test dir");
@@ -638,6 +702,9 @@ mod tests {
             "uploaded file should appear in listing: {:?}",
             entries.iter().map(|e| &e.name).collect::<Vec<_>>()
         );
+        let metadata_entry = entries.iter().find(|entry| entry.name == "港便り.txt").unwrap();
+        assert!(metadata_entry.permissions.as_deref().is_some_and(|value| value.ends_with("rw-r-----")));
+        assert_eq!(metadata_entry.modified.as_deref(), Some("2026-08-26 01:02:00"));
 
         // 4d. Download the file and verify contents
         let tmp_download = std::env::temp_dir().join("harbor_e2e_download.txt");
@@ -942,5 +1009,10 @@ mod tests {
         let line = "-rw-r--r--   1 user group  0 Apr 01 00:00 empty.txt";
         let entry = parse_ftp_list_line(line).expect("should parse");
         assert_eq!(entry.size, 0);
+    }
+
+    #[test]
+    fn formats_mfmt_timestamp_in_utc() {
+        assert_eq!(format_ftp_timestamp(1_787_706_123), "20260826010203");
     }
 }
