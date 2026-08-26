@@ -5,7 +5,7 @@ use std::time::Duration;
 use suppaftp::tokio::{AsyncFtpStream, AsyncNativeTlsConnector, AsyncNativeTlsFtpStream};
 use suppaftp::types::Mode;
 use suppaftp::Status;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::sftp_client::{FileEntry, FileEntryType};
 
@@ -261,9 +261,40 @@ impl FtpClient {
 
         ftp_stream!(self, s => {
             let mut reader = Cursor::new(data);
-            s.put_file(remote_path, &mut reader).await.map_err(|e| {
-                anyhow::anyhow!("Failed to upload file '{}': {}", remote_path, e)
-            })?
+            let mut data_stream = s.put_with_stream(remote_path).await.map_err(|e| {
+                anyhow::anyhow!("Failed to start upload for '{}': {}", remote_path, e)
+            })?;
+            let uploaded = tokio::io::copy(&mut reader, &mut data_stream)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to upload file '{}': {}", remote_path, e))?;
+
+            // `suppaftp::put_file` waits without a deadline for TLS shutdown
+            // before it reads the server's 226 response. Some OpenSSL servers
+            // do not return a close-notify, which stalled Linux CI for ten
+            // minutes. Send close-notify, but bound that handshake; dropping
+            // the stream after the deadline still closes the data socket. A
+            // sink then lets suppaftp reset its transfer state and consume the
+            // control-channel completion response without a second shutdown.
+            data_stream.flush().await.map_err(|e| {
+                anyhow::anyhow!("Failed to flush upload for '{}': {}", remote_path, e)
+            })?;
+            match tokio::time::timeout(Duration::from_secs(5), data_stream.shutdown()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::warn!(
+                    "FTP data stream shutdown for '{}' returned {}; closing the stream",
+                    remote_path,
+                    error
+                ),
+                Err(_) => tracing::warn!(
+                    "FTP data stream shutdown for '{}' timed out; closing the stream",
+                    remote_path
+                ),
+            }
+            drop(data_stream);
+            s.finalize_put_stream(tokio::io::sink()).await.map_err(|e| {
+                anyhow::anyhow!("Failed to finalize upload for '{}': {}", remote_path, e)
+            })?;
+            uploaded
         });
 
         Ok(total_bytes)
