@@ -306,12 +306,27 @@ impl FtpClient {
                 data_stream.shutdown().await.map_err(|e| {
                     anyhow::anyhow!("Failed to finish TLS upload for '{}': {}", remote_path, e)
                 })?;
-                let tcp_stream = data_stream.into_tcp_stream().map_err(|e| {
+                let mut tcp_stream = data_stream.into_tcp_stream().map_err(|e| {
                     anyhow::anyhow!("Failed to close FTPS data connection for '{}': {}", remote_path, e)
                 })?;
-                // Dropping the owned socket is required here. AsyncWrite::shutdown
-                // only closes its write half on Linux, while pyftpdlib/OpenSSL
-                // waits for the complete TLS data connection to disappear.
+                // Send a TCP FIN after close_notify, then drain the peer's TLS
+                // shutdown response. Dropping a Linux socket with unread peer
+                // data can emit RST and discard queued upload bytes.
+                tcp_stream.shutdown().await.map_err(|e| {
+                    anyhow::anyhow!("Failed to half-close FTPS upload '{}': {}", remote_path, e)
+                })?;
+                let mut shutdown_response = Vec::new();
+                tokio::time::timeout(Duration::from_secs(10), tcp_stream.read_to_end(&mut shutdown_response))
+                    .await
+                    .map_err(|_| {
+                        anyhow::anyhow!(
+                            "FTPS server did not close data connection '{}' within 10 seconds",
+                            remote_path
+                        )
+                    })?
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to drain FTPS shutdown for '{}': {}", remote_path, e)
+                    })?;
                 drop(tcp_stream);
                 tokio::time::timeout(Duration::from_secs(30), stream.finalize_put_stream(tokio::io::sink()))
                     .await
