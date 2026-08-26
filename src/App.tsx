@@ -53,12 +53,24 @@ type SyncExecutionProgress = { syncId: string; completedItems: number; totalItem
 type SyncHistory = { id: string; direction: SyncDirection; localDirectory: string; remoteDirectory: string; status: string; completedItems: number; totalItems: number; bytes: number; detail: string; completedAt: string };
 type BookmarkExportFile = { format: 'harbor-transfer-bookmarks'; version: 1; exportedAt: string; bookmarks: Connection[] };
 type EntryContextMenu = { x: number; y: number; entry: FileEntry; basePath: string };
+type BrowserContextMenu = { x: number; y: number; basePath: string };
 type RemoteClipboard = { connectionId: string; sourcePath: string; entry: FileEntry; mode: 'cut' | 'copy' };
 type SelectedRemoteItem = { connectionId: string; remotePath: string; basePath: string; entry: FileEntry };
 type FileInformationTarget = { items: SelectedRemoteItem[]; focus: 'name' | 'metadata' };
+type DropConflictChoice = 'cancel' | 'overwrite' | 'merge' | 'replace';
+type DropConflictPrompt = {
+  name: string;
+  incomingIsDirectory: boolean;
+  existingIsDirectory: boolean;
+  resolve: (choice: DropConflictChoice) => void;
+};
 
 const defaultPreferences: Preferences = { language: 'ja', theme: 'system', defaultProtocol: 'sftp', conflictPolicy: 'ask', confirmDelete: true, transferNotifications: true, editorPath: '', autoCheckUpdates: true };
 function loadPreferences(): Preferences { try { return { ...defaultPreferences, ...JSON.parse(localStorage.getItem('harbor-transfer.preferences') ?? '{}') }; } catch { return defaultPreferences; } }
+async function chooseEditorApplication(): Promise<string | null> {
+  const selected = await open({ defaultPath: '/Applications', multiple: false, directory: false, filters: [{ name: 'macOS Applications', extensions: ['app'] }] });
+  return selected && !Array.isArray(selected) ? selected : null;
+}
 const listColumnOrder: ColumnKey[] = ['name', 'size', 'modified', 'permissions', 'owner', 'group', 'type'];
 const optionalColumnOrder: OptionalColumnKey[] = ['size', 'modified', 'permissions', 'owner', 'group', 'type'];
 const minimumColumnWidths: ColumnWidths = { name: 160, size: 76, modified: 150, permissions: 104, owner: 90, group: 90, type: 84 };
@@ -109,10 +121,25 @@ const phaseTwoCopy = {
   'zh-CN': { conflict: '存在同名项目。请输入 overwrite、skip 或 rename。', overwrite: 'overwrite', skip: 'skip', rename: 'rename', action: '输入操作：edit / download / rename / delete', renameTo: '新名称', deleteConfirm: '删除此项目吗？', drop: '将文件或文件夹拖放到这里', speed: '速度', eta: '剩余', completed: '传输完成', failed: '传输失败', cancelled: '传输已取消' },
 } as const;
 
+const dropConflictCopy = {
+  ja: {
+    title: '同名の項目があります', fileDetail: '「{{name}}」はすでに存在します。上書きしますか？', folderDetail: '「{{name}}」フォルダはすでに存在します。更新方法を選択してください。', typeMismatchDetail: '同名の「{{name}}」がありますが、ファイルとフォルダの種類が異なります。既存の項目を置き換えますか？', merge: '差分を統合して上書き', mergeDetail: 'サーバー側だけにある項目は残し、同名ファイルを更新します。', replace: 'フォルダを置き換え', replaceDetail: '既存フォルダを削除し、ドロップしたフォルダだけに置き換えます。', overwrite: '上書き', cancel: 'スキップ' },
+  en: {
+    title: 'An item with this name already exists', fileDetail: '“{{name}}” already exists. Do you want to overwrite it?', folderDetail: 'The folder “{{name}}” already exists. Choose how to update it.', typeMismatchDetail: 'An item named “{{name}}” exists, but its type differs from the dropped item. Replace the existing item?', merge: 'Merge and overwrite changes', mergeDetail: 'Keep remote-only items and update files with matching names.', replace: 'Replace folder', replaceDetail: 'Delete the existing folder and replace it with only the dropped folder.', overwrite: 'Overwrite', cancel: 'Skip' },
+  'zh-CN': {
+    title: '存在同名项目', fileDetail: '“{{name}}”已存在。是否覆盖？', folderDetail: '文件夹“{{name}}”已存在。请选择更新方式。', typeMismatchDetail: '存在同名的“{{name}}”，但文件与文件夹类型不同。是否替换现有项目？', merge: '合并差异并覆盖', mergeDetail: '保留仅存在于服务器上的项目，并更新同名文件。', replace: '替换文件夹', replaceDetail: '删除现有文件夹，仅使用拖放的文件夹进行替换。', overwrite: '覆盖', cancel: '跳过' },
+} as const;
+
 const contextMenuCopy = {
   ja: { rename: '名前を変更', cut: 'カット', copy: 'コピー', paste: 'ペースト', delete: '削除', download: 'ダウンロード', information: 'ファイル情報を変更', copied: 'リモートクリップボードにコピーしました', cutReady: '移動する項目を選択しました', pasted: 'ペーストしました', title: 'ファイル情報', detail: '名称と現在の情報を確認し、対応する属性を変更します。', selectedCount: '{{count}}項目を選択中', mixed: '複数の値', multipleName: '複数選択ではファイル名を一括変更できません。共通属性だけを変更できます。', fileName: 'ファイル名', kind: '種類', owner: '所有者', group: 'グループ', changeOwnership: '所有者・グループを変更', permissions: 'パーミッション', changePermissions: 'パーミッションを変更', modified: '更新日時', changeModified: '更新日時を変更', unsupported: 'この接続方式ではパーミッションと更新日時の変更に対応していません。名称は変更できます。', ownershipSftp: '所有者・グループの変更はSFTPで数値UID/GIDを指定した場合だけ利用できます。', ftpSupport: 'FTPサーバーがSITE CHMOD／MFMTに対応している場合に変更できます。', save: '変更を保存', saved: 'ファイル情報を更新しました', chooseField: '名称を変更するか、変更する属性を選択してください。', invalidName: 'ファイル名に「/」、「.」、「..」は使用できません。', invalidOwnership: '所有者とグループは0以上の数値UID/GIDで入力してください。', invalidPermissions: 'パーミッションは0000〜7777の8進数で入力してください。', invalidDate: '有効な更新日時を入力してください。' },
   en: { rename: 'Rename', cut: 'Cut', copy: 'Copy', paste: 'Paste', delete: 'Delete', download: 'Download', information: 'Change File Information', copied: 'Copied to the remote clipboard', cutReady: 'Item selected for moving', pasted: 'Item pasted', title: 'File Information', detail: 'Review the name and current information, then change supported attributes.', selectedCount: '{{count}} items selected', mixed: 'Mixed values', multipleName: 'File names cannot be changed as a group. Only shared attributes can be changed.', fileName: 'File name', kind: 'Kind', owner: 'Owner', group: 'Group', changeOwnership: 'Change owner and group', permissions: 'Permissions', changePermissions: 'Change permissions', modified: 'Modified date', changeModified: 'Change modified date', unsupported: 'This connection type cannot change POSIX permissions or the modified date. The name can still be changed.', ownershipSftp: 'Owner and group changes require SFTP and numeric UID/GID values.', ftpSupport: 'Changes require SITE CHMOD and MFMT support from the FTP server.', save: 'Save Changes', saved: 'File information updated', chooseField: 'Change the name or choose at least one attribute.', invalidName: 'The file name cannot contain “/” and cannot be “.” or “..”.', invalidOwnership: 'Enter owner and group as non-negative numeric UID/GID values.', invalidPermissions: 'Enter permissions as an octal value from 0000 to 7777.', invalidDate: 'Enter a valid modified date.' },
   'zh-CN': { rename: '重命名', cut: '剪切', copy: '复制', paste: '粘贴', delete: '删除', download: '下载', information: '更改文件信息', copied: '已复制到远程剪贴板', cutReady: '已选择要移动的项目', pasted: '已粘贴项目', title: '文件信息', detail: '查看名称和当前信息，然后更改支持的属性。', selectedCount: '已选择{{count}}个项目', mixed: '多个值', multipleName: '多选时不能批量更改文件名，只能更改共有属性。', fileName: '文件名', kind: '类型', owner: '所有者', group: '组', changeOwnership: '更改所有者和组', permissions: '权限', changePermissions: '更改权限', modified: '修改日期', changeModified: '更改修改日期', unsupported: '此连接类型不能更改POSIX权限或修改日期，但仍可更改名称。', ownershipSftp: '更改所有者和组需要使用SFTP并指定数字UID/GID。', ftpSupport: 'FTP服务器需要支持SITE CHMOD和MFMT才能更改。', save: '保存更改', saved: '文件信息已更新', chooseField: '请更改名称或至少选择一个属性。', invalidName: '文件名不能包含“/”，也不能是“.”或“..”。', invalidOwnership: '请使用非负数字UID/GID输入所有者和组。', invalidPermissions: '请输入0000到7777之间的八进制权限值。', invalidDate: '请输入有效的修改日期。' },
+} as const;
+
+const browserContextMenuCopy = {
+  ja: { newDirectory: '新規ディレクトリ' },
+  en: { newDirectory: 'New Directory' },
+  'zh-CN': { newDirectory: '新建目录' },
 } as const;
 
 const preferencesCopy = {
@@ -140,9 +167,9 @@ const sshKeyCopy = {
 } as const;
 
 const remoteEditCopy = {
-  ja: { edit: '編集', configure: '環境設定でリモートファイルエディタを選択してください。', opening: '編集用キャッシュを準備しています', watching: '保存を監視中', waiting: '変更の安定を待っています', uploaded: 'リモートファイルを上書き保存しました', stop: '編集を終了してキャッシュを削除' },
-  en: { edit: 'Edit', configure: 'Choose a remote file editor in Preferences first.', opening: 'Preparing the editing cache', watching: 'Watching for saves', waiting: 'Waiting for changes to settle', uploaded: 'Remote file overwritten with saved changes', stop: 'Stop editing and delete cache' },
-  'zh-CN': { edit: '编辑', configure: '请先在偏好设置中选择远程文件编辑器。', opening: '正在准备编辑缓存', watching: '正在监视保存操作', waiting: '正在等待更改稳定', uploaded: '已用保存的更改覆盖远程文件', stop: '结束编辑并删除缓存' },
+  ja: { edit: '編集', configure: '編集に使用するアプリケーションを選択してください。', opening: '編集用キャッシュを準備しています', watching: '保存を監視中', waiting: '変更の安定を待っています', uploaded: 'リモートファイルを上書き保存しました', stop: '編集を終了してキャッシュを削除' },
+  en: { edit: 'Edit', configure: 'Choose an application to edit remote files.', opening: 'Preparing the editing cache', watching: 'Watching for saves', waiting: 'Waiting for changes to settle', uploaded: 'Remote file overwritten with saved changes', stop: 'Stop editing and delete cache' },
+  'zh-CN': { edit: '编辑', configure: '请选择用于编辑远程文件的应用程序。', opening: '正在准备编辑缓存', watching: '正在监视保存操作', waiting: '正在等待更改稳定', uploaded: '已用保存的更改覆盖远程文件', stop: '结束编辑并删除缓存' },
 } as const;
 
 const dragOutCopy = {
@@ -314,6 +341,8 @@ export default function App() {
   const editText = remoteEditCopy[language];
   const dragText = dragOutCopy[language];
   const menuText = contextMenuCopy[language];
+  const browserMenuText = browserContextMenuCopy[language];
+  const dropConflictText = dropConflictCopy[language];
   const [connections, setConnections] = useState<Connection[]>([]);
   const [history, setHistory] = useState<ConnectionHistory[]>([]);
   const [selectedTag, setSelectedTag] = useState('');
@@ -369,8 +398,10 @@ export default function App() {
   const [dragExport, setDragExport] = useState<DragExport | null>(null);
   const [dragPreparingPath, setDragPreparingPath] = useState('');
   const [entryContextMenu, setEntryContextMenu] = useState<EntryContextMenu | null>(null);
+  const [browserContextMenu, setBrowserContextMenu] = useState<BrowserContextMenu | null>(null);
   const [remoteClipboard, setRemoteClipboard] = useState<RemoteClipboard | null>(null);
   const [fileInformationTarget, setFileInformationTarget] = useState<FileInformationTarget | null>(null);
+  const [dropConflict, setDropConflict] = useState<DropConflictPrompt | null>(null);
   const availableUpdate = useRef<Update | null>(null);
   const automaticUpdateCheckStarted = useRef(false);
   const remoteEditPolling = useRef<Set<string>>(new Set());
@@ -476,10 +507,11 @@ export default function App() {
     const closeFromPointer = (event: PointerEvent) => {
       const target = event.target as Element | null;
       if (!target?.closest('.entry-context-menu')) setEntryContextMenu(null);
+      if (!target?.closest('.browser-context-menu')) setBrowserContextMenu(null);
       if (!target?.closest('.column-visibility-menu')) setColumnMenu(null);
     };
-    const closeFromKey = (event: KeyboardEvent) => { if (event.key === 'Escape') { setEntryContextMenu(null); setColumnMenu(null); } };
-    const close = () => { setEntryContextMenu(null); setColumnMenu(null); };
+    const closeFromKey = (event: KeyboardEvent) => { if (event.key === 'Escape') { setEntryContextMenu(null); setBrowserContextMenu(null); setColumnMenu(null); } };
+    const close = () => { setEntryContextMenu(null); setBrowserContextMenu(null); setColumnMenu(null); };
     document.addEventListener('pointerdown', closeFromPointer);
     document.addEventListener('keydown', closeFromKey);
     window.addEventListener('blur', close);
@@ -627,7 +659,7 @@ export default function App() {
       if (event.payload.type === 'leave') setIsDragOver(false);
       else if (event.payload.type === 'drop') {
         setIsDragOver(false);
-        if (event.payload.paths.length) void uploadDroppedPaths(event.payload.paths);
+        if (event.payload.paths.length) void uploadDroppedPaths(event.payload.paths, true);
       } else setIsDragOver(true);
     }).then((dispose) => { unlisten = dispose; }).catch(() => undefined);
     return () => unlisten?.();
@@ -740,6 +772,7 @@ export default function App() {
     event.preventDefault();
     event.stopPropagation();
     setEntryContextMenu(null);
+    setBrowserContextMenu(null);
     setColumnMenu({ x: Math.max(8, Math.min(event.clientX, window.innerWidth - 220)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - 300)) });
   }
 
@@ -910,10 +943,10 @@ export default function App() {
     }).catch((reason) => setError(String(reason)));
   }
 
-  async function enqueueFile(localPath: string, name: string) {
-    if (!active) return;
-    const remoteName = resolveRemoteName(name);
-    if (!remoteName) return;
+  async function enqueueFile(localPath: string, name: string, resolvedName?: string): Promise<boolean> {
+    if (!active) return false;
+    const remoteName = resolvedName ?? resolveRemoteName(name);
+    if (!remoteName) return false;
     const transferId = crypto.randomUUID();
     const transfer: Transfer = { id: transferId, name: remoteName, direction: 'Upload', status: 'Running', detail: path, localPath, remotePath: joinPath(path, remoteName), connectionId: active.id, transferredBytes: 0 };
     setTransfers((current) => [transfer, ...current]);
@@ -921,17 +954,19 @@ export default function App() {
       const bytes = await invoke<number>('transfer_upload', { request: { transferId, connectionId: active.id, localPath, remotePath: transfer.remotePath } });
       setTransfers((current) => current.map((item) => item.id === transfer.id ? { ...item, status: 'Completed' } : item));
       recordTransfer(transfer, 'Completed', transfer.detail, bytes);
+      return true;
     } catch (reason) {
       const status = transferFailureStatus(reason);
       setTransfers((current) => current.map((item) => item.id === transfer.id ? { ...item, status, detail: String(reason) } : item));
       recordTransfer(transfer, status, String(reason));
+      return false;
     }
   }
 
-  async function enqueueDirectory(localDirectory: string, name: string) {
-    if (!active) return;
-    const remoteName = resolveRemoteName(name);
-    if (!remoteName) return;
+  async function enqueueDirectory(localDirectory: string, name: string, resolvedName?: string): Promise<boolean> {
+    if (!active) return false;
+    const remoteName = resolvedName ?? resolveRemoteName(name);
+    if (!remoteName) return false;
     const transferId = crypto.randomUUID();
     const transfer: Transfer = { id: transferId, name: remoteName, direction: 'Upload', status: 'Running', detail: path };
     setDirectoryProgress({ transferId, completedFiles: 0, totalFiles: 0, currentPath: remoteName, status: 'preparing' });
@@ -942,18 +977,47 @@ export default function App() {
       setTransfers((current) => current.map((item) => item.id === transfer.id ? { ...item, status: 'Completed' } : item));
       recordTransfer(transfer, 'Completed');
       void loadDirectory();
+      return true;
     } catch (reason) {
       const status = transferFailureStatus(reason);
       setTransfers((current) => current.map((item) => item.id === transfer.id ? { ...item, status, detail: String(reason) } : item));
       recordTransfer(transfer, status, String(reason));
+      return false;
     }
   }
 
-  async function uploadDroppedPaths(paths: string[]) {
+  function askDropConflict(name: string, incomingIsDirectory: boolean, existingIsDirectory: boolean): Promise<DropConflictChoice> {
+    return new Promise((resolve) => setDropConflict({ name, incomingIsDirectory, existingIsDirectory, resolve }));
+  }
+
+  function settleDropConflict(choice: DropConflictChoice) {
+    const prompt = dropConflict;
+    setDropConflict(null);
+    prompt?.resolve(choice);
+  }
+
+  async function uploadDroppedPaths(paths: string[], dropped = false) {
+    const knownRemoteEntries = new Map(entries.map((entry) => [entry.name, entry]));
     for (const localPath of paths) {
       try {
         const info = await invoke<LocalPathInfo>('local_path_info', { path: localPath });
-        if (info.isDirectory) await enqueueDirectory(localPath, info.name);
+        if (dropped) {
+          const existing = knownRemoteEntries.get(info.name);
+          if (existing) {
+            const existingIsDirectory = existing.file_type === 'Directory';
+            const choice = await askDropConflict(info.name, info.isDirectory, existingIsDirectory);
+            if (choice === 'cancel') continue;
+            const mustDeleteExisting = choice === 'replace'
+              || (choice === 'overwrite' && (info.isDirectory !== existingIsDirectory || existing.file_type === 'Symlink'));
+            if (mustDeleteExisting && active) {
+              await invoke('remote_delete_tree', { request: { connectionId: active.id, path: joinPath(path, info.name), isDirectory: existingIsDirectory } });
+            }
+          }
+          const uploaded = info.isDirectory
+            ? await enqueueDirectory(localPath, info.name, info.name)
+            : await enqueueFile(localPath, info.name, info.name);
+          if (uploaded) knownRemoteEntries.set(info.name, { name: info.name, size: 0, file_type: info.isDirectory ? 'Directory' : 'File' });
+        } else if (info.isDirectory) await enqueueDirectory(localPath, info.name);
         else await enqueueFile(localPath, info.name);
       } catch (reason) { setError(String(reason)); }
     }
@@ -1087,34 +1151,49 @@ export default function App() {
     } catch (reason) { const status = transferFailureStatus(reason); setTransfers((current) => current.map((item) => item.id === transfer.id ? { ...item, status, detail: String(reason) } : item)); recordTransfer(transfer, status, String(reason)); }
   }
 
-  async function createDirectory() {
+  async function createDirectory(basePath = path) {
     if (!active) return;
     const name = window.prompt(t.newFolder);
     if (!name) return;
-    try { await invoke('remote_create_directory', { request: { connectionId: active.id, path: joinPath(path, name) } }); await loadDirectory(); }
+    try {
+      await invoke('remote_create_directory', { request: { connectionId: active.id, path: joinPath(basePath, name) } });
+      if (basePath === path) await loadDirectory();
+      else {
+        const refreshed = await invoke<FileEntry[]>('remote_list', { request: { connectionId: active.id, path: basePath } });
+        setColumnLevels((current) => current.map((level) => level.path === basePath ? { ...level, entries: refreshed } : level));
+      }
+    }
     catch (reason) { setError(String(reason)); }
   }
 
   async function editRemoteFile(entry: FileEntry, basePath = path) {
     if (!active || entry.file_type !== 'File') return;
-    if (!preferences.editorPath) {
+    let editorPath = preferences.editorPath.trim();
+    if (!editorPath) {
       setNotice(editText.configure);
-      setShowPreferences(true);
-      return;
+      try {
+        const selectedEditor = await chooseEditorApplication();
+        if (!selectedEditor) return;
+        editorPath = selectedEditor;
+        setPreferences((current) => ({ ...current, editorPath: selectedEditor }));
+      } catch (reason) {
+        setError(String(reason));
+        return;
+      }
     }
     const remotePath = joinPath(basePath, entry.name);
     const existing = remoteEdits.find((edit) => edit.connectionId === active.id && edit.remotePath === remotePath);
     if (existing) {
       setNotice(`${editText.opening}: ${entry.name}`);
       try {
-        await invoke('remote_edit_reopen', { editId: existing.editId, editorPath: preferences.editorPath });
+        await invoke('remote_edit_reopen', { editId: existing.editId, editorPath });
         setNotice(`${editText.watching}: ${entry.name}`);
       } catch (reason) { setError(String(reason)); }
       return;
     }
     setNotice(`${editText.opening}: ${entry.name}`);
     try {
-      const session = await invoke<RemoteEditOpenResult>('remote_edit_open', { request: { connectionId: active.id, remotePath, editorPath: preferences.editorPath } });
+      const session = await invoke<RemoteEditOpenResult>('remote_edit_open', { request: { connectionId: active.id, remotePath, editorPath } });
       setRemoteEdits((current) => [{ ...session, connectionId: active.id, status: 'watching' }, ...current]);
       setNotice(`${editText.watching}: ${entry.name}`);
     } catch (reason) { setError(String(reason)); }
@@ -1248,6 +1327,8 @@ export default function App() {
     if (!active) return;
     event.preventDefault();
     event.stopPropagation();
+    setBrowserContextMenu(null);
+    setColumnMenu(null);
     cancelScheduledDragPreparation();
     const remotePath = joinPath(basePath, entry.name);
     if (!selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath)) {
@@ -1262,6 +1343,20 @@ export default function App() {
       x: Math.max(8, Math.min(requestedX, window.innerWidth - 230)),
       y: Math.max(8, Math.min(requestedY, window.innerHeight - 330)),
       entry,
+      basePath,
+    });
+  }
+
+  function openBrowserContext(event: React.MouseEvent, basePath = path) {
+    if (!active) return;
+    event.preventDefault();
+    event.stopPropagation();
+    cancelScheduledDragPreparation();
+    setEntryContextMenu(null);
+    setColumnMenu(null);
+    setBrowserContextMenu({
+      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 210)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 80)),
       basePath,
     });
   }
@@ -1361,7 +1456,7 @@ export default function App() {
               <button className={viewMode === 'columns' ? 'active' : ''} aria-label={viewsText.columns} title={viewsText.columns} aria-pressed={viewMode === 'columns'} onClick={() => selectViewMode('columns')}><Columns3 size={16}/></button>
             </div>
             <div className="browser-toolbar-spacer" />
-            <button onClick={() => void openSyncPreview()}><FolderSync size={17}/>{syncText.button}</button><button disabled={active.protocol === 's3' && !active.s3PreserveEmptyDirectories} title={active.protocol === 's3' ? s3Copy[language].readOnly : undefined} onClick={createDirectory}><FolderPlus size={17}/>{t.newFolder}</button><button onClick={() => void uploadDirectory()}><FolderUp size={16}/>{t.uploadFolder}</button><button className="primary" onClick={() => void uploadFiles()}><Upload size={16}/>{t.upload}</button>
+            <button onClick={() => void openSyncPreview()}><FolderSync size={17}/>{syncText.button}</button><button disabled={active.protocol === 's3' && !active.s3PreserveEmptyDirectories} title={active.protocol === 's3' ? s3Copy[language].readOnly : undefined} onClick={() => void createDirectory()}><FolderPlus size={17}/>{t.newFolder}</button><button onClick={() => void uploadDirectory()}><FolderUp size={16}/>{t.uploadFolder}</button><button className="primary" onClick={() => void uploadFiles()}><Upload size={16}/>{t.upload}</button>
           </div>
           <div className="path-toolbar">
             <button aria-label={accessibilityCopy[language].back} title={accessibilityCopy[language].back} disabled={directoryHistoryIndex <= 0} onClick={() => void navigateDirectoryHistory(-1)}><ChevronLeft size={18}/></button><button aria-label={accessibilityCopy[language].forward} title={accessibilityCopy[language].forward} disabled={directoryHistoryIndex < 0 || directoryHistoryIndex >= directoryHistory.length - 1} onClick={() => void navigateDirectoryHistory(1)}><ChevronRight size={18}/></button>
@@ -1371,7 +1466,7 @@ export default function App() {
           </div>
           {error && <div className="error-banner"><strong>{t.error}:</strong> {error}</div>}
           <div className="connection-strip"><span className="online-dot" />{active.name}<span>·</span><span>{active.username}@{active.host}</span><span className="connected">{t.connected}</span></div>
-          <div className="file-display-region">
+          <div className="file-display-region" onContextMenu={(event) => openBrowserContext(event)}>
           {isDragOver && <div className="drop-overlay"><Upload size={32}/><strong>{p2.drop}</strong></div>}
           {viewMode === 'list' && <div className="file-table" role="table" style={{ '--file-columns': `${visibleColumns.map((column) => column === 'name' ? `minmax(${columnWidths[column]}px, 1fr)` : `${columnWidths[column]}px`).join(' ')} 30px`, '--file-min-width': `${visibleColumns.reduce((total, column) => total + columnWidths[column], 0) + 40 + visibleColumns.length * 8}px` } as React.CSSProperties}>
             <div className="file-header" role="row" onContextMenu={openColumnVisibilityMenu}>
@@ -1394,7 +1489,7 @@ export default function App() {
           {viewMode === 'columns' && <div className="column-browser" role="listbox" aria-label={viewsText.columns}>
             {columnLevels.map((level, levelIndex) => {
               const visibleLevelEntries = level.entries.filter((entry) => entry.name.toLowerCase().includes(query.toLowerCase()));
-              return <section className="directory-column" key={`${level.path}-${levelIndex}`} aria-label={level.path}>
+              return <section className="directory-column" key={`${level.path}-${levelIndex}`} aria-label={level.path} onContextMenu={(event) => openBrowserContext(event, level.path)}>
                 <div className="directory-column-title" title={level.path}>{level.path}</div>
                 {visibleLevelEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
                 {visibleLevelEntries.map((entry) => { const remotePath = joinPath(level.path, entry.name); const selectedForAction = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`column-entry ${level.selectedName === entry.name || selectedForAction ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="option" aria-selected={level.selectedName === entry.name || selectedForAction} draggable={entry.file_type !== 'Symlink'} onContextMenu={(event) => openEntryContext(event, entry, level.path)} onDragStart={(event) => startRemoteDrag(event, entry, level.path)}>
@@ -1439,6 +1534,9 @@ export default function App() {
       {optionalColumnOrder.map((column) => <button type="button" role="menuitemcheckbox" aria-checked={columnVisibility[column]} key={column} onClick={() => toggleColumn(column)}>{columnVisibility[column] ? <Check size={14}/> : <span className="menu-check-placeholder"/>}{columnLabel(column)}</button>)}
       <button type="button" role="menuitemcheckbox" aria-checked="true" disabled><Check size={14}/>{accessibilityCopy[language].more}</button>
     </div>}
+    {browserContextMenu && active && <div className="entry-context-menu browser-context-menu" role="menu" style={{ left: browserContextMenu.x, top: browserContextMenu.y }} onContextMenu={(event) => event.preventDefault()}>
+      <button type="button" role="menuitem" disabled={active.protocol === 's3' && !active.s3PreserveEmptyDirectories} onClick={() => { const targetPath = browserContextMenu.basePath; setBrowserContextMenu(null); void createDirectory(targetPath); }}><FolderPlus size={15}/>{browserMenuText.newDirectory}</button>
+    </div>}
     {entryContextMenu && active && <div className="entry-context-menu" role="menu" style={{ left: entryContextMenu.x, top: entryContextMenu.y }} onContextMenu={(event) => event.preventDefault()}>
       <div className="context-menu-heading" title={entryContextMenu.entry.name}>{entryContextMenu.entry.name}</div>
       <button role="menuitem" disabled={entryContextMenu.entry.file_type === 'Symlink'} onClick={() => placeOnRemoteClipboard(entryContextMenu.entry, entryContextMenu.basePath, 'cut')}><Scissors size={15}/>{menuText.cut}</button>
@@ -1464,6 +1562,14 @@ export default function App() {
       await loadDirectory(active, path);
     }}
     />}
+    {dropConflict && <div className="modal-backdrop drop-conflict-backdrop" role="presentation"><section className="connect-sheet drop-conflict-sheet" role="dialog" aria-modal="true" aria-labelledby="drop-conflict-title">
+      <header><div><h2 id="drop-conflict-title">{dropConflictText.title}</h2><p>{(dropConflict.incomingIsDirectory === dropConflict.existingIsDirectory ? (dropConflict.incomingIsDirectory ? dropConflictText.folderDetail : dropConflictText.fileDetail) : dropConflictText.typeMismatchDetail).replace('{{name}}', dropConflict.name)}</p></div></header>
+      {dropConflict.incomingIsDirectory && dropConflict.existingIsDirectory ? <div className="drop-conflict-options">
+        <button type="button" className="drop-conflict-option" onClick={() => settleDropConflict('merge')}><strong>{dropConflictText.merge}</strong><span>{dropConflictText.mergeDetail}</span></button>
+        <button type="button" className="drop-conflict-option danger" onClick={() => settleDropConflict('replace')}><strong>{dropConflictText.replace}</strong><span>{dropConflictText.replaceDetail}</span></button>
+      </div> : <div className="form-actions"><button type="button" onClick={() => settleDropConflict('cancel')}>{dropConflictText.cancel}</button><button type="button" className="primary" onClick={() => settleDropConflict('overwrite')}>{dropConflictText.overwrite}</button></div>}
+      {dropConflict.incomingIsDirectory && dropConflict.existingIsDirectory && <div className="form-actions"><button type="button" onClick={() => settleDropConflict('cancel')}>{dropConflictText.cancel}</button></div>}
+    </section></div>}
     {showConnect && <ConnectSheet mode={connectSheetMode} bookmark={connectingBookmark} initialKeyPath={selectedKeyPath} defaultProtocol={preferences.defaultProtocol} t={t} phaseCopy={p1} passphraseText={sshPassphrasePromptCopy[language]} localCopy={bookmarkLocalText} s3Text={s3Copy[language]} onClose={() => setShowConnect(false)} onSaved={(connection) => {
       setConnections((current) => [connection, ...current.filter((item) => item.id !== connection.id)]);
       setActive((current) => {
@@ -1702,8 +1808,8 @@ function PreferencesSheet({ value, language, t, softwareUpdate, onCheckUpdate, o
   const text = preferencesCopy[language];
   const updateText = softwareUpdateCopy[language];
   async function selectEditor() {
-    const selected = await open({ multiple: false, directory: false, filters: [{ name: 'macOS Applications', extensions: ['app'] }] });
-    if (selected && !Array.isArray(selected)) setDraft((current) => ({ ...current, editorPath: selected }));
+    const selected = await chooseEditorApplication();
+    if (selected) setDraft((current) => ({ ...current, editorPath: selected }));
   }
   return <div className="modal-backdrop" role="presentation"><form className="connect-sheet preferences-sheet" onSubmit={(event) => { event.preventDefault(); onSave(draft); }}>
     <div className="sheet-title"><div><h2>{text.title}</h2><p>{text.detail}</p></div><button type="button" onClick={onClose}>×</button></div>

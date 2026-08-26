@@ -30,6 +30,7 @@
 - [Done] rsync互換のサイズ＋更新日時quick-checkを選択可能な高度差分同期として実装
 - [Done] Tauri updaterによる署名付き自動更新、手動確認、進捗表示、再起動適用を英語・日本語・简体中文で実装
 - [Done] updater対応版`0.2.0`と`0.2.1`を署名・公証し、GitHub Releasesへ更新メタデータ付きで公開
+- [Next] `0.2.2`を署名・公証し、GitHub Releasesへ更新メタデータ付きで公開
 
 ## Phase 0 — プロジェクト基盤 [Done]
 

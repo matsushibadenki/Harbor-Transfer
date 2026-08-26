@@ -815,6 +815,30 @@ fn remote_join(base: &str, relative: &Path) -> String {
     format!("{}/{}", base.trim_end_matches('/'), relative.trim_start_matches('/'))
 }
 
+fn remote_child_path(base: &str, name: &str) -> Result<String, String> {
+    let mut components = Path::new(name).components();
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\0')
+        || !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err("The server returned an unsafe child path while replacing the folder.".to_string());
+    }
+    Ok(remote_join(base, Path::new(name)))
+}
+
+fn remote_replace_target(path: &str) -> Result<String, String> {
+    let target = path.trim_end_matches('/');
+    if !target.starts_with('/')
+        || target.is_empty()
+        || target.split('/').any(|component| component == "." || component == "..")
+    {
+        return Err("Refusing to replace an unsafe remote path or the remote root directory.".to_string());
+    }
+    Ok(target.to_string())
+}
+
 fn safe_relative_path(value: &str) -> Result<PathBuf, String> {
     if value.is_empty() || value.contains('\0') {
         return Err("Invalid empty sync path.".to_string());
@@ -1625,6 +1649,44 @@ pub async fn remote_delete(request: DeleteRequest, state: State<'_, Arc<AppState
 }
 
 #[tauri::command]
+pub async fn remote_delete_tree(
+    request: DeleteRequest,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let target = remote_replace_target(&request.path)?;
+
+    let mut connections = state.connections.lock().await;
+    let file_system =
+        connections.get_mut(&request.connection_id).ok_or("Connection not found.")?.file_system();
+
+    if !request.is_directory {
+        return file_system.delete_file(&target).await.map_err(|error| error.to_string());
+    }
+
+    // Delete children before their parents so this works for protocols whose
+    // remove-directory operation only accepts empty directories (SFTP/FTP).
+    let mut pending = vec![(target.to_string(), false)];
+    while let Some((directory, children_visited)) = pending.pop() {
+        if children_visited {
+            file_system.delete_dir(&directory).await.map_err(|error| error.to_string())?;
+            continue;
+        }
+
+        let children = file_system.list_dir(&directory).await.map_err(|error| error.to_string())?;
+        pending.push((directory.clone(), true));
+        for child in children.into_iter().rev() {
+            let child_path = remote_child_path(&directory, &child.name)?;
+            if child.file_type == crate::sftp_client::FileEntryType::Directory {
+                pending.push((child_path, false));
+            } else {
+                file_system.delete_file(&child_path).await.map_err(|error| error.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn transfer_upload(
     request: TransferRequest,
     app: tauri::AppHandle,
@@ -1877,8 +1939,8 @@ pub async fn transfer_upload_directory(
 #[cfg(test)]
 mod tests {
     use super::{
-        content_hash, parse_remote_modified, reject_symlink_ancestors, remote_parent_and_name,
-        safe_relative_path, TransferControl,
+        content_hash, parse_remote_modified, reject_symlink_ancestors, remote_child_path,
+        remote_parent_and_name, remote_replace_target, safe_relative_path, TransferControl,
     };
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
@@ -1924,6 +1986,17 @@ mod tests {
         assert!(safe_relative_path("/tmp/file.txt").is_err());
         assert!(safe_relative_path("../file.txt").is_err());
         assert!(safe_relative_path("folder/../file.txt").is_err());
+    }
+
+    #[test]
+    fn validates_destructive_remote_replace_paths() {
+        assert_eq!(remote_replace_target("/uploads/site/").unwrap(), "/uploads/site");
+        assert!(remote_replace_target("/").is_err());
+        assert!(remote_replace_target("relative/folder").is_err());
+        assert!(remote_replace_target("/uploads/../private").is_err());
+        assert_eq!(remote_child_path("/uploads", "港便り").unwrap(), "/uploads/港便り");
+        assert!(remote_child_path("/uploads", "../private").is_err());
+        assert!(remote_child_path("/uploads", "nested/file.txt").is_err());
     }
 
     #[test]

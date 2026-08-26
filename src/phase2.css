@@ -2064,6 +2064,66 @@ button:not(.primary):hover:not(:disabled),
   background: var(--ht-surface-2, #fff);
 }
 
+.drop-conflict-sheet {
+  width: min(500px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  padding: 22px;
+}
+
+.drop-conflict-sheet header h2 {
+  margin: 0 0 7px;
+  color: var(--ht-text-primary, #17332d);
+  font-size: 17px;
+}
+
+.drop-conflict-sheet header p {
+  margin: 0;
+  color: var(--ht-text-secondary, #56716a);
+  line-height: 1.55;
+}
+
+.drop-conflict-options {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.drop-conflict-option {
+  display: grid;
+  justify-items: start;
+  gap: 4px;
+  width: 100%;
+  padding: 13px 14px;
+  border: 1px solid var(--ht-rule, #d7e2df);
+  border-radius: 10px;
+  text-align: left;
+  background: var(--ht-surface-3, #f3f7f6);
+}
+
+.drop-conflict-option strong {
+  color: var(--ht-text-primary, #17332d);
+  font-size: 13px;
+}
+
+.drop-conflict-option span {
+  color: var(--ht-text-secondary, #56716a);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.drop-conflict-option.danger {
+  border-color: color-mix(in srgb, var(--ht-danger, #b54931) 45%, transparent);
+  background: var(--ht-danger-surface, #fff2ef);
+}
+
+.drop-conflict-option.danger strong {
+  color: var(--ht-danger, #b54931);
+}
+
+.drop-conflict-sheet > .form-actions {
+  margin-top: 18px;
+}
+
 .protocol-support-note {
   margin: 12px 0;
   padding: 9px 11px;
