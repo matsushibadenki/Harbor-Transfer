@@ -60,10 +60,20 @@ jobs:
           gh release download "$RELEASE_TAG" --pattern '*.app.tar.gz' --dir release-assets
           ARCHIVE="$(find release-assets -maxdepth 1 -name '*.app.tar.gz' -type f -print -quit)"
           test -n "$ARCHIVE" || { echo "Updater archive is missing"; exit 1; }
-          if gzip -dc "$ARCHIVE" | strings | grep -E '(^|/)\._|(^|/)__MACOSX|LIBARCHIVE\.xattr|SCHILY\.xattr' >/dev/null; then
-            echo "Updater archive contains unsupported macOS metadata"
-            exit 1
-          fi
+          python3 - "$ARCHIVE" <<'PY'
+          import pathlib
+          import sys
+          import tarfile
+
+          archive = pathlib.Path(sys.argv[1])
+          with tarfile.open(archive, "r:gz") as bundle:
+              for member in bundle.getmembers():
+                  parts = pathlib.PurePosixPath(member.name).parts
+                  if "__MACOSX" in parts or any(part.startswith("._") for part in parts):
+                      raise SystemExit(f"Updater archive contains an AppleDouble entry: {member.name}")
+                  if any(key.startswith(("LIBARCHIVE.xattr", "SCHILY.xattr")) for key in member.pax_headers):
+                      raise SystemExit(f"Updater archive contains an extended attribute: {member.name}")
+          PY
           pnpm tauri signer sign "$ARCHIVE"
           test -s "$ARCHIVE.sig"
 
