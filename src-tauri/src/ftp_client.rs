@@ -1,11 +1,13 @@
 use anyhow::Result;
+use rustls_platform_verifier::ConfigVerifierExt;
 use serde::Deserialize;
 use std::io::Cursor;
+use std::sync::Arc;
 use std::time::Duration;
-use suppaftp::tokio::{AsyncFtpStream, AsyncNativeTlsConnector, AsyncNativeTlsFtpStream};
+use suppaftp::tokio::{AsyncFtpStream, AsyncRustlsConnector, AsyncRustlsFtpStream};
 use suppaftp::types::Mode;
 use suppaftp::Status;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 
 use crate::sftp_client::{FileEntry, FileEntryType};
 
@@ -23,7 +25,7 @@ pub struct FtpConfig {
 /// Wrapper enum to handle both plain and TLS FTP streams.
 enum FtpStreamKind {
     Plain(AsyncFtpStream),
-    Secure(AsyncNativeTlsFtpStream),
+    Secure(AsyncRustlsFtpStream),
 }
 
 /// Dispatch a method call to whichever stream variant is active.
@@ -63,7 +65,11 @@ impl FtpClient {
         let timeout_duration = Duration::from_secs(15);
 
         let mut stream_kind = if config.ftps_enabled {
-            let ftp_stream = tokio::time::timeout(timeout_duration, AsyncNativeTlsFtpStream::connect(&addr))
+            // The S3 client also links AWS-LC, so rustls sees two compiled
+            // crypto providers and cannot select one implicitly. Prefer ring
+            // for FTPS while leaving any provider installed earlier intact.
+            let _ = suppaftp::tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+            let ftp_stream = tokio::time::timeout(timeout_duration, AsyncRustlsFtpStream::connect(&addr))
                 .await
                 .map_err(|_| {
                     anyhow::anyhow!(
@@ -80,21 +86,35 @@ impl FtpClient {
             // offer a per-bookmark exception after an explicit confirmation,
             // but a copied development setting must never silently trust an
             // invalid FTPS certificate.
-            let tls_connector = suppaftp::async_native_tls::TlsConnector::new();
+            let tls_config = suppaftp::tokio_rustls::rustls::ClientConfig::with_platform_verifier()
+                .map_err(|error| anyhow::anyhow!("Could not initialize platform TLS verifier: {}", error))?;
             #[cfg(test)]
-            let tls_connector = match std::env::var("FTP_TEST_CA_CERT") {
+            let tls_config = match std::env::var("FTP_TEST_CA_CERT") {
                 Ok(path) => {
                     let pem = std::fs::read(&path).map_err(|error| {
                         anyhow::anyhow!("Could not read FTP_TEST_CA_CERT '{}': {}", path, error)
                     })?;
-                    let certificate = suppaftp::async_native_tls::Certificate::from_pem(&pem)
+                    let mut pem_reader = std::io::Cursor::new(pem);
+                    let certificates = rustls_pemfile::certs(&mut pem_reader)
+                        .collect::<std::result::Result<Vec<_>, _>>()
                         .map_err(|error| anyhow::anyhow!("Invalid FTP_TEST_CA_CERT '{}': {}", path, error))?;
-                    tls_connector.add_root_certificate(certificate)
+                    let mut roots = suppaftp::tokio_rustls::rustls::RootCertStore::empty();
+                    let (added, ignored) = roots.add_parsable_certificates(certificates);
+                    if added == 0 || ignored > 0 {
+                        return Err(anyhow::anyhow!(
+                            "FTP_TEST_CA_CERT '{}' did not contain a valid CA certificate",
+                            path
+                        ));
+                    }
+                    suppaftp::tokio_rustls::rustls::ClientConfig::builder()
+                        .with_root_certificates(roots)
+                        .with_no_client_auth()
                 }
-                Err(_) => tls_connector,
+                Err(_) => tls_config,
             };
+            let tls_connector = suppaftp::tokio_rustls::TlsConnector::from(Arc::new(tls_config));
             let secure_stream = ftp_stream
-                .into_secure(AsyncNativeTlsConnector::from(tls_connector), &config.host)
+                .into_secure(AsyncRustlsConnector::from(tls_connector), &config.host)
                 .await
                 .map_err(|e| anyhow::anyhow!("FTPS TLS handshake failed: {}", e))?;
 
@@ -261,40 +281,9 @@ impl FtpClient {
 
         ftp_stream!(self, s => {
             let mut reader = Cursor::new(data);
-            let mut data_stream = s.put_with_stream(remote_path).await.map_err(|e| {
-                anyhow::anyhow!("Failed to start upload for '{}': {}", remote_path, e)
-            })?;
-            let uploaded = tokio::io::copy(&mut reader, &mut data_stream)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to upload file '{}': {}", remote_path, e))?;
-
-            // `suppaftp::put_file` waits without a deadline for TLS shutdown
-            // before it reads the server's 226 response. Some OpenSSL servers
-            // do not return a close-notify, which stalled Linux CI for ten
-            // minutes. Send close-notify, but bound that handshake; dropping
-            // the stream after the deadline still closes the data socket. A
-            // sink then lets suppaftp reset its transfer state and consume the
-            // control-channel completion response without a second shutdown.
-            data_stream.flush().await.map_err(|e| {
-                anyhow::anyhow!("Failed to flush upload for '{}': {}", remote_path, e)
-            })?;
-            match tokio::time::timeout(Duration::from_secs(5), data_stream.shutdown()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => tracing::warn!(
-                    "FTP data stream shutdown for '{}' returned {}; closing the stream",
-                    remote_path,
-                    error
-                ),
-                Err(_) => tracing::warn!(
-                    "FTP data stream shutdown for '{}' timed out; closing the stream",
-                    remote_path
-                ),
-            }
-            drop(data_stream);
-            s.finalize_put_stream(tokio::io::sink()).await.map_err(|e| {
-                anyhow::anyhow!("Failed to finalize upload for '{}': {}", remote_path, e)
-            })?;
-            uploaded
+            s.put_file(remote_path, &mut reader).await.map_err(|e| {
+                anyhow::anyhow!("Failed to upload file '{}': {}", remote_path, e)
+            })?
         });
 
         Ok(total_bytes)
