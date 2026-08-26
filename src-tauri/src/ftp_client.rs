@@ -309,7 +309,11 @@ impl FtpClient {
                 let tcp_stream = data_stream.into_tcp_stream().map_err(|e| {
                     anyhow::anyhow!("Failed to close FTPS data connection for '{}': {}", remote_path, e)
                 })?;
-                tokio::time::timeout(Duration::from_secs(30), stream.finalize_put_stream(tcp_stream))
+                // Dropping the owned socket is required here. AsyncWrite::shutdown
+                // only closes its write half on Linux, while pyftpdlib/OpenSSL
+                // waits for the complete TLS data connection to disappear.
+                drop(tcp_stream);
+                tokio::time::timeout(Duration::from_secs(30), stream.finalize_put_stream(tokio::io::sink()))
                     .await
                     .map_err(|_| {
                         anyhow::anyhow!(
