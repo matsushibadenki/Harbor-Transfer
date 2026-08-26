@@ -5,6 +5,7 @@ use aws_credential_types::Credentials;
 use aws_sdk_s3::config::Region;
 use aws_sdk_s3::primitives::{ByteStream, Length};
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use std::collections::HashSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -15,8 +16,8 @@ const MAX_LIST_ENTRIES: usize = 10_000;
 const MIN_MULTIPART_PART_SIZE: u64 = 8 * 1024 * 1024;
 const MAX_MULTIPART_PART_SIZE: u64 = 5 * 1024 * 1024 * 1024;
 const MAX_MULTIPART_PARTS: u64 = 10_000;
-const UNSUPPORTED_MUTATION_ERROR: &str =
-    "This S3 operation is disabled until copy/delete safety is implemented.";
+const MAX_SINGLE_COPY_SIZE: u64 = 5_000_000_000;
+const MAX_MUTATION_OBJECTS: usize = 100_000;
 
 // Do not derive `Debug`: this value contains credentials loaded from Keychain.
 #[derive(Clone)]
@@ -28,12 +29,14 @@ pub struct S3Config {
     pub secret_access_key: String,
     pub session_token: Option<String>,
     pub force_path_style: bool,
+    pub preserve_empty_directories: bool,
     pub probe_path: String,
 }
 
 pub struct S3Client {
     client: aws_sdk_s3::Client,
     bucket: String,
+    preserve_empty_directories: bool,
 }
 
 impl S3Client {
@@ -62,7 +65,11 @@ impl S3Client {
         if let Some(endpoint) = config.endpoint.as_ref() {
             builder = builder.endpoint_url(endpoint);
         }
-        Self { client: aws_sdk_s3::Client::from_conf(builder.build()), bucket: config.bucket.clone() }
+        Self {
+            client: aws_sdk_s3::Client::from_conf(builder.build()),
+            bucket: config.bucket.clone(),
+            preserve_empty_directories: config.preserve_empty_directories,
+        }
     }
 
     #[cfg(test)]
@@ -131,7 +138,7 @@ impl S3Client {
                 entries.push(FileEntry {
                     name: name.to_string(),
                     size: object.size().unwrap_or_default().max(0) as u64,
-                    modified: object.last_modified().map(ToString::to_string),
+                    modified: object.last_modified().map(|value| value.secs().to_string()),
                     permissions: None,
                     file_type: FileEntryType::File,
                     owner: None,
@@ -316,23 +323,259 @@ impl S3Client {
         result
     }
 
-    pub async fn create_dir(&mut self, _path: &str) -> Result<()> {
-        Err(anyhow!(UNSUPPORTED_MUTATION_ERROR))
+    pub async fn create_dir(&mut self, path: &str) -> Result<()> {
+        if !self.preserve_empty_directories {
+            return Ok(());
+        }
+        let prefix = path_to_prefix(path)?;
+        if prefix.is_empty() {
+            return Ok(());
+        }
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(prefix)
+            .body(ByteStream::from_static(&[]))
+            .send()
+            .await
+            .map_err(|error| anyhow!("Failed to create S3 directory marker: {error}"))?;
+        Ok(())
     }
 
     pub async fn rename(&mut self, _old_path: &str, _new_path: &str) -> Result<()> {
-        Err(anyhow!(UNSUPPORTED_MUTATION_ERROR))
+        let old_key = path_to_key(_old_path)?;
+        let new_key = path_to_key(_new_path)?;
+        if old_key == new_key {
+            return Ok(());
+        }
+        if self.object_or_prefix_exists(&new_key).await? {
+            return Err(anyhow!("The S3 rename destination already exists."));
+        }
+
+        if self.object_exists(&old_key).await? {
+            self.copy_key_verified(&old_key, &new_key).await?;
+            self.delete_object(&old_key).await?;
+            return Ok(());
+        }
+
+        let old_prefix = format!("{}/", old_key.trim_end_matches('/'));
+        let new_prefix = format!("{}/", new_key.trim_end_matches('/'));
+        if new_prefix.starts_with(&old_prefix) {
+            return Err(anyhow!("An S3 prefix cannot be renamed inside itself."));
+        }
+        let objects = self.list_object_keys(&old_prefix, MAX_MUTATION_OBJECTS).await?;
+        if objects.is_empty() {
+            return Err(anyhow!("The S3 rename source does not exist."));
+        }
+        let mut copied = Vec::with_capacity(objects.len());
+        for (source, _) in &objects {
+            let suffix =
+                source.strip_prefix(&old_prefix).ok_or_else(|| anyhow!("Invalid S3 prefix listing."))?;
+            let destination = format!("{new_prefix}{suffix}");
+            self.copy_key_verified(source, &destination).await.map_err(|error| {
+                anyhow!(
+                    "S3 prefix copy stopped before deleting the source. {} copied object(s) remain at the destination: {error}",
+                    copied.len()
+                )
+            })?;
+            copied.push(destination);
+        }
+        for (source, _) in &objects {
+            self.delete_object(source).await.map_err(|error| {
+                anyhow!("S3 prefix copy succeeded, but source cleanup was incomplete: {error}")
+            })?;
+        }
+        Ok(())
     }
 
-    pub async fn delete_file(&mut self, _path: &str) -> Result<()> {
-        Err(anyhow!(UNSUPPORTED_MUTATION_ERROR))
+    pub async fn delete_file(&mut self, path: &str) -> Result<()> {
+        let key = path_to_key(path)?;
+        self.delete_object(&key).await
     }
 
-    pub async fn delete_dir(&mut self, _path: &str) -> Result<()> {
-        Err(anyhow!(UNSUPPORTED_MUTATION_ERROR))
+    pub async fn delete_dir(&mut self, path: &str) -> Result<()> {
+        let prefix = path_to_prefix(path)?;
+        if prefix.is_empty() {
+            return Err(anyhow!("Deleting the S3 bucket root is not allowed."));
+        }
+        let objects = self.list_object_keys(&prefix, MAX_MUTATION_OBJECTS).await?;
+        for (key, _) in objects {
+            self.delete_object(&key).await?;
+        }
+        Ok(())
     }
 
     pub async fn disconnect(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn object_exists(&self, key: &str) -> Result<bool> {
+        match self.client.head_object().bucket(&self.bucket).key(key).send().await {
+            Ok(_) => Ok(true),
+            Err(error) if error.as_service_error().is_some_and(|service| service.is_not_found()) => Ok(false),
+            Err(error) => Err(anyhow!("Failed to inspect S3 object '{key}': {error}")),
+        }
+    }
+
+    async fn object_or_prefix_exists(&self, key: &str) -> Result<bool> {
+        if self.object_exists(key).await? {
+            return Ok(true);
+        }
+        let prefix = format!("{}/", key.trim_end_matches('/'));
+        let output = self
+            .client
+            .list_objects_v2()
+            .bucket(&self.bucket)
+            .prefix(prefix)
+            .max_keys(1)
+            .send()
+            .await
+            .map_err(|error| anyhow!("Failed to inspect S3 prefix '{key}': {error}"))?;
+        Ok(!output.contents().is_empty())
+    }
+
+    async fn list_object_keys(&self, prefix: &str, maximum: usize) -> Result<Vec<(String, u64)>> {
+        let mut continuation_token = None;
+        let mut objects = Vec::new();
+        loop {
+            let output = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(prefix)
+                .set_continuation_token(continuation_token)
+                .send()
+                .await
+                .map_err(|error| anyhow!("Failed to list S3 prefix '{prefix}': {error}"))?;
+            for object in output.contents() {
+                let Some(key) = object.key() else { continue };
+                objects.push((key.to_string(), object.size().unwrap_or_default().max(0) as u64));
+                if objects.len() > maximum {
+                    return Err(anyhow!("The S3 operation exceeds the safety limit of {maximum} objects."));
+                }
+            }
+            continuation_token = output.next_continuation_token().map(str::to_string);
+            if continuation_token.is_none() {
+                break;
+            }
+        }
+        Ok(objects)
+    }
+
+    async fn copy_key_verified(&self, source: &str, destination: &str) -> Result<()> {
+        let source_head = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(source)
+            .send()
+            .await
+            .map_err(|error| anyhow!("Failed to inspect S3 copy source '{source}': {error}"))?;
+        let size = source_head.content_length().unwrap_or_default().max(0) as u64;
+        let copy_source = encode_copy_source(&self.bucket, source);
+        if size <= MAX_SINGLE_COPY_SIZE {
+            self.client
+                .copy_object()
+                .bucket(&self.bucket)
+                .key(destination)
+                .copy_source(copy_source)
+                .send()
+                .await
+                .map_err(|error| anyhow!("Failed to copy S3 object '{source}': {error}"))?;
+        } else {
+            self.multipart_copy(source, destination, &copy_source, size).await?;
+        }
+        let destination_head =
+            self.client
+                .head_object()
+                .bucket(&self.bucket)
+                .key(destination)
+                .send()
+                .await
+                .map_err(|error| anyhow!("Failed to verify copied S3 object '{destination}': {error}"))?;
+        let destination_size = destination_head.content_length().unwrap_or_default().max(0) as u64;
+        if destination_size != size {
+            return Err(anyhow!("Copied S3 object size verification failed."));
+        }
+        Ok(())
+    }
+
+    async fn multipart_copy(
+        &self,
+        source: &str,
+        destination: &str,
+        copy_source: &str,
+        size: u64,
+    ) -> Result<()> {
+        let part_size = multipart_part_size(size)?;
+        let created = self
+            .client
+            .create_multipart_upload()
+            .bucket(&self.bucket)
+            .key(destination)
+            .send()
+            .await
+            .map_err(|error| anyhow!("Failed to start multipart copy for '{source}': {error}"))?;
+        let upload_id = created.upload_id().ok_or_else(|| anyhow!("S3 did not return a copy upload ID."))?;
+        let result: Result<()> = async {
+            let mut parts = Vec::new();
+            let mut offset = 0u64;
+            let mut part_number = 1i32;
+            while offset < size {
+                let end = (offset + part_size).min(size) - 1;
+                let output = self
+                    .client
+                    .upload_part_copy()
+                    .bucket(&self.bucket)
+                    .key(destination)
+                    .upload_id(upload_id)
+                    .part_number(part_number)
+                    .copy_source(copy_source)
+                    .copy_source_range(format!("bytes={offset}-{end}"))
+                    .send()
+                    .await
+                    .map_err(|error| anyhow!("Failed to copy S3 part {part_number}: {error}"))?;
+                let e_tag = output
+                    .copy_part_result()
+                    .and_then(|result| result.e_tag())
+                    .ok_or_else(|| anyhow!("S3 did not return an ETag for copied part {part_number}."))?;
+                parts.push(CompletedPart::builder().part_number(part_number).e_tag(e_tag).build());
+                offset = end + 1;
+                part_number += 1;
+            }
+            self.client
+                .complete_multipart_upload()
+                .bucket(&self.bucket)
+                .key(destination)
+                .upload_id(upload_id)
+                .multipart_upload(CompletedMultipartUpload::builder().set_parts(Some(parts)).build())
+                .send()
+                .await
+                .map_err(|error| anyhow!("Failed to complete multipart copy: {error}"))?;
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            let _ = self
+                .client
+                .abort_multipart_upload()
+                .bucket(&self.bucket)
+                .key(destination)
+                .upload_id(upload_id)
+                .send()
+                .await;
+        }
+        result
+    }
+
+    async fn delete_object(&self, key: &str) -> Result<()> {
+        self.client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|error| anyhow!("Failed to delete S3 object '{key}': {error}"))?;
         Ok(())
     }
 }
@@ -395,6 +638,15 @@ fn multipart_part_size(total: u64) -> Result<u64> {
     Ok(part_size)
 }
 
+fn encode_copy_source(bucket: &str, key: &str) -> String {
+    let encoded_key = key
+        .split('/')
+        .map(|segment| utf8_percent_encode(segment, NON_ALPHANUMERIC).to_string())
+        .collect::<Vec<_>>()
+        .join("/");
+    format!("{bucket}/{encoded_key}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,6 +663,7 @@ mod tests {
             secret_access_key: "test-secret".into(),
             session_token: None,
             force_path_style: false,
+            preserve_empty_directories: false,
             probe_path: "/".into(),
         }
     }
@@ -456,6 +709,14 @@ mod tests {
         assert!(multipart_part_size(maximum_object + 1).is_err());
     }
 
+    #[test]
+    fn encodes_unicode_copy_sources_without_losing_prefix_separators() {
+        assert_eq!(
+            encode_copy_source("example-bucket", "写真/海 1.jpg"),
+            "example-bucket/%E5%86%99%E7%9C%9F/%E6%B5%B7%201%2Ejpg"
+        );
+    }
+
     #[tokio::test]
     async fn live_s3_multipart_unicode_pagination_and_abort() {
         let Ok(endpoint) = std::env::var("S3_TEST_ENDPOINT") else { return };
@@ -471,6 +732,7 @@ mod tests {
             secret_access_key,
             session_token: None,
             force_path_style: true,
+            preserve_empty_directories: false,
             probe_path: "/".into(),
         };
         let mut s3 = S3Client::connect_insecure_local_for_test(&config).await.expect("test client");
@@ -497,11 +759,13 @@ mod tests {
         assert_eq!(uploaded, payload.len() as u64);
         assert!(progress.lock().unwrap().len() >= 3);
 
+        s3.rename("/ページ/海の写真.bin", "/ページ/名前変更.bin").await.expect("verified Unicode rename");
         let listed = s3.list_dir("/ページ").await.expect("list Unicode prefix");
-        assert!(listed.iter().any(|entry| entry.name == "海の写真.bin" && entry.size == uploaded));
+        assert!(listed.iter().any(|entry| entry.name == "名前変更.bin" && entry.size == uploaded));
+        assert!(!listed.iter().any(|entry| entry.name == "海の写真.bin"));
         let destination = workspace.path().join("downloaded.bin");
         let downloaded = s3
-            .download_file("/ページ/海の写真.bin", &destination.to_string_lossy())
+            .download_file("/ページ/名前変更.bin", &destination.to_string_lossy())
             .await
             .expect("streaming download");
         assert_eq!(downloaded, uploaded);
@@ -532,6 +796,28 @@ mod tests {
             .expect("list incomplete uploads");
         assert!(pending.uploads().is_empty(), "cancelled multipart upload was not aborted");
 
+        for key in ["source-prefix/a.txt", "source-prefix/nested/b.txt"] {
+            s3.client
+                .put_object()
+                .bucket(&bucket)
+                .key(key)
+                .body(ByteStream::from_static(b"copy"))
+                .send()
+                .await
+                .expect("create prefix rename fixture");
+        }
+        s3.rename("/source-prefix", "/destination-prefix").await.expect("copy then delete prefix rename");
+        assert!(s3.list_object_keys("source-prefix/", 10).await.unwrap().is_empty());
+        assert_eq!(s3.list_object_keys("destination-prefix/", 10).await.unwrap().len(), 2);
+        s3.delete_dir("/destination-prefix").await.expect("delete renamed prefix");
+        assert!(s3.list_object_keys("destination-prefix/", 10).await.unwrap().is_empty());
+
+        s3.preserve_empty_directories = true;
+        s3.create_dir("/empty-folder").await.expect("create explicit empty prefix marker");
+        assert!(s3.object_exists("empty-folder/").await.unwrap());
+        s3.delete_dir("/empty-folder").await.expect("delete empty prefix marker");
+        assert!(!s3.object_exists("empty-folder/").await.unwrap());
+
         let raw_client = s3.client.clone();
         let uploads = stream::iter(0..1001usize)
             .map(|index| {
@@ -555,5 +841,7 @@ mod tests {
         assert_eq!(paged.len(), 1001);
         assert_eq!(paged.first().unwrap().name, "item-0000.txt");
         assert_eq!(paged.last().unwrap().name, "item-1000.txt");
+        s3.delete_file("/ページ/名前変更.bin").await.expect("delete renamed file");
+        assert!(!s3.object_exists("ページ/名前変更.bin").await.unwrap());
     }
 }

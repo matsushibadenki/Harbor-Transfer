@@ -18,16 +18,17 @@ S3にはディレクトリが存在しないため、UIの `/photos/2026` はオ
 
 一覧は継続トークンを使ってページングし、一度の画面取得は最大10,000項目に制限する。上限を超える場合は黙って欠落させず、利用者へprefixを絞るようエラーを返す。
 
-閲覧だけに必要な最小IAM権限は対象バケット／prefixに対する `s3:ListBucket` とする。ダウンロードには対象objectの`s3:GetObject`、アップロードと確実な取消には`s3:PutObject`と`s3:AbortMultipartUpload`を追加する。初期接続確認も`ListObjectsV2`を使い、不要な`ListAllMyBuckets`権限は要求しない。
+閲覧だけに必要な最小IAM権限は対象バケット／prefixに対する `s3:ListBucket` とする。ダウンロードとcopyには対象objectの`s3:GetObject`、アップロードと確実な取消には`s3:PutObject`と`s3:AbortMultipartUpload`、renameと削除には`s3:DeleteObject`を追加する。初期接続確認も`ListObjectsV2`を使い、不要な`ListAllMyBuckets`権限は要求しない。
 
 ## 機能境界
 
 - 一覧、仮想フォルダ移動、検索、リスト／アイコン／カラム表示を有効にする。
-- 単一ファイルアップロード、ダウンロード、Finderへのファイル／フォルダのドラッグ書き出しを有効にする。
-- フォルダ作成、フォルダアップロード、rename、削除、外部編集、同期は安全性の検証が終わるまで無効にする。
+- 単一／フォルダアップロード、ダウンロード、Finderへのファイル／フォルダのドラッグ書き出しを有効にする。
+- 通常フォルダはobject keyのprefixだけで表現し、空フォルダを0 byte markerで保持するかブックマーク単位で明示設定する。
 - アップロードは最小8 MiBのmultipart uploadとし、10,000 part以内に収まるようオブジェクトサイズに応じてpartを拡大する。停止／取消はpart境界で反映し、失敗または取消時は`AbortMultipartUpload`を試みて完了済みpartを放置しない。
 - ダウンロードは転送先と同じディレクトリの一時ファイルへストリーミングし、完了後にだけ目的パスへrenameする。失敗または取消時は一時ファイルを削除する。
-- renameは将来 `CopyObject` 成功確認後に元オブジェクトを削除する二段階処理として実装し、途中失敗を履歴へ残す。
+- renameは全objectの`CopyObject`／multipart copyとサイズ検証が成功してから元objectを削除する。途中失敗時は元データを保持し、destinationに残ったcopy件数をエラーへ含める。
+- file／prefix削除はbucket rootを拒否し、1操作100,000 objectの安全上限を設ける。
 - 同期ではS3のETagを汎用MD5として扱わず、サイズ・更新日時・利用可能なchecksum metadataを明示的に比較する。
 
 ## 公式仕様
@@ -43,7 +44,7 @@ S3にはディレクトリが存在しないため、UIの `/photos/2026` はオ
 - 1,000件を超える一覧を継続トークンで取得できる。
 - `CommonPrefixes`、Unicodeキー、空のprefixを既存`FileEntry`へ安全に変換できる。
 - HTTPエンドポイント、空のリージョン／バケット、不完全な資格情報を接続前に拒否する。
-- 未対応のフォルダ作成、rename、削除、同期はネットワーク要求を送らず、明確なエラーを返す。
+- フォルダアップロード、明示的な空フォルダmarker、rename、削除、同期が既存UIと安全確認へ統合される。
 - multipartアップロードとストリーミングダウンロードが既存の進捗、停止、再開、取消イベントへ接続される。
 - 失敗したダウンロードが完成ファイルとして残らず、失敗したmultipart uploadに対してabortが呼ばれる。
 - MinIOの隔離テストで17 MiB超multipartの往復、Unicode key、取消後の未完了upload消去、1,001件のページング一覧を検証する。

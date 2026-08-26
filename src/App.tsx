@@ -13,7 +13,7 @@ import {
 
 type Protocol = 'sftp' | 'ftp' | 'ftps' | 'webdav' | 's3';
 type FileEntry = { name: string; size: number; modified?: string; permissions?: string; file_type: 'File' | 'Directory' | 'Symlink' };
-type Connection = { id: string; name: string; protocol: Protocol; host: string; port: number; username: string; initialPath: string; keyPath?: string; hostKey?: string; localDirectory?: string; tags: string; s3Region?: string; s3Endpoint?: string; s3ForcePathStyle?: boolean };
+type Connection = { id: string; name: string; protocol: Protocol; host: string; port: number; username: string; initialPath: string; keyPath?: string; hostKey?: string; localDirectory?: string; tags: string; s3Region?: string; s3Endpoint?: string; s3ForcePathStyle?: boolean; s3PreserveEmptyDirectories?: boolean };
 type ConnectionHistory = { bookmarkId: string; name: string; protocol: Protocol; host: string; port: number; username: string; connectedAt: string };
 type Transfer = { id: string; name: string; direction: 'Upload' | 'Download'; status: 'Running' | 'Completed' | 'Failed' | 'Cancelled'; detail: string; localPath?: string; remotePath?: string; connectionId?: string; transferredBytes?: number; totalBytes?: number; speed?: number; etaSeconds?: number };
 type SshKey = { name: string; path: string; publicKeyPath?: string; kind: string };
@@ -32,6 +32,7 @@ type ColumnWidths = Record<ColumnKey, number>;
 type ViewMode = 'list' | 'icons' | 'columns';
 type ColumnLevel = { path: string; entries: FileEntry[]; selectedName?: string };
 type SyncDirection = 'localToRemote' | 'remoteToLocal';
+type SyncComparison = 'sizeOnly' | 'sizeAndModified';
 type SyncAction = 'upload' | 'download' | 'createRemoteDirectory' | 'createLocalDirectory' | 'conflict' | 'destinationOnly';
 type SyncPreviewItem = { path: string; action: SyncAction; localSize?: number; remoteSize?: number; isDirectory: boolean };
 type SyncPreview = { direction: SyncDirection; items: SyncPreviewItem[]; transferCount: number; directoryCount: number; conflictCount: number; destinationOnlyCount: number };
@@ -61,15 +62,15 @@ const phaseOneCopy = {
 } as const;
 
 const bookmarkLocalCopy = {
-  ja: { title: 'ローカルディレクトリ', detail: '将来の差分同期で、この接続先と組み合わせるフォルダです。', select: 'フォルダを選択', clear: '解除', none: '選択されていません' },
-  en: { title: 'Local directory', detail: 'Pair a folder with this connection for future differential sync.', select: 'Choose Folder', clear: 'Clear', none: 'Not selected' },
-  'zh-CN': { title: '本地目录', detail: '为今后的差异同步将文件夹与此连接配对。', select: '选择文件夹', clear: '清除', none: '未选择' },
+  ja: { title: 'ローカルディレクトリ', detail: '差分同期で、この接続先と組み合わせる既定フォルダです。', select: 'フォルダを選択', clear: '解除', none: '選択されていません' },
+  en: { title: 'Local directory', detail: 'The default folder paired with this connection for differential sync.', select: 'Choose Folder', clear: 'Clear', none: 'Not selected' },
+  'zh-CN': { title: '本地目录', detail: '差异同步时与此连接配对的默认文件夹。', select: '选择文件夹', clear: '清除', none: '未选择' },
 } as const;
 
 const s3Copy = {
-  ja: { bucket: 'バケット', accessKey: 'Access Key ID', secretKey: 'Secret Access Key', sessionToken: 'Session Token（任意）', region: 'リージョン', endpoint: 'カスタムエンドポイント（任意・HTTPS）', pathStyle: 'パス形式のURLを使用', readOnly: 'S3は単一ファイルのアップロード／ダウンロードに対応しています。フォルダ作成、編集、削除、同期はまだ無効です。' },
-  en: { bucket: 'Bucket', accessKey: 'Access Key ID', secretKey: 'Secret Access Key', sessionToken: 'Session Token (optional)', region: 'Region', endpoint: 'Custom endpoint (optional, HTTPS)', pathStyle: 'Use path-style URLs', readOnly: 'S3 supports single-file uploads and downloads. Directory creation, editing, deletion, and sync remain disabled.' },
-  'zh-CN': { bucket: '存储桶', accessKey: 'Access Key ID', secretKey: 'Secret Access Key', sessionToken: 'Session Token（可选）', region: '区域', endpoint: '自定义端点（可选，仅HTTPS）', pathStyle: '使用路径样式 URL', readOnly: 'S3支持单文件上传和下载。创建文件夹、编辑、删除和同步仍处于禁用状态。' },
+  ja: { bucket: 'バケット', accessKey: 'Access Key ID', secretKey: 'Secret Access Key', sessionToken: 'Session Token（任意）', region: 'リージョン', endpoint: 'カスタムエンドポイント（任意・HTTPS）', pathStyle: 'パス形式のURLを使用', preserveEmpty: '空フォルダを0 byte markerで保持', readOnly: 'S3ではフォルダをobject keyのprefixとして扱います。空フォルダのmarkerは明示設定時だけ作成します。' },
+  en: { bucket: 'Bucket', accessKey: 'Access Key ID', secretKey: 'Secret Access Key', sessionToken: 'Session Token (optional)', region: 'Region', endpoint: 'Custom endpoint (optional, HTTPS)', pathStyle: 'Use path-style URLs', preserveEmpty: 'Preserve empty folders with 0-byte markers', readOnly: 'S3 folders are represented by object-key prefixes. Empty-folder markers are created only when explicitly enabled.' },
+  'zh-CN': { bucket: '存储桶', accessKey: 'Access Key ID', secretKey: 'Secret Access Key', sessionToken: 'Session Token（可选）', region: '区域', endpoint: '自定义端点（可选，仅HTTPS）', pathStyle: '使用路径样式 URL', preserveEmpty: '使用0字节标记保留空文件夹', readOnly: 'S3文件夹由对象键前缀表示。仅在明确启用时创建空文件夹标记。' },
 } as const;
 
 const phaseTwoCopy = {
@@ -126,9 +127,21 @@ const syncCopy = {
   'zh-CN': { button: '同步', title: '单向同步', detail: '确认差异和冲突后再安全执行同步。不会删除仅存在于目标端的项目。', direction: '同步方向', localToRemote: '本地 → 远程', remoteToLocal: '远程 → 本地', refresh: '重新计算', transfers: '传输', directories: '创建文件夹', conflicts: '冲突', destinationOnly: '仅目标端', noChanges: '没有需要同步的差异。', upload: '上传', download: '下载', createRemoteDirectory: '创建远程文件夹', createLocalDirectory: '创建本地文件夹', conflict: '冲突', destinationOnlyAction: '仅目标端（保留）', exclusions: '排除模式', exclusionHint: '每行一个（例如：.DS_Store、node_modules/**）', skip: '跳过', useSource: '使用源文件覆盖', execute: '执行同步', executing: '正在同步', confirmExecute: '将执行{{count}}项更改。不会删除仅存在于目标端的项目。是否继续？', cancelExecution: '取消同步', result: '执行结果', history: '同步历史', clearHistory: '清除同步历史', noHistory: '没有同步历史', completed: '已完成', failed: '失败', cancelled: '已取消' },
 } as const;
 
+const syncComparisonCopy = {
+  ja: { comparison: '比較方法', sizeOnly: 'サイズのみ（安定）', sizeAndModified: 'サイズ＋更新日時（rsync型）' },
+  en: { comparison: 'Comparison', sizeOnly: 'Size only (stable)', sizeAndModified: 'Size + modified time (rsync)' },
+  'zh-CN': { comparison: '比较方法', sizeOnly: '仅比较大小（稳定）', sizeAndModified: '大小＋修改时间（rsync）' },
+} as const;
+
+const syncUiCopy = {
+  ja: { ...syncCopy.ja, ...syncComparisonCopy.ja },
+  en: { ...syncCopy.en, ...syncComparisonCopy.en },
+  'zh-CN': { ...syncCopy['zh-CN'], ...syncComparisonCopy['zh-CN'] },
+} as const;
+
 function joinPath(base: string, name: string) { return base === '/' ? `/${name}` : `${base.replace(/\/$/, '')}/${name}`; }
 function defaultPort(protocol: Protocol) { return protocol === 'sftp' ? 22 : protocol === 'webdav' || protocol === 's3' ? 443 : 21; }
-function connectionTargetChanged(left: Connection, right: Connection) { return left.protocol !== right.protocol || left.host !== right.host || left.port !== right.port || left.username !== right.username || left.s3Region !== right.s3Region || left.s3Endpoint !== right.s3Endpoint || Boolean(left.s3ForcePathStyle) !== Boolean(right.s3ForcePathStyle); }
+function connectionTargetChanged(left: Connection, right: Connection) { return left.protocol !== right.protocol || left.host !== right.host || left.port !== right.port || left.username !== right.username || left.s3Region !== right.s3Region || left.s3Endpoint !== right.s3Endpoint || Boolean(left.s3ForcePathStyle) !== Boolean(right.s3ForcePathStyle) || Boolean(left.s3PreserveEmptyDirectories) !== Boolean(right.s3PreserveEmptyDirectories); }
 function parentPath(path: string) { const parts = path.split('/').filter(Boolean); parts.pop(); return `/${parts.join('/')}` || '/'; }
 function formatBytes(bytes: number) { if (!bytes) return '—'; const units = ['B', 'KB', 'MB', 'GB']; const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), 3); return `${(bytes / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`; }
 function formatDuration(seconds?: number) { if (seconds === undefined || !Number.isFinite(seconds)) return '—'; if (seconds < 60) return `${Math.ceil(seconds)}s`; return `${Math.floor(seconds / 60)}m ${Math.ceil(seconds % 60)}s`; }
@@ -168,6 +181,7 @@ function parseBookmarkExport(raw: string): Connection[] | null {
         s3Region: typeof bookmark.s3Region === 'string' ? bookmark.s3Region : undefined,
         s3Endpoint: typeof bookmark.s3Endpoint === 'string' ? bookmark.s3Endpoint : undefined,
         s3ForcePathStyle: bookmark.s3ForcePathStyle === true,
+        s3PreserveEmptyDirectories: bookmark.s3PreserveEmptyDirectories === true,
       });
     }
     return [...imported.values()];
@@ -190,7 +204,7 @@ export default function App() {
   const queueText = queueCopy[language];
   const columnsText = columnCopy[language];
   const viewsText = viewCopy[language];
-  const syncText = syncCopy[language];
+  const syncText = syncUiCopy[language];
   const editText = remoteEditCopy[language];
   const dragText = dragOutCopy[language];
   const [connections, setConnections] = useState<Connection[]>([]);
@@ -226,6 +240,7 @@ export default function App() {
   const [pathCopied, setPathCopied] = useState(false);
   const [syncLocalDirectory, setSyncLocalDirectory] = useState('');
   const [syncDirection, setSyncDirection] = useState<SyncDirection>('localToRemote');
+  const [syncComparison, setSyncComparison] = useState<SyncComparison>(() => (localStorage.getItem('harbor-transfer.sync-comparison') as SyncComparison) || 'sizeOnly');
   const [syncPreview, setSyncPreview] = useState<SyncPreview | null>(null);
   const [syncPreviewBusy, setSyncPreviewBusy] = useState(false);
   const [syncPreviewError, setSyncPreviewError] = useState('');
@@ -301,6 +316,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('harbor-transfer.sync-exclusions', syncExclusions);
   }, [syncExclusions]);
+
+  useEffect(() => {
+    localStorage.setItem('harbor-transfer.sync-comparison', syncComparison);
+  }, [syncComparison]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -659,11 +678,11 @@ export default function App() {
     return value.split(/\r?\n/).map((pattern) => pattern.trim()).filter(Boolean);
   }
 
-  async function calculateSyncPreview(localDirectory = syncLocalDirectory, direction = syncDirection, exclusions = syncExclusions) {
+  async function calculateSyncPreview(localDirectory = syncLocalDirectory, direction = syncDirection, exclusions = syncExclusions, comparison = syncComparison) {
     if (!active || !localDirectory) return;
     setSyncPreviewBusy(true); setSyncPreviewError('');
     try {
-      const preview = await invoke<SyncPreview>('sync_preview', { request: { connectionId: active.id, localDirectory, remoteDirectory: path, direction, exclusions: parsedSyncExclusions(exclusions) } });
+      const preview = await invoke<SyncPreview>('sync_preview', { request: { connectionId: active.id, localDirectory, remoteDirectory: path, direction, exclusions: parsedSyncExclusions(exclusions), comparison } });
       setSyncPreview(preview);
       setSyncConflictChoices(Object.fromEntries(preview.items.filter((item) => item.action === 'conflict').map((item) => [item.path, 'skip'])));
     } catch (reason) { setSyncPreviewError(String(reason)); }
@@ -693,7 +712,7 @@ export default function App() {
     setSyncExecutionId(syncId); setSyncExecutionBusy(true); setSyncExecutionResult(null); setSyncPreviewError('');
     setSyncExecutionProgress({ syncId, completedItems: 0, totalItems: items.length, currentPath: '', status: 'Running' });
     try {
-      const result = await invoke<SyncExecutionResult>('sync_execute', { request: { syncId, connectionId: active.id, localDirectory: syncLocalDirectory, remoteDirectory: path, direction: syncDirection, exclusions: parsedSyncExclusions(), items } });
+      const result = await invoke<SyncExecutionResult>('sync_execute', { request: { syncId, connectionId: active.id, localDirectory: syncLocalDirectory, remoteDirectory: path, direction: syncDirection, exclusions: parsedSyncExclusions(), comparison: syncComparison, items } });
       setSyncExecutionResult(result);
       setSyncHistory(await invoke<SyncHistory[]>('sync_history_list'));
       await loadDirectory(active, path);
@@ -960,7 +979,7 @@ export default function App() {
               <button className={viewMode === 'columns' ? 'active' : ''} aria-label={viewsText.columns} title={viewsText.columns} aria-pressed={viewMode === 'columns'} onClick={() => selectViewMode('columns')}><Columns3 size={16}/></button>
             </div>
             <div className="browser-toolbar-spacer" />
-            <button disabled={active.protocol === 's3'} title={active.protocol === 's3' ? s3Copy[language].readOnly : undefined} onClick={() => void openSyncPreview()}><FolderSync size={17}/>{syncText.button}</button><button disabled={active.protocol === 's3'} title={active.protocol === 's3' ? s3Copy[language].readOnly : undefined} onClick={createDirectory}><FolderPlus size={17}/>{t.newFolder}</button><button disabled={active.protocol === 's3'} title={active.protocol === 's3' ? s3Copy[language].readOnly : undefined} onClick={() => void uploadDirectory()}><FolderUp size={16}/>{t.uploadFolder}</button><button className="primary" onClick={() => void uploadFiles()}><Upload size={16}/>{t.upload}</button>
+            <button onClick={() => void openSyncPreview()}><FolderSync size={17}/>{syncText.button}</button><button disabled={active.protocol === 's3' && !active.s3PreserveEmptyDirectories} title={active.protocol === 's3' ? s3Copy[language].readOnly : undefined} onClick={createDirectory}><FolderPlus size={17}/>{t.newFolder}</button><button onClick={() => void uploadDirectory()}><FolderUp size={16}/>{t.uploadFolder}</button><button className="primary" onClick={() => void uploadFiles()}><Upload size={16}/>{t.upload}</button>
           </div>
           <div className="path-toolbar">
             <button aria-label={accessibilityCopy[language].back} title={accessibilityCopy[language].back} disabled={directoryHistoryIndex <= 0} onClick={() => void navigateDirectoryHistory(-1)}><ChevronLeft size={18}/></button><button aria-label={accessibilityCopy[language].forward} title={accessibilityCopy[language].forward} disabled={directoryHistoryIndex < 0 || directoryHistoryIndex >= directoryHistory.length - 1} onClick={() => void navigateDirectoryHistory(1)}><ChevronRight size={18}/></button>
@@ -977,18 +996,18 @@ export default function App() {
               <ResizableColumnHeader label={t.modified} column="modified" width={columnWidths.modified} resizeLabel={columnsText.resize} onStart={startColumnResize} onAdjust={adjustColumnWidth}/>
               <ResizableColumnHeader label={columnsText.permissions} column="permissions" width={columnWidths.permissions} resizeLabel={columnsText.resize} onStart={startColumnResize} onAdjust={adjustColumnWidth}/><span />
             </div>
-            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; const mutationsAvailable = active.protocol !== 's3'; return <div className={`file-row interactive ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="row" aria-selected={selected} tabIndex={0} draggable={entry.file_type !== 'Symlink'} onClick={() => scheduleRemoteDragPreparation(entry)} onKeyDown={(event) => { if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(entry); } if (event.key === 'Enter') { entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); } }} onDragStart={(event) => startRemoteDrag(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }}>
-              <span className="file-name">{entry.file_type === 'Directory' ? <Folder fill="currentColor" size={18}/> : <Cloud size={18}/>} {entry.name}</span><span>{entry.file_type === 'Directory' ? '—' : formatBytes(entry.size)}</span><span>{entry.modified ?? '—'}</span><span className="permissions-cell">{entry.permissions ?? '—'}</span>{mutationsAvailable ? <button aria-label={accessibilityCopy[language].more} onClick={(event) => { event.stopPropagation(); void manageEntry(entry); }}><MoreHorizontal size={18}/></button> : <span/>}
+            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`file-row interactive ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="row" aria-selected={selected} tabIndex={0} draggable={entry.file_type !== 'Symlink'} onClick={() => scheduleRemoteDragPreparation(entry)} onKeyDown={(event) => { if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(entry); } if (event.key === 'Enter') { entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); } }} onDragStart={(event) => startRemoteDrag(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }}>
+              <span className="file-name">{entry.file_type === 'Directory' ? <Folder fill="currentColor" size={18}/> : <Cloud size={18}/>} {entry.name}</span><span>{entry.file_type === 'Directory' ? '—' : formatBytes(entry.size)}</span><span>{entry.modified ?? '—'}</span><span className="permissions-cell">{entry.permissions ?? '—'}</span><button aria-label={accessibilityCopy[language].more} onClick={(event) => { event.stopPropagation(); void manageEntry(entry); }}><MoreHorizontal size={18}/></button>
             </div>; })}
           </div>}
           {viewMode === 'icons' && <div className="icon-grid" role="grid">
             {filteredEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
-            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; const mutationsAvailable = active.protocol !== 's3'; return <div className={`icon-entry ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} role="gridcell" key={entry.name} draggable={entry.file_type !== 'Symlink'} onDragStart={(event) => startRemoteDrag(event, entry)}>
+            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`icon-entry ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} role="gridcell" key={entry.name} draggable={entry.file_type !== 'Symlink'} onDragStart={(event) => startRemoteDrag(event, entry)}>
               <button className="icon-entry-main" title={entry.name} onClick={() => scheduleRemoteDragPreparation(entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }} onKeyDown={(event) => { if (event.key !== 'Enter') return; entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }}>
                 {entry.file_type === 'Directory' ? <Folder className="entry-art folder-art" fill="currentColor" size={46}/> : <File className="entry-art" size={44}/>}
                 <strong>{entry.name}</strong><small>{entry.file_type === 'Directory' ? entry.permissions ?? '—' : formatBytes(entry.size)}</small>
               </button>
-              {mutationsAvailable && <button className="icon-entry-more" aria-label={accessibilityCopy[language].more} onClick={(event) => { event.stopPropagation(); void manageEntry(entry); }}><MoreHorizontal size={16}/></button>}
+              <button className="icon-entry-more" aria-label={accessibilityCopy[language].more} onClick={(event) => { event.stopPropagation(); void manageEntry(entry); }}><MoreHorizontal size={16}/></button>
             </div>; })}
           </div>}
           {viewMode === 'columns' && <div className="column-browser" role="listbox" aria-label={viewsText.columns}>
@@ -997,11 +1016,11 @@ export default function App() {
               return <section className="directory-column" key={`${level.path}-${levelIndex}`} aria-label={level.path}>
                 <div className="directory-column-title" title={level.path}>{level.path}</div>
                 {visibleLevelEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
-                {visibleLevelEntries.map((entry) => { const remotePath = joinPath(level.path, entry.name); const selectedForDrag = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; const mutationsAvailable = active.protocol !== 's3'; return <div className={`column-entry ${level.selectedName === entry.name || selectedForDrag ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="option" aria-selected={level.selectedName === entry.name || selectedForDrag} draggable={entry.file_type !== 'Symlink'} onDragStart={(event) => startRemoteDrag(event, entry, level.path)}>
+                {visibleLevelEntries.map((entry) => { const remotePath = joinPath(level.path, entry.name); const selectedForDrag = selectedRemoteFile?.connectionId === active.id && selectedRemoteFile.remotePath === remotePath; const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`column-entry ${level.selectedName === entry.name || selectedForDrag ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="option" aria-selected={level.selectedName === entry.name || selectedForDrag} draggable={entry.file_type !== 'Symlink'} onDragStart={(event) => startRemoteDrag(event, entry, level.path)}>
                   <button className="column-entry-main" title={entry.name} onClick={(event) => { if (event.detail <= 1) { cancelScheduledDragPreparation(); setSelectedRemoteFile({ connectionId: active.id, remotePath }); void openColumnEntry(levelIndex, entry); } }} onDoubleClick={() => { cancelScheduledDragPreparation(); if (entry.file_type !== 'Directory') void downloadFile(entry, level.path); }}>
                     {entry.file_type === 'Directory' ? <Folder fill="currentColor" size={17}/> : <File size={16}/>}<span>{entry.name}</span>{entry.file_type === 'Directory' ? <ChevronRight size={14}/> : <small>{formatBytes(entry.size)}</small>}
                   </button>
-                  {mutationsAvailable && <button className="column-entry-more" aria-label={accessibilityCopy[language].more} onClick={(event) => { event.stopPropagation(); void manageEntry(entry, level.path); }}><MoreHorizontal size={15}/></button>}
+                  <button className="column-entry-more" aria-label={accessibilityCopy[language].more} onClick={(event) => { event.stopPropagation(); void manageEntry(entry, level.path); }}><MoreHorizontal size={15}/></button>
                 </div>; })}
               </section>;
             })}
@@ -1043,18 +1062,18 @@ export default function App() {
       setShowConnect(false);
     }} onConnected={(connection) => { setConnections((current) => [connection, ...current.filter((item) => item.id !== connection.id)]); void Promise.all([invoke('bookmark_save', { bookmark: connection }), invoke('connection_history_record', { bookmark: connection })]).then(() => invoke<ConnectionHistory[]>('connection_history_list')).then(setHistory).catch((reason) => setError(String(reason))); setActive(connection); setShowConnect(false); void navigateDirectory(connection, connection.initialPath, true); }} />}
     {showPreferences && <PreferencesSheet value={preferences} language={language} t={t} onClose={() => setShowPreferences(false)} onSave={(next) => { setPreferences(next); setShowPreferences(false); }} />}
-    {syncLocalDirectory && <SyncPreviewSheet preview={syncPreview} localDirectory={syncLocalDirectory} remoteDirectory={path} direction={syncDirection} busy={syncPreviewBusy} executionBusy={syncExecutionBusy} error={syncPreviewError} exclusions={syncExclusions} conflictChoices={syncConflictChoices} progress={syncExecutionProgress} result={syncExecutionResult} history={syncHistory} t={t} text={syncText} onClose={() => { if (syncExecutionBusy) return; setSyncLocalDirectory(''); setSyncPreview(null); }} onDirection={(direction) => { setSyncDirection(direction); setSyncExecutionResult(null); void calculateSyncPreview(syncLocalDirectory, direction); }} onExclusions={(value) => { setSyncExclusions(value); setSyncPreview(null); setSyncExecutionResult(null); }} onConflict={(itemPath, choice) => setSyncConflictChoices((current) => ({ ...current, [itemPath]: choice }))} onRefresh={() => void calculateSyncPreview()} onExecute={() => void executeSync()} onCancelExecution={() => void cancelSyncExecution()} onClearHistory={() => void clearSyncHistory()} />}
+    {syncLocalDirectory && <SyncPreviewSheet preview={syncPreview} localDirectory={syncLocalDirectory} remoteDirectory={path} direction={syncDirection} comparison={syncComparison} busy={syncPreviewBusy} executionBusy={syncExecutionBusy} error={syncPreviewError} exclusions={syncExclusions} conflictChoices={syncConflictChoices} progress={syncExecutionProgress} result={syncExecutionResult} history={syncHistory} t={t} text={syncText} onClose={() => { if (syncExecutionBusy) return; setSyncLocalDirectory(''); setSyncPreview(null); }} onDirection={(direction) => { setSyncDirection(direction); setSyncExecutionResult(null); void calculateSyncPreview(syncLocalDirectory, direction); }} onComparison={(comparison) => { setSyncComparison(comparison); setSyncPreview(null); setSyncExecutionResult(null); void calculateSyncPreview(syncLocalDirectory, syncDirection, syncExclusions, comparison); }} onExclusions={(value) => { setSyncExclusions(value); setSyncPreview(null); setSyncExecutionResult(null); }} onConflict={(itemPath, choice) => setSyncConflictChoices((current) => ({ ...current, [itemPath]: choice }))} onRefresh={() => void calculateSyncPreview()} onExecute={() => void executeSync()} onCancelExecution={() => void cancelSyncExecution()} onClearHistory={() => void clearSyncHistory()} />}
   </main>;
 }
 
-function SyncPreviewSheet({ preview, localDirectory, remoteDirectory, direction, busy, executionBusy, error, exclusions, conflictChoices, progress, result, history, t, text, onClose, onDirection, onExclusions, onConflict, onRefresh, onExecute, onCancelExecution, onClearHistory }: { preview: SyncPreview | null; localDirectory: string; remoteDirectory: string; direction: SyncDirection; busy: boolean; executionBusy: boolean; error: string; exclusions: string; conflictChoices: Record<string, SyncConflictChoice>; progress: SyncExecutionProgress | null; result: SyncExecutionResult | null; history: SyncHistory[]; t: typeof copy[keyof typeof copy]; text: typeof syncCopy[keyof typeof syncCopy]; onClose: () => void; onDirection: (direction: SyncDirection) => void; onExclusions: (value: string) => void; onConflict: (path: string, choice: SyncConflictChoice) => void; onRefresh: () => void; onExecute: () => void; onCancelExecution: () => void; onClearHistory: () => void }) {
+function SyncPreviewSheet({ preview, localDirectory, remoteDirectory, direction, comparison, busy, executionBusy, error, exclusions, conflictChoices, progress, result, history, t, text, onClose, onDirection, onComparison, onExclusions, onConflict, onRefresh, onExecute, onCancelExecution, onClearHistory }: { preview: SyncPreview | null; localDirectory: string; remoteDirectory: string; direction: SyncDirection; comparison: SyncComparison; busy: boolean; executionBusy: boolean; error: string; exclusions: string; conflictChoices: Record<string, SyncConflictChoice>; progress: SyncExecutionProgress | null; result: SyncExecutionResult | null; history: SyncHistory[]; t: typeof copy[keyof typeof copy]; text: typeof syncUiCopy[keyof typeof syncUiCopy]; onClose: () => void; onDirection: (direction: SyncDirection) => void; onComparison: (comparison: SyncComparison) => void; onExclusions: (value: string) => void; onConflict: (path: string, choice: SyncConflictChoice) => void; onRefresh: () => void; onExecute: () => void; onCancelExecution: () => void; onClearHistory: () => void }) {
   const actionLabel = (action: SyncAction) => ({ upload: text.upload, download: text.download, createRemoteDirectory: text.createRemoteDirectory, createLocalDirectory: text.createLocalDirectory, conflict: text.conflict, destinationOnly: text.destinationOnlyAction })[action];
   const executableCount = preview?.items.filter((item) => item.action !== 'destinationOnly' && (item.action !== 'conflict' || (!item.isDirectory && conflictChoices[item.path] === 'source'))).length ?? 0;
   const statusLabel = (status: string) => status === 'Completed' ? text.completed : status === 'Cancelled' ? text.cancelled : text.failed;
   return <div className="modal-backdrop" role="presentation"><section className="connect-sheet sync-sheet">
     <div className="sheet-title"><div><h2>{text.title}</h2><p>{text.detail}</p></div><button type="button" disabled={executionBusy} onClick={onClose}>×</button></div>
     <div className="sync-paths"><span><strong>Local</strong>{localDirectory}</span><span><strong>Remote</strong>{remoteDirectory}</span></div>
-    <div className="sync-controls"><label>{text.direction}<select value={direction} disabled={executionBusy} onChange={(event) => onDirection(event.target.value as SyncDirection)}><option value="localToRemote">{text.localToRemote}</option><option value="remoteToLocal">{text.remoteToLocal}</option></select></label><button onClick={onRefresh} disabled={busy || executionBusy}>{busy && <LoaderCircle className="spinning" size={15}/>} {text.refresh}</button></div>
+    <div className="sync-controls"><label>{text.direction}<select value={direction} disabled={executionBusy} onChange={(event) => onDirection(event.target.value as SyncDirection)}><option value="localToRemote">{text.localToRemote}</option><option value="remoteToLocal">{text.remoteToLocal}</option></select></label><label>{text.comparison}<select value={comparison} disabled={executionBusy} onChange={(event) => onComparison(event.target.value as SyncComparison)}><option value="sizeOnly">{text.sizeOnly}</option><option value="sizeAndModified">{text.sizeAndModified}</option></select></label><button onClick={onRefresh} disabled={busy || executionBusy}>{busy && <LoaderCircle className="spinning" size={15}/>} {text.refresh}</button></div>
     <label className="sync-exclusions">{text.exclusions}<textarea value={exclusions} disabled={executionBusy} onChange={(event) => onExclusions(event.target.value)} placeholder={text.exclusionHint}/><small>{text.exclusionHint}</small></label>
     {error && <p className="form-error">{error}</p>}
     {preview && <><div className="sync-summary"><span>{text.transfers}<strong>{preview.transferCount}</strong></span><span>{text.directories}<strong>{preview.directoryCount}</strong></span><span className={preview.conflictCount ? 'warning' : ''}>{text.conflicts}<strong>{preview.conflictCount}</strong></span><span>{text.destinationOnly}<strong>{preview.destinationOnlyCount}</strong></span></div>
@@ -1078,6 +1097,7 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phas
   const [s3Region, setS3Region] = useState(bookmark?.s3Region ?? 'ap-northeast-1');
   const [s3Endpoint, setS3Endpoint] = useState(bookmark?.s3Endpoint ?? '');
   const [s3ForcePathStyle, setS3ForcePathStyle] = useState(bookmark?.s3ForcePathStyle ?? false);
+  const [s3PreserveEmptyDirectories, setS3PreserveEmptyDirectories] = useState(bookmark?.s3PreserveEmptyDirectories ?? false);
   const [keyPath, setKeyPath] = useState(initialKeyPath || bookmark?.keyPath || '');
   const [tags, setTags] = useState(bookmark?.tags ?? '');
   const [localDirectory, setLocalDirectory] = useState(bookmark?.localDirectory ?? '');
@@ -1099,7 +1119,7 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phas
         if (bookmark?.hostKey && endpointUnchanged && bookmark.hostKey !== hostKey) { setError(t.hostKeyChanged); return; }
         if (hostKey && (!bookmark?.hostKey || !endpointUnchanged) && !window.confirm(t.trustHostKey.replace('{{fingerprint}}', hostKey))) return;
       }
-      const connection: Connection = { id: bookmark?.id ?? crypto.randomUUID(), name: bookmarkName.trim() || host, protocol, host, port, username: protocol === 's3' ? '' : username, initialPath: initialDirectory.trim() || '/', keyPath: keyPath || undefined, hostKey, localDirectory: localDirectory || undefined, tags, s3Region: protocol === 's3' ? s3Region.trim() : undefined, s3Endpoint: protocol === 's3' && s3Endpoint.trim() ? s3Endpoint.trim() : undefined, s3ForcePathStyle: protocol === 's3' && s3ForcePathStyle };
+      const connection: Connection = { id: bookmark?.id ?? crypto.randomUUID(), name: bookmarkName.trim() || host, protocol, host, port, username: protocol === 's3' ? '' : username, initialPath: initialDirectory.trim() || '/', keyPath: keyPath || undefined, hostKey, localDirectory: localDirectory || undefined, tags, s3Region: protocol === 's3' ? s3Region.trim() : undefined, s3Endpoint: protocol === 's3' && s3Endpoint.trim() ? s3Endpoint.trim() : undefined, s3ForcePathStyle: protocol === 's3' && s3ForcePathStyle, s3PreserveEmptyDirectories: protocol === 's3' && s3PreserveEmptyDirectories };
       const storedCredential = protocol === 's3' ? JSON.stringify({ accessKeyId: username, secretAccessKey: password, sessionToken: s3SessionToken || undefined }) : password;
       if (mode === 'edit') {
         if (password) await invoke('credential_save', { bookmarkId: connection.id, password: storedCredential });
@@ -1107,7 +1127,7 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phas
         onSaved(connection);
         return;
       }
-      await invoke('connection_connect', { request: { connectionId: connection.id, protocol, host, port, username, password: password || null, keyPath: keyPath || null, passphrase: null, expectedHostKey: hostKey ?? null, initialPath: connection.initialPath, s3Region: connection.s3Region ?? null, s3Endpoint: connection.s3Endpoint ?? null, s3SessionToken: s3SessionToken || null, s3ForcePathStyle: connection.s3ForcePathStyle ?? false } });
+      await invoke('connection_connect', { request: { connectionId: connection.id, protocol, host, port, username, password: password || null, keyPath: keyPath || null, passphrase: null, expectedHostKey: hostKey ?? null, initialPath: connection.initialPath, s3Region: connection.s3Region ?? null, s3Endpoint: connection.s3Endpoint ?? null, s3SessionToken: s3SessionToken || null, s3ForcePathStyle: connection.s3ForcePathStyle ?? false, s3PreserveEmptyDirectories: connection.s3PreserveEmptyDirectories ?? false } });
       if (password) await invoke('credential_save', { bookmarkId: connection.id, password: storedCredential });
       onConnected(connection);
     } catch (reason) { setError(String(reason)); }
@@ -1123,7 +1143,7 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phas
       <label>{t.initialDirectory}<input required value={initialDirectory} onChange={(event) => setInitialDirectory(event.target.value)} placeholder={t.initialDirectoryHint}/></label>
       {protocol === 's3' && <><p className="protocol-security-hint">{s3Text.readOnly}</p><div className="form-grid"><label>{s3Text.region}<input required value={s3Region} onChange={(event) => setS3Region(event.target.value)} placeholder="ap-northeast-1"/></label><label>{s3Text.endpoint}<input type="url" value={s3Endpoint} onChange={(event) => setS3Endpoint(event.target.value)} placeholder="https://s3.example.com"/></label></div></>}
       <label>{protocol === 's3' ? s3Text.accessKey : t.user}<input required value={username} onChange={(event) => setUsername(event.target.value)}/></label><label>{protocol === 's3' ? s3Text.secretKey : t.password}<input required={protocol === 'webdav' || protocol === 's3'} type="password" value={password} onChange={(event) => setPassword(event.target.value)}/></label>
-      {protocol === 's3' && <><label>{s3Text.sessionToken}<input type="password" value={s3SessionToken} onChange={(event) => setS3SessionToken(event.target.value)}/></label><label className="check-row"><input type="checkbox" checked={s3ForcePathStyle} onChange={(event) => setS3ForcePathStyle(event.target.checked)}/><span>{s3Text.pathStyle}</span></label></>}
+      {protocol === 's3' && <><label>{s3Text.sessionToken}<input type="password" value={s3SessionToken} onChange={(event) => setS3SessionToken(event.target.value)}/></label><label className="check-row"><input type="checkbox" checked={s3ForcePathStyle} onChange={(event) => setS3ForcePathStyle(event.target.checked)}/><span>{s3Text.pathStyle}</span></label><label className="check-row"><input type="checkbox" checked={s3PreserveEmptyDirectories} onChange={(event) => setS3PreserveEmptyDirectories(event.target.checked)}/><span>{s3Text.preserveEmpty}</span></label></>}
       {protocol === 'sftp' && <label>{t.key}<input value={keyPath} onChange={(event) => setKeyPath(event.target.value)} placeholder="~/.ssh/id_ed25519"/></label>}
       <label>{phaseCopy.tags}<input value={tags} onChange={(event) => setTags(event.target.value)} placeholder={phaseCopy.tagHint}/></label>
       <section className="bookmark-local-directory-section">

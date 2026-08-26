@@ -8,11 +8,20 @@ pub enum SyncDirection {
     RemoteToLocal,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SyncComparison {
+    #[default]
+    SizeOnly,
+    SizeAndModified,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotEntry {
     pub path: String,
     pub size: u64,
     pub is_directory: bool,
+    pub modified: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -105,10 +114,20 @@ fn glob_matches_at(
     result
 }
 
+#[cfg(test)]
 pub fn plan_sync(
     local_entries: Vec<SnapshotEntry>,
     remote_entries: Vec<SnapshotEntry>,
     direction: SyncDirection,
+) -> SyncPreview {
+    plan_sync_with_comparison(local_entries, remote_entries, direction, SyncComparison::SizeOnly)
+}
+
+pub fn plan_sync_with_comparison(
+    local_entries: Vec<SnapshotEntry>,
+    remote_entries: Vec<SnapshotEntry>,
+    direction: SyncDirection,
+    comparison: SyncComparison,
 ) -> SyncPreview {
     let local =
         local_entries.into_iter().map(|entry| (entry.path.clone(), entry)).collect::<BTreeMap<_, _>>();
@@ -137,8 +156,9 @@ pub fn plan_sync(
             (Some(local), Some(remote), _) if local.is_directory != remote.is_directory => {
                 SyncAction::Conflict
             }
-            (Some(local), Some(remote), _) if !local.is_directory && local.size != remote.size => {
-                SyncAction::Conflict
+            (Some(local), Some(remote), direction) if !local.is_directory => {
+                let Some(action) = compare_files(local, remote, direction, comparison) else { continue };
+                action
             }
             _ => continue,
         };
@@ -173,12 +193,41 @@ pub fn plan_sync(
     }
 }
 
+fn compare_files(
+    local: &SnapshotEntry,
+    remote: &SnapshotEntry,
+    direction: SyncDirection,
+    comparison: SyncComparison,
+) -> Option<SyncAction> {
+    if comparison == SyncComparison::SizeOnly {
+        return (local.size != remote.size).then_some(SyncAction::Conflict);
+    }
+    let timestamps_differ = match (local.modified, remote.modified) {
+        (Some(left), Some(right)) => left.abs_diff(right) > 2,
+        _ => false,
+    };
+    if local.size == remote.size && !timestamps_differ {
+        return None;
+    }
+    let (source_modified, destination_modified, transfer) = match direction {
+        SyncDirection::LocalToRemote => (local.modified, remote.modified, SyncAction::Upload),
+        SyncDirection::RemoteToLocal => (remote.modified, local.modified, SyncAction::Download),
+    };
+    match (source_modified, destination_modified) {
+        (Some(source), Some(destination)) if source > destination + 2 => Some(transfer),
+        _ => Some(SyncAction::Conflict),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{filter_snapshot, matches_exclusion, plan_sync, SnapshotEntry, SyncAction, SyncDirection};
+    use super::{
+        filter_snapshot, matches_exclusion, plan_sync, plan_sync_with_comparison, SnapshotEntry, SyncAction,
+        SyncComparison, SyncDirection,
+    };
 
     fn file(path: &str, size: u64) -> SnapshotEntry {
-        SnapshotEntry { path: path.to_string(), size, is_directory: false }
+        SnapshotEntry { path: path.to_string(), size, is_directory: false, modified: None }
     }
 
     #[test]
@@ -213,5 +262,27 @@ mod tests {
         let filtered =
             filter_snapshot(vec![file("src/index.ts", 10), file("cache/result.tmp", 2)], &patterns);
         assert_eq!(filtered, vec![file("src/index.ts", 10)]);
+    }
+
+    #[test]
+    fn rsync_quick_check_transfers_newer_sources_and_protects_newer_destinations() {
+        let mut local = file("same-size.txt", 10);
+        local.modified = Some(200);
+        let mut remote = file("same-size.txt", 10);
+        remote.modified = Some(100);
+        let upload = plan_sync_with_comparison(
+            vec![local.clone()],
+            vec![remote.clone()],
+            SyncDirection::LocalToRemote,
+            SyncComparison::SizeAndModified,
+        );
+        assert_eq!(upload.items[0].action, SyncAction::Upload);
+        let protected = plan_sync_with_comparison(
+            vec![remote],
+            vec![local],
+            SyncDirection::LocalToRemote,
+            SyncComparison::SizeAndModified,
+        );
+        assert_eq!(protected.items[0].action, SyncAction::Conflict);
     }
 }

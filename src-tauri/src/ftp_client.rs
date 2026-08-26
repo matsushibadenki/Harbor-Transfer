@@ -3,6 +3,8 @@ use serde::Deserialize;
 use std::io::Cursor;
 use std::time::Duration;
 use suppaftp::tokio::{AsyncFtpStream, AsyncNativeTlsConnector, AsyncNativeTlsFtpStream};
+use suppaftp::types::Mode;
+use suppaftp::Status;
 use tokio::io::AsyncReadExt;
 
 use crate::sftp_client::{FileEntry, FileEntryType};
@@ -130,6 +132,48 @@ impl FtpClient {
         }
 
         tracing::info!("FTP authenticated successfully");
+
+        // Prefer EPSV when the server supports it. Unlike PASV, EPSV does not
+        // advertise an address that may only be valid inside a NAT or Docker
+        // network. Probe it first so older FTP servers continue to use PASV.
+        let epsv_supported = match &mut stream_kind {
+            FtpStreamKind::Plain(s) => s.custom_command("EPSV", &[Status::ExtendedPassiveMode]).await.is_ok(),
+            FtpStreamKind::Secure(s) => {
+                s.custom_command("EPSV", &[Status::ExtendedPassiveMode]).await.is_ok()
+            }
+        };
+        if epsv_supported {
+            match &mut stream_kind {
+                FtpStreamKind::Plain(s) => s.set_mode(Mode::ExtendedPassive),
+                FtpStreamKind::Secure(s) => s.set_mode(Mode::ExtendedPassive),
+            }
+            tracing::info!("FTP data connections will use EPSV");
+        } else {
+            // PASV responses from servers behind NAT commonly contain a
+            // private address. Reuse the control connection peer in that case.
+            match &mut stream_kind {
+                FtpStreamKind::Plain(s) => s.set_passive_nat_workaround(true),
+                FtpStreamKind::Secure(s) => s.set_passive_nat_workaround(true),
+            }
+            tracing::info!("FTP server does not support EPSV; using PASV with NAT workaround");
+        }
+
+        // UTF8 is optional and some legacy servers reject OPTS UTF8 ON. Only
+        // send it when advertised, and keep the connection usable if the
+        // option itself is refused.
+        let features = match &mut stream_kind {
+            FtpStreamKind::Plain(s) => s.feat().await.ok(),
+            FtpStreamKind::Secure(s) => s.feat().await.ok(),
+        };
+        if features.as_ref().is_some_and(|features| features.contains_key("UTF8")) {
+            let result = match &mut stream_kind {
+                FtpStreamKind::Plain(s) => s.opts("UTF8", Some("ON")).await,
+                FtpStreamKind::Secure(s) => s.opts("UTF8", Some("ON")).await,
+            };
+            if let Err(error) = result {
+                tracing::warn!("FTP server advertised UTF8 but rejected OPTS UTF8 ON: {}", error);
+            }
+        }
 
         // Set binary transfer type
         {

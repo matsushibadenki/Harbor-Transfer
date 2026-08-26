@@ -4,7 +4,10 @@ use crate::remote_fs::RemoteFileSystem;
 use crate::s3_client::{S3Client, S3Config};
 use crate::sftp_client::{FileEntry, SftpAuthMethod, SftpConfig, StandaloneSftpClient};
 use crate::ssh;
-use crate::sync::{filter_snapshot, plan_sync, SnapshotEntry, SyncAction, SyncDirection, SyncPreview};
+use crate::sync::{
+    filter_snapshot, plan_sync_with_comparison, SnapshotEntry, SyncAction, SyncComparison, SyncDirection,
+    SyncPreview,
+};
 use crate::webdav_client::{WebDavClient, WebDavConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -138,6 +141,8 @@ pub struct ConnectRequest {
     pub s3_session_token: Option<String>,
     #[serde(default)]
     pub s3_force_path_style: bool,
+    #[serde(default)]
+    pub s3_preserve_empty_directories: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy)]
@@ -652,6 +657,8 @@ pub struct SyncPreviewRequest {
     pub direction: SyncDirection,
     #[serde(default)]
     pub exclusions: Vec<String>,
+    #[serde(default)]
+    pub comparison: SyncComparison,
 }
 
 #[derive(Debug, Deserialize)]
@@ -671,6 +678,8 @@ pub struct SyncExecuteRequest {
     pub direction: SyncDirection,
     #[serde(default)]
     pub exclusions: Vec<String>,
+    #[serde(default)]
+    pub comparison: SyncComparison,
     pub items: Vec<SyncExecutionSelection>,
 }
 
@@ -792,6 +801,73 @@ fn direction_label(direction: SyncDirection) -> &'static str {
     }
 }
 
+fn parse_remote_modified(value: &str) -> Option<i64> {
+    if let Ok(seconds) = value.trim().parse::<i64>() {
+        return Some(seconds);
+    }
+    let value = value.trim();
+    if value.len() >= 19 && value.as_bytes().get(4) == Some(&b'-') {
+        return parse_date_time_components(&value[..19].replace('T', " "));
+    }
+    let fields = value.split_whitespace().collect::<Vec<_>>();
+    if fields.len() >= 6 && fields[0].ends_with(',') {
+        let month = match fields[2] {
+            "Jan" => 1,
+            "Feb" => 2,
+            "Mar" => 3,
+            "Apr" => 4,
+            "May" => 5,
+            "Jun" => 6,
+            "Jul" => 7,
+            "Aug" => 8,
+            "Sep" => 9,
+            "Oct" => 10,
+            "Nov" => 11,
+            "Dec" => 12,
+            _ => return None,
+        };
+        let day = fields[1].parse().ok()?;
+        let year = fields[3].parse().ok()?;
+        let time = fields[4].split(':').map(str::parse::<u32>).collect::<Result<Vec<_>, _>>().ok()?;
+        if time.len() != 3 {
+            return None;
+        }
+        return unix_seconds_from_components(year, month, day, time[0], time[1], time[2]);
+    }
+    None
+}
+
+fn parse_date_time_components(value: &str) -> Option<i64> {
+    let date_time = value.split_once(' ')?;
+    let date = date_time.0.split('-').map(str::parse::<i32>).collect::<Result<Vec<_>, _>>().ok()?;
+    let time = date_time.1.split(':').map(str::parse::<u32>).collect::<Result<Vec<_>, _>>().ok()?;
+    if date.len() != 3 || time.len() != 3 {
+        return None;
+    }
+    unix_seconds_from_components(date[0], date[1] as u32, date[2] as u32, time[0], time[1], time[2])
+}
+
+fn unix_seconds_from_components(
+    mut year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+) -> Option<i64> {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    year -= i32::from(month <= 2);
+    let era = (if year >= 0 { year } else { year - 399 }) / 400;
+    let year_of_era = year - era * 400;
+    let adjusted_month = month as i32 + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * adjusted_month + 2) / 5 + day as i32 - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era as i64 * 146_097 + day_of_era as i64 - 719_468;
+    Some(days * 86_400 + hour as i64 * 3_600 + minute as i64 * 60 + second as i64)
+}
+
 fn collect_local_snapshot(root: &Path) -> Result<Vec<SnapshotEntry>, String> {
     if !root.is_dir() {
         return Err("The selected local path is not a directory.".to_string());
@@ -812,9 +888,14 @@ fn collect_local_snapshot(root: &Path) -> Result<Vec<SnapshotEntry>, String> {
                 .to_string_lossy()
                 .replace('\\', "/");
             let is_directory = file_type.is_dir();
-            let size =
-                if is_directory { 0 } else { entry.metadata().map_err(|error| error.to_string())?.len() };
-            snapshot.push(SnapshotEntry { path: relative, size, is_directory });
+            let metadata = entry.metadata().map_err(|error| error.to_string())?;
+            let size = if is_directory { 0 } else { metadata.len() };
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                .map(|value| value.as_secs() as i64);
+            snapshot.push(SnapshotEntry { path: relative, size, is_directory, modified });
             if is_directory {
                 directories.push(path);
             }
@@ -838,7 +919,12 @@ async fn collect_remote_snapshot(
                 format!("{relative_directory}/{}", entry.name)
             };
             let is_directory = matches!(entry.file_type, crate::sftp_client::FileEntryType::Directory);
-            snapshot.push(SnapshotEntry { path: relative.clone(), size: entry.size, is_directory });
+            snapshot.push(SnapshotEntry {
+                path: relative.clone(),
+                size: entry.size,
+                is_directory,
+                modified: entry.modified.as_deref().and_then(parse_remote_modified),
+            });
             if is_directory {
                 let child = format!("{}/{}", remote_directory.trim_end_matches('/'), entry.name);
                 directories.push((child, relative));
@@ -980,6 +1066,7 @@ pub async fn connection_connect(
                 secret_access_key: request.password.ok_or("An S3 Secret Access Key is required.")?,
                 session_token: request.s3_session_token.filter(|value| !value.trim().is_empty()),
                 force_path_style: request.s3_force_path_style,
+                preserve_empty_directories: request.s3_preserve_empty_directories,
                 probe_path: request.initial_path.unwrap_or_else(|| "/".to_string()),
             })
             .await
@@ -1080,7 +1167,7 @@ pub async fn sync_preview(
         collect_remote_snapshot(connection.file_system(), &request.remote_directory).await?,
         &request.exclusions,
     );
-    Ok(plan_sync(local, remote, request.direction))
+    Ok(plan_sync_with_comparison(local, remote, request.direction, request.comparison))
 }
 
 #[tauri::command]
@@ -1105,7 +1192,7 @@ pub async fn sync_execute(
         collect_remote_snapshot(connection.file_system(), &request.remote_directory).await?,
         &request.exclusions,
     );
-    let current_plan = plan_sync(local, remote, request.direction);
+    let current_plan = plan_sync_with_comparison(local, remote, request.direction, request.comparison);
     let planned =
         current_plan.items.into_iter().map(|item| (item.path.clone(), item)).collect::<HashMap<_, _>>();
 
@@ -1516,11 +1603,10 @@ pub async fn transfer_upload_directory(
     state.transfer_controls.lock().await.insert(request.transfer_id.clone(), control.clone());
     let mut connections = state.connections.lock().await;
     let connection = connections.get_mut(&request.connection_id).ok_or("Connection not found.")?;
-    let file_system = connection.file_system();
 
     // The selected folder itself must exist before empty folders or nested
     // files can be transferred. An existing destination is harmless.
-    let _ = file_system.create_dir(&request.remote_directory).await;
+    let _ = connection.file_system().create_dir(&request.remote_directory).await;
 
     for entry in entries {
         if let Err(error) = control.wait_until_running().await {
@@ -1530,15 +1616,27 @@ pub async fn transfer_upload_directory(
         match entry {
             LocalEntry::Directory(relative_path) => {
                 let remote_path = remote_join(&request.remote_directory, &relative_path);
-                let _ = file_system.create_dir(&remote_path).await;
+                let _ = connection.file_system().create_dir(&remote_path).await;
             }
             LocalEntry::File(local_path, relative_path) => {
                 let remote_path = remote_join(&request.remote_directory, &relative_path);
                 let local_path_string = local_path.to_string_lossy().to_string();
-                file_system
-                    .upload_file(&local_path_string, &remote_path)
-                    .await
-                    .map_err(|error| error.to_string())?;
+                let upload_result = match connection {
+                    RemoteConnection::S3(client) => {
+                        let file_control = control.clone();
+                        client
+                            .upload_file_with_progress(&local_path_string, &remote_path, move |_, _| {
+                                let file_control = file_control.clone();
+                                async move { file_control.wait_until_running().await.map_err(anyhow::Error::msg) }
+                            })
+                            .await
+                    }
+                    _ => connection.file_system().upload_file(&local_path_string, &remote_path).await,
+                };
+                if let Err(error) = upload_result {
+                    state.transfer_controls.lock().await.remove(&request.transfer_id);
+                    return Err(error.to_string());
+                }
                 completed_files += 1;
                 let _ = app.emit(
                     "transfer://progress",
@@ -1569,7 +1667,9 @@ pub async fn transfer_upload_directory(
 
 #[cfg(test)]
 mod tests {
-    use super::{content_hash, reject_symlink_ancestors, safe_relative_path, TransferControl};
+    use super::{
+        content_hash, parse_remote_modified, reject_symlink_ancestors, safe_relative_path, TransferControl,
+    };
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
@@ -1597,6 +1697,15 @@ mod tests {
             .expect("cancelled wait should finish")
             .expect("wait task should not panic");
         assert_eq!(result.unwrap_err(), "Transfer cancelled.");
+    }
+
+    #[test]
+    fn parses_protocol_modified_times_for_rsync_quick_checks() {
+        let expected = 1_777_111_200;
+        assert_eq!(parse_remote_modified("2026-04-25 10:00:00"), Some(expected));
+        assert_eq!(parse_remote_modified("Sat, 25 Apr 2026 10:00:00 GMT"), Some(expected));
+        assert_eq!(parse_remote_modified(&expected.to_string()), Some(expected));
+        assert_eq!(parse_remote_modified("unknown"), None);
     }
 
     #[test]
