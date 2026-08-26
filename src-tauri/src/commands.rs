@@ -670,6 +670,14 @@ pub async fn credential_save(bookmark_id: String, password: String) -> Result<()
     credential_entry(&bookmark_id)?.set_password(&password).map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+pub async fn credential_delete(bookmark_id: String) -> Result<(), String> {
+    match credential_entry(&bookmark_id)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DirectoryTransferRequest {

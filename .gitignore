@@ -62,3 +62,11 @@ Desktop.ini
 *.dmg
 *.msi
 *.app
+
+
+
+# アップロードしてはいけません。
+# 素材
+dontUpload/
+# 開発用Webサイト
+website/

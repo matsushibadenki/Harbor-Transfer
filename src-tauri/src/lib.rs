@@ -49,6 +49,7 @@ pub fn run() {
             commands::sync_history_clear,
             commands::credential_load,
             commands::credential_save,
+            commands::credential_delete,
             commands::ssh_keys_list,
             commands::remote_list,
             commands::sync_preview,

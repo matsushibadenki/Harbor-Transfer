@@ -19,7 +19,7 @@
   overflow: hidden;
 }
 
-.browser.drag-over {
+.browser.drag-over .file-display-region {
   background: #f7faff;
   cursor: copy;
 }
@@ -223,6 +223,21 @@ body.key-manager-body {
   overflow: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+}
+
+.file-display-region {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.file-display-region > .file-table,
+.file-display-region > .icon-grid,
+.file-display-region > .column-browser {
+  width: 100%;
 }
 
 .icon-grid {
@@ -779,6 +794,74 @@ input:disabled {
   background: #fff;
 }
 
+.ssh-key-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.ssh-key-picker button {
+  white-space: nowrap;
+}
+
+.field-hint {
+  color: #718681;
+  font-size: 11px;
+  font-weight: 450;
+  line-height: 1.45;
+}
+
+.connection-feedback {
+  display: flex;
+  flex: none;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid #cfe2dd;
+  border-radius: 8px;
+  color: #466a62;
+  background: #eff8f5;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.connection-feedback.is-error {
+  flex-direction: column;
+  border-color: #edc7bd;
+  color: #8d3523;
+  background: #fff3ef;
+}
+
+.connection-feedback span {
+  overflow-wrap: anywhere;
+}
+
+.passphrase-prompt-backdrop {
+  z-index: 7;
+  background: #16252280;
+}
+
+.passphrase-prompt {
+  width: min(420px, 100%);
+}
+
+.passphrase-prompt .sheet-title {
+  margin-bottom: 14px;
+}
+
+.passphrase-prompt .sheet-title p {
+  max-width: 350px;
+  line-height: 1.55;
+}
+
+.passphrase-prompt .form-actions {
+  margin-top: 18px;
+}
+
+.ssh-passphrase-option-hint {
+  margin: -8px 0 8px 26px;
+}
+
 .bookmark-local-directory-section {
   margin-top: 20px;
   padding-top: 18px;
@@ -1070,6 +1153,31 @@ input:disabled {
   cursor: pointer;
 }
 
+.connect-sheet label.check-row {
+  display: flex;
+  min-height: 24px;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+
+.connect-sheet label.check-row input[type='checkbox'] {
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+  min-height: 16px;
+  flex: none;
+  margin: 0;
+  padding: 0;
+  accent-color: #147a6d;
+  cursor: pointer;
+}
+
+.connect-sheet label.check-row span {
+  line-height: 1.35;
+}
+
 .sync-sheet {
   display: flex;
   width: min(820px, 100%);
@@ -1357,7 +1465,7 @@ input:disabled {
 
 .drop-overlay {
   position: absolute;
-  inset: 56px 16px 16px;
+  inset: 10px;
   z-index: 10;
   display: grid;
   place-items: center;
@@ -1450,7 +1558,7 @@ body.key-manager-body {
   background: var(--ht-canvas);
 }
 
-.browser.drag-over {
+.browser.drag-over .file-display-region {
   background: var(--ht-row-hover);
 }
 
@@ -1687,6 +1795,22 @@ button:not(.primary):hover:not(:disabled),
 .bookmark-sheet > .form-actions {
   border-color: var(--ht-rule);
   background: var(--ht-surface-2);
+}
+
+.field-hint {
+  color: var(--ht-text-muted);
+}
+
+.connection-feedback {
+  border-color: var(--ht-rule);
+  color: var(--ht-text-secondary);
+  background: var(--ht-surface-3);
+}
+
+.connection-feedback.is-error {
+  border-color: oklch(64% 0.09 32 / 55%);
+  color: var(--ht-danger, #b54931);
+  background: var(--ht-danger-surface);
 }
 
 .bookmark-local-directory-section,

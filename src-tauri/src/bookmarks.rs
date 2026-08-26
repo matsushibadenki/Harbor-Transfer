@@ -13,6 +13,8 @@ pub struct Bookmark {
     pub username: String,
     pub initial_path: String,
     pub key_path: Option<String>,
+    #[serde(default)]
+    pub key_passphrase_not_required: bool,
     pub host_key: Option<String>,
     #[serde(default)]
     pub local_directory: Option<String>,
@@ -89,6 +91,7 @@ impl BookmarkStore {
                     username TEXT NOT NULL,
                     initial_path TEXT NOT NULL DEFAULT '/',
                     key_path TEXT,
+                    key_passphrase_not_required INTEGER NOT NULL DEFAULT 0,
                     host_key TEXT,
                     local_directory TEXT,
                     tags TEXT NOT NULL DEFAULT '',
@@ -131,6 +134,10 @@ impl BookmarkStore {
                 );",
             )?;
             let _ = connection.execute("ALTER TABLE bookmarks ADD COLUMN host_key TEXT", []);
+            let _ = connection.execute(
+                "ALTER TABLE bookmarks ADD COLUMN key_passphrase_not_required INTEGER NOT NULL DEFAULT 0",
+                [],
+            );
             let _ = connection.execute("ALTER TABLE bookmarks ADD COLUMN local_directory TEXT", []);
             let _ = connection.execute("ALTER TABLE bookmarks ADD COLUMN tags TEXT NOT NULL DEFAULT ''", []);
             let _ = connection.execute("ALTER TABLE bookmarks ADD COLUMN s3_region TEXT", []);
@@ -159,7 +166,7 @@ impl BookmarkStore {
     pub fn list(&self) -> Result<Vec<Bookmark>, String> {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
-                "SELECT id, name, protocol, host, port, username, initial_path, key_path, host_key, local_directory, tags,
+                "SELECT id, name, protocol, host, port, username, initial_path, key_path, key_passphrase_not_required, host_key, local_directory, tags,
                         s3_region, s3_endpoint, s3_force_path_style, s3_preserve_empty_directories
                  FROM bookmarks ORDER BY updated_at DESC, name COLLATE NOCASE",
             )?;
@@ -174,13 +181,14 @@ impl BookmarkStore {
                         username: row.get(5)?,
                         initial_path: row.get(6)?,
                         key_path: row.get(7)?,
-                        host_key: row.get(8)?,
-                        local_directory: row.get(9)?,
-                        tags: row.get(10)?,
-                        s3_region: row.get(11)?,
-                        s3_endpoint: row.get(12)?,
-                        s3_force_path_style: row.get(13)?,
-                        s3_preserve_empty_directories: row.get(14)?,
+                        key_passphrase_not_required: row.get(8)?,
+                        host_key: row.get(9)?,
+                        local_directory: row.get(10)?,
+                        tags: row.get(11)?,
+                        s3_region: row.get(12)?,
+                        s3_endpoint: row.get(13)?,
+                        s3_force_path_style: row.get(14)?,
+                        s3_preserve_empty_directories: row.get(15)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -191,19 +199,21 @@ impl BookmarkStore {
     pub fn save(&self, bookmark: &Bookmark) -> Result<(), String> {
         self.with_connection(|connection| {
             connection.execute(
-                "INSERT INTO bookmarks (id, name, protocol, host, port, username, initial_path, key_path, host_key, local_directory, tags, s3_region, s3_endpoint, s3_force_path_style, s3_preserve_empty_directories, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, CURRENT_TIMESTAMP)
+                "INSERT INTO bookmarks (id, name, protocol, host, port, username, initial_path, key_path, key_passphrase_not_required, host_key, local_directory, tags, s3_region, s3_endpoint, s3_force_path_style, s3_preserve_empty_directories, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, CURRENT_TIMESTAMP)
                  ON CONFLICT(id) DO UPDATE SET name=excluded.name, protocol=excluded.protocol,
                  host=excluded.host, port=excluded.port, username=excluded.username,
-                 initial_path=excluded.initial_path, key_path=excluded.key_path, host_key=excluded.host_key,
+                 initial_path=excluded.initial_path, key_path=excluded.key_path,
+                 key_passphrase_not_required=excluded.key_passphrase_not_required, host_key=excluded.host_key,
                  local_directory=excluded.local_directory, tags=excluded.tags,
                  s3_region=excluded.s3_region, s3_endpoint=excluded.s3_endpoint,
                  s3_force_path_style=excluded.s3_force_path_style,
                  s3_preserve_empty_directories=excluded.s3_preserve_empty_directories,
                  updated_at=CURRENT_TIMESTAMP",
                 params![bookmark.id, bookmark.name, bookmark.protocol, bookmark.host, bookmark.port,
-                    bookmark.username, bookmark.initial_path, bookmark.key_path, bookmark.host_key,
-                    bookmark.local_directory, bookmark.tags, bookmark.s3_region, bookmark.s3_endpoint,
+                    bookmark.username, bookmark.initial_path, bookmark.key_path,
+                    bookmark.key_passphrase_not_required, bookmark.host_key, bookmark.local_directory,
+                    bookmark.tags, bookmark.s3_region, bookmark.s3_endpoint,
                     bookmark.s3_force_path_style, bookmark.s3_preserve_empty_directories],
             )?;
             Ok(())
@@ -403,6 +413,7 @@ mod tests {
             username: "alice".to_string(),
             initial_path: "/deploy".to_string(),
             key_path: Some("/Users/alice/.ssh/id_ed25519".to_string()),
+            key_passphrase_not_required: false,
             host_key: Some("SHA256:example".to_string()),
             local_directory: Some("/Users/alice/Sites/example".to_string()),
             tags: "production,web".to_string(),
@@ -421,6 +432,7 @@ mod tests {
         store.save(&bookmark).expect("save bookmark");
 
         bookmark.name = "Production".to_string();
+        bookmark.key_passphrase_not_required = true;
         bookmark.s3_preserve_empty_directories = true;
         store.save(&bookmark).expect("update bookmark");
         let bookmarks = store.list().expect("list bookmarks");
@@ -429,6 +441,7 @@ mod tests {
         assert_eq!(bookmarks[0].name, "Production");
         assert_eq!(bookmarks[0].host_key.as_deref(), Some("SHA256:example"));
         assert_eq!(bookmarks[0].local_directory.as_deref(), Some("/Users/alice/Sites/example"));
+        assert!(bookmarks[0].key_passphrase_not_required);
         assert!(bookmarks[0].s3_preserve_empty_directories);
     }
 

@@ -95,3 +95,9 @@ pnpm tauri build
 Bookmark management, remote browsing, file operations, transfer controls, SFTP/FTP/FTPS/WebDAV support, safe one-way synchronization, protocol CI, accessibility improvements, and macOS distribution preparation are implemented. S3 is the next planned protocol; automatic updates remain disabled until a signed production feed is available.
 
 See [the roadmap](docs/roadmap.md), [quality checklist](docs/quality-and-release.md), [macOS release guide](docs/macos-release.md), and [functional design](docs/functional-design.md) for more detail.
+
+## Acknowledgments
+
+This software is licensed under the MIT License.
+It contains a significant amount of code forked from r-shell.
+Thank you, r-shell!

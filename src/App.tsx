@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
+import { LogicalPosition } from '@tauri-apps/api/dpi';
 import { startDrag } from '@crabnebula/tauri-plugin-drag';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
@@ -10,13 +11,13 @@ import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { getCurrentWebviewWindow, WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowUpToLine, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Cloud, Columns3, Copy, File, FileCog, Folder, FolderPlus, Grid2X2, HardDrive,
+  AppWindow, ArrowUpToLine, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Cloud, Columns3, Copy, File, FileCog, Folder, FolderPlus, Grid2X2, HardDrive,
   ClipboardPaste, Download, FileArchive, FileAudio, FileCode2, FileDown, FileImage, FileJson, FileSpreadsheet, FileText, FileUp, FileVideo, FolderSync, FolderUp, KeyRound, Link2, List, LoaderCircle, LockKeyhole, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, RefreshCw, Scissors, Search, Settings, Share2, Trash2, Upload,
 } from 'lucide-react';
 
 type Protocol = 'sftp' | 'ftp' | 'ftps' | 'webdav' | 's3';
 type FileEntry = { name: string; size: number; modified?: string; permissions?: string; owner?: string; group?: string; file_type: 'File' | 'Directory' | 'Symlink' };
-type Connection = { id: string; name: string; protocol: Protocol; host: string; port: number; username: string; initialPath: string; keyPath?: string; hostKey?: string; localDirectory?: string; tags: string; s3Region?: string; s3Endpoint?: string; s3ForcePathStyle?: boolean; s3PreserveEmptyDirectories?: boolean };
+type Connection = { id: string; name: string; protocol: Protocol; host: string; port: number; username: string; initialPath: string; keyPath?: string; keyPassphraseNotRequired?: boolean; hostKey?: string; localDirectory?: string; tags: string; s3Region?: string; s3Endpoint?: string; s3ForcePathStyle?: boolean; s3PreserveEmptyDirectories?: boolean };
 type ConnectionHistory = { bookmarkId: string; name: string; protocol: Protocol; host: string; port: number; username: string; connectedAt: string };
 type Transfer = { id: string; name: string; direction: 'Upload' | 'Download'; status: 'Running' | 'Completed' | 'Failed' | 'Cancelled'; detail: string; localPath?: string; remotePath?: string; connectionId?: string; transferredBytes?: number; totalBytes?: number; speed?: number; etaSeconds?: number };
 type SshKey = { name: string; path: string; publicKeyPath?: string; pairedKeyPath?: string; keyType: 'private' | 'public'; kind: string };
@@ -67,15 +68,27 @@ function loadColumnWidths(): ColumnWidths { try { return { ...defaultColumnWidth
 function loadColumnVisibility(): ColumnVisibility { try { return { ...defaultColumnVisibility, ...JSON.parse(localStorage.getItem('harbor-transfer.column-visibility') ?? '{}') }; } catch { return defaultColumnVisibility; } }
 
 const copy = {
-  ja: { title: 'Harbor Transfer', connect: '新規接続', bookmarks: 'ブックマーク', history: '履歴', transfer: '転送', refresh: '更新', upload: 'アップロード', uploadFolder: 'フォルダをアップロード', newFolder: '新規フォルダ', search: '検索', empty: '接続先を選択してください', emptyDetail: '新規接続を作成するか、ブックマークを選択して開始します。', path: 'パス', breadcrumbs: '現在のディレクトリ', copyPath: 'パスをコピー', pathCopied: 'パスをクリップボードにコピーしました', name: '名前', size: 'サイズ', modified: '更新日', status: '転送キュー', connectTitle: '新規接続', editBookmark: 'ブックマークを編集', editBookmarkTitle: 'ブックマークの編集', bookmarkSaved: 'ブックマークを更新しました', saveBookmark: '変更を保存', exportBookmarks: 'ブックマークを書き出す', importBookmarks: 'ブックマークを読み込む', bookmarksExported: 'ブックマークを書き出しました', bookmarksImported: '{{count}}件のブックマークを読み込みました', noBookmarksToExport: '書き出すブックマークがありません', invalidBookmarkFile: '有効なHarbor Transferブックマークファイルではありません', bookmarkName: 'ブックマーク名', bookmarkNameHint: '例：本番Webサーバー', initialDirectory: '接続時の初期ディレクトリ', initialDirectoryHint: '例：/var/www/html', cancel: 'キャンセル', pause: '停止', resume: '再開', retry: '再試行', start: '接続する', protocol: 'プロトコル', host: 'サーバー', port: 'ポート', user: 'ユーザー名', password: 'パスワード', key: 'SSH 鍵ファイル（任意）', keys: 'SSH キー', settings: '環境設定', keyManager: 'SSH キー・マネージャー', keyHint: '鍵の内容は読み込まず、ファイル情報だけを表示します。', useKey: 'この鍵を使用', noKeys: '~/.ssh に利用可能な秘密鍵がありません。', pairedKey: '公開鍵あり', hostKeyChanged: 'サーバーのホスト鍵が保存済みの鍵と一致しません。接続を中止しました。', trustHostKey: 'サーバーのホスト鍵を確認してください。\n\n{{fingerprint}}\n\nこのサーバーを信頼して接続しますか？', error: 'エラー', connected: '接続済み', download: 'ダウンロード' },
-  en: { title: 'Harbor Transfer', connect: 'New Connection', bookmarks: 'Bookmarks', history: 'History', transfer: 'Transfers', refresh: 'Refresh', upload: 'Upload', uploadFolder: 'Upload Folder', newFolder: 'New Folder', search: 'Search', empty: 'Choose a connection', emptyDetail: 'Create a new connection or select a bookmark to get started.', path: 'Path', breadcrumbs: 'Current directory', copyPath: 'Copy path', pathCopied: 'Path copied to the clipboard', name: 'Name', size: 'Size', modified: 'Modified', status: 'Transfer Queue', connectTitle: 'New Connection', editBookmark: 'Edit bookmark', editBookmarkTitle: 'Edit Bookmark', bookmarkSaved: 'Bookmark updated', saveBookmark: 'Save Changes', exportBookmarks: 'Export bookmarks', importBookmarks: 'Import bookmarks', bookmarksExported: 'Bookmarks exported', bookmarksImported: 'Imported {{count}} bookmarks', noBookmarksToExport: 'There are no bookmarks to export', invalidBookmarkFile: 'This is not a valid Harbor Transfer bookmark file', bookmarkName: 'Bookmark name', bookmarkNameHint: 'e.g. Production Web Server', initialDirectory: 'Initial directory on connect', initialDirectoryHint: 'e.g. /var/www/html', cancel: 'Cancel', pause: 'Pause', resume: 'Resume', retry: 'Retry', start: 'Connect', protocol: 'Protocol', host: 'Server', port: 'Port', user: 'Username', password: 'Password', key: 'SSH key file (optional)', keys: 'SSH Keys', settings: 'Preferences', keyManager: 'SSH Key Manager', keyHint: 'Key contents are never read; only file metadata is shown.', useKey: 'Use this key', noKeys: 'No private keys are available in ~/.ssh.', pairedKey: 'Public key found', hostKeyChanged: 'The server host key differs from the saved key. Connection was stopped.', trustHostKey: 'Verify the server host key.\n\n{{fingerprint}}\n\nTrust this server and connect?', error: 'Error', connected: 'Connected', download: 'Download' },
-  'zh-CN': { title: 'Harbor Transfer', connect: '新建连接', bookmarks: '书签', history: '历史记录', transfer: '传输', refresh: '刷新', upload: '上传', uploadFolder: '上传文件夹', newFolder: '新建文件夹', search: '搜索', empty: '选择一个连接', emptyDetail: '创建新连接或选择书签以开始使用。', path: '路径', breadcrumbs: '当前目录', copyPath: '复制路径', pathCopied: '路径已复制到剪贴板', name: '名称', size: '大小', modified: '修改日期', status: '传输队列', connectTitle: '新建连接', editBookmark: '编辑书签', editBookmarkTitle: '编辑书签', bookmarkSaved: '书签已更新', saveBookmark: '保存更改', exportBookmarks: '导出书签', importBookmarks: '导入书签', bookmarksExported: '书签已导出', bookmarksImported: '已导入{{count}}个书签', noBookmarksToExport: '没有可导出的书签', invalidBookmarkFile: '这不是有效的Harbor Transfer书签文件', bookmarkName: '书签名称', bookmarkNameHint: '例如：生产环境 Web 服务器', initialDirectory: '连接时的初始目录', initialDirectoryHint: '例如：/var/www/html', cancel: '取消', pause: '暂停', resume: '继续', retry: '重试', start: '连接', protocol: '协议', host: '服务器', port: '端口', user: '用户名', password: '密码', key: 'SSH 密钥文件（可选）', keys: 'SSH 密钥', settings: '偏好设置', keyManager: 'SSH 密钥管理器', keyHint: '不会读取密钥内容，仅显示文件信息。', useKey: '使用此密钥', noKeys: '~/.ssh 中没有可用的私钥。', pairedKey: '已找到公钥', hostKeyChanged: '服务器主机密钥与已保存的密钥不一致，已停止连接。', trustHostKey: '请验证服务器主机密钥。\n\n{{fingerprint}}\n\n信任此服务器并连接吗？', error: '错误', connected: '已连接', download: '下载' },
+  ja: { title: 'Harbor Transfer', connect: '新規接続', bookmarks: 'ブックマーク', history: '履歴', transfer: '転送', refresh: '更新', upload: 'アップロード', uploadFolder: 'フォルダをアップロード', newFolder: '新規フォルダ', search: '検索', empty: '接続先を選択してください', emptyDetail: '新規接続を作成するか、ブックマークを選択して開始します。', path: 'パス', breadcrumbs: '現在のディレクトリ', copyPath: 'パスをコピー', pathCopied: 'パスをクリップボードにコピーしました', name: '名前', size: 'サイズ', modified: '更新日', status: '転送キュー', connectTitle: '新規接続', editBookmark: 'ブックマークを編集', editBookmarkTitle: 'ブックマークの編集', bookmarkSaved: 'ブックマークを更新しました', saveBookmark: '変更を保存', exportBookmarks: 'ブックマークを書き出す', importBookmarks: 'ブックマークを読み込む', bookmarksExported: 'ブックマークを書き出しました', bookmarksImported: '{{count}}件のブックマークを読み込みました', noBookmarksToExport: '書き出すブックマークがありません', invalidBookmarkFile: '有効なHarbor Transferブックマークファイルではありません', bookmarkName: 'ブックマーク名', bookmarkNameHint: '例：本番Webサーバー', initialDirectory: '接続時の初期ディレクトリ', initialDirectoryHint: '例：/var/www/html', cancel: 'キャンセル', pause: '停止', resume: '再開', retry: '再試行', start: '接続する', protocol: 'プロトコル', host: 'サーバー', port: 'ポート', user: 'ユーザー名', password: 'パスワード', key: 'SSH 鍵ファイル（任意）', keyPassphrase: 'SSH 鍵のパスフレーズ（任意）', missingKeyPassphraseConfirm: 'SSH鍵のパスフレーズが入力されていません。暗号化された鍵の場合は接続できません。', continueWithoutPassphrase: 'パスフレーズなしで続行', chooseKey: '鍵を選択', keyFormatHint: '.key、.pem、OpenSSH鍵、PuTTY PPKなどの秘密鍵を選択できます。', invalidPort: 'ポートは1〜65535の範囲で指定してください。', checkingHostKey: 'サーバーのホスト鍵を確認しています…', connectingToServer: 'サーバーへ接続しています…', connectionFailed: '接続できませんでした', keys: 'SSH キー', settings: '環境設定', keyManager: 'SSH キー・マネージャー', keyHint: '鍵の内容は読み込まず、ファイル情報だけを表示します。', useKey: 'この鍵を使用', noKeys: '~/.ssh に利用可能な秘密鍵がありません。', pairedKey: '公開鍵あり', hostKeyChanged: 'サーバーのホスト鍵が保存済みの鍵と一致しません。接続を中止しました。', trustHostKey: 'サーバーのホスト鍵を確認してください。\n\n{{fingerprint}}\n\nこのサーバーを信頼して接続しますか？', error: 'エラー', connected: '接続済み', download: 'ダウンロード' },
+  en: { title: 'Harbor Transfer', connect: 'New Connection', bookmarks: 'Bookmarks', history: 'History', transfer: 'Transfers', refresh: 'Refresh', upload: 'Upload', uploadFolder: 'Upload Folder', newFolder: 'New Folder', search: 'Search', empty: 'Choose a connection', emptyDetail: 'Create a new connection or select a bookmark to get started.', path: 'Path', breadcrumbs: 'Current directory', copyPath: 'Copy path', pathCopied: 'Path copied to the clipboard', name: 'Name', size: 'Size', modified: 'Modified', status: 'Transfer Queue', connectTitle: 'New Connection', editBookmark: 'Edit bookmark', editBookmarkTitle: 'Edit Bookmark', bookmarkSaved: 'Bookmark updated', saveBookmark: 'Save Changes', exportBookmarks: 'Export bookmarks', importBookmarks: 'Import bookmarks', bookmarksExported: 'Bookmarks exported', bookmarksImported: 'Imported {{count}} bookmarks', noBookmarksToExport: 'There are no bookmarks to export', invalidBookmarkFile: 'This is not a valid Harbor Transfer bookmark file', bookmarkName: 'Bookmark name', bookmarkNameHint: 'e.g. Production Web Server', initialDirectory: 'Initial directory on connect', initialDirectoryHint: 'e.g. /var/www/html', cancel: 'Cancel', pause: 'Pause', resume: 'Resume', retry: 'Retry', start: 'Connect', protocol: 'Protocol', host: 'Server', port: 'Port', user: 'Username', password: 'Password', key: 'SSH key file (optional)', keyPassphrase: 'SSH key passphrase (optional)', missingKeyPassphraseConfirm: 'No SSH key passphrase was entered. An encrypted key cannot connect without it.', continueWithoutPassphrase: 'Continue Without Passphrase', chooseKey: 'Choose Key', keyFormatHint: 'Private keys in .key, .pem, OpenSSH, and PuTTY PPK formats are supported.', invalidPort: 'Enter a port between 1 and 65535.', checkingHostKey: 'Checking the server host key…', connectingToServer: 'Connecting to the server…', connectionFailed: 'Could not connect', keys: 'SSH Keys', settings: 'Preferences', keyManager: 'SSH Key Manager', keyHint: 'Key contents are never read; only file metadata is shown.', useKey: 'Use this key', noKeys: 'No private keys are available in ~/.ssh.', pairedKey: 'Public key found', hostKeyChanged: 'The server host key differs from the saved key. Connection was stopped.', trustHostKey: 'Verify the server host key.\n\n{{fingerprint}}\n\nTrust this server and connect?', error: 'Error', connected: 'Connected', download: 'Download' },
+  'zh-CN': { title: 'Harbor Transfer', connect: '新建连接', bookmarks: '书签', history: '历史记录', transfer: '传输', refresh: '刷新', upload: '上传', uploadFolder: '上传文件夹', newFolder: '新建文件夹', search: '搜索', empty: '选择一个连接', emptyDetail: '创建新连接或选择书签以开始使用。', path: '路径', breadcrumbs: '当前目录', copyPath: '复制路径', pathCopied: '路径已复制到剪贴板', name: '名称', size: '大小', modified: '修改日期', status: '传输队列', connectTitle: '新建连接', editBookmark: '编辑书签', editBookmarkTitle: '编辑书签', bookmarkSaved: '书签已更新', saveBookmark: '保存更改', exportBookmarks: '导出书签', importBookmarks: '导入书签', bookmarksExported: '书签已导出', bookmarksImported: '已导入{{count}}个书签', noBookmarksToExport: '没有可导出的书签', invalidBookmarkFile: '这不是有效的Harbor Transfer书签文件', bookmarkName: '书签名称', bookmarkNameHint: '例如：生产环境 Web 服务器', initialDirectory: '连接时的初始目录', initialDirectoryHint: '例如：/var/www/html', cancel: '取消', pause: '暂停', resume: '继续', retry: '重试', start: '连接', protocol: '协议', host: '服务器', port: '端口', user: '用户名', password: '密码', key: 'SSH 密钥文件（可选）', keyPassphrase: 'SSH 密钥口令（可选）', missingKeyPassphraseConfirm: '尚未输入SSH密钥口令。加密密钥没有口令将无法连接。', continueWithoutPassphrase: '无口令继续', chooseKey: '选择密钥', keyFormatHint: '支持 .key、.pem、OpenSSH 和 PuTTY PPK 格式的私钥。', invalidPort: '请输入1到65535之间的端口。', checkingHostKey: '正在检查服务器主机密钥…', connectingToServer: '正在连接服务器…', connectionFailed: '无法连接', keys: 'SSH 密钥', settings: '偏好设置', keyManager: 'SSH 密钥管理器', keyHint: '不会读取密钥内容，仅显示文件信息。', useKey: '使用此密钥', noKeys: '~/.ssh 中没有可用的私钥。', pairedKey: '已找到公钥', hostKeyChanged: '服务器主机密钥与已保存的密钥不一致，已停止连接。', trustHostKey: '请验证服务器主机密钥。\n\n{{fingerprint}}\n\n信任此服务器并连接吗？', error: '错误', connected: '已连接', download: '下载' },
 } as const;
 
 const phaseOneCopy = {
   ja: { tags: 'タグ', all: 'すべて', noHistory: '接続履歴はありません', tagHint: 'カンマ区切り（例: 本番, Web）', webdavHint: '証明書を検証するHTTPS接続だけを使用します。NextcloudではDAVのパスを初期ディレクトリに指定してください。' },
   en: { tags: 'Tags', all: 'All', noHistory: 'No connection history', tagHint: 'Comma separated (e.g. Production, Web)', webdavHint: 'Only HTTPS with certificate verification is used. For Nextcloud, enter the DAV path as the initial directory.' },
   'zh-CN': { tags: '标签', all: '全部', noHistory: '没有连接历史记录', tagHint: '使用逗号分隔（例如：生产, Web）', webdavHint: '仅使用经过证书验证的HTTPS连接。使用Nextcloud时，请将DAV路径填写为初始目录。' },
+} as const;
+
+const sshPassphrasePromptCopy = {
+  ja: { title: 'SSH鍵のパスフレーズが必要です', detail: '秘密鍵を復号できませんでした。パスフレーズを入力して再接続してください。', withoutPassphrase: 'SSH鍵のパスフレーズなし', withoutPassphraseDetail: 'この秘密鍵が暗号化されていない場合に選択します。', saveInKeychain: 'macOS Keychainに保存', saveInKeychainDetail: '次回から自動入力します。ブックマークや書き出しファイルには保存されません。', keychainLoadFailed: 'macOS Keychainからパスフレーズを読み込めませんでした。', keychainEntryMissing: 'Keychainに保存済みのパスフレーズがありません。パスフレーズを入力してください。', retry: '入力して再接続' },
+  en: { title: 'SSH key passphrase required', detail: 'The private key could not be decrypted. Enter its passphrase and reconnect.', withoutPassphrase: 'SSH key has no passphrase', withoutPassphraseDetail: 'Select this when the private key is not encrypted.', saveInKeychain: 'Save in macOS Keychain', saveInKeychainDetail: 'Fills it automatically next time. It is never stored in bookmarks or export files.', keychainLoadFailed: 'The passphrase could not be loaded from macOS Keychain.', keychainEntryMissing: 'No passphrase is saved in Keychain. Enter the passphrase.', retry: 'Enter and Reconnect' },
+  'zh-CN': { title: '需要SSH密钥口令', detail: '无法解密私钥。请输入口令并重新连接。', withoutPassphrase: 'SSH密钥没有口令', withoutPassphraseDetail: '私钥未加密时选择此项。', saveInKeychain: '存储到macOS钥匙串', saveInKeychainDetail: '下次将自动填写。不会存储在书签或导出文件中。', keychainLoadFailed: '无法从macOS钥匙串读取口令。', keychainEntryMissing: '钥匙串中没有已保存的口令。请输入口令。', retry: '输入并重新连接' },
+} as const;
+
+const windowCopy = {
+  ja: { newWindow: '新規ウインドウ', newWindowFailed: '新しいウインドウを開けませんでした' },
+  en: { newWindow: 'New Window', newWindowFailed: 'Could not open a new window' },
+  'zh-CN': { newWindow: '新建窗口', newWindowFailed: '无法打开新窗口' },
 } as const;
 
 const bookmarkLocalCopy = {
@@ -205,6 +218,12 @@ function RemoteEntryIcon({ entry, size, className = '' }: { entry: FileEntry; si
   return <Icon className={`${className} file-type-icon file-type-${category}`} size={size}/>;
 }
 function transferFailureStatus(reason: unknown): 'Failed' | 'Cancelled' { return String(reason).toLowerCase().includes('cancel') ? 'Cancelled' : 'Failed'; }
+function invokeErrorMessage(reason: unknown): string {
+  if (typeof reason === 'string') return reason;
+  if (reason instanceof Error) return reason.message;
+  if (reason && typeof reason === 'object' && 'message' in reason && typeof reason.message === 'string') return reason.message;
+  try { return JSON.stringify(reason); } catch { return String(reason); }
+}
 function permissionStringToOctal(value?: string) {
   if (!value) return '';
   const body = value.replace(/[+.@]$/, '').slice(-9);
@@ -247,6 +266,7 @@ function parseBookmarkExport(raw: string): Connection[] | null {
       if (!requiredStrings.every((key) => typeof bookmark[key] === 'string' && (bookmark[key] as string).length <= 4096)) return null;
       if (!(protocol === 'sftp' || protocol === 'ftp' || protocol === 'ftps' || protocol === 'webdav' || protocol === 's3') || !Number.isInteger(port) || (port as number) < 1 || (port as number) > 65535) return null;
       if (!(bookmark.keyPath === undefined || (typeof bookmark.keyPath === 'string' && bookmark.keyPath.length <= 4096)) || !(bookmark.hostKey === undefined || (typeof bookmark.hostKey === 'string' && bookmark.hostKey.length <= 4096)) || !(bookmark.localDirectory === undefined || (typeof bookmark.localDirectory === 'string' && bookmark.localDirectory.length <= 4096))) return null;
+      if (!(bookmark.keyPassphraseNotRequired === undefined || typeof bookmark.keyPassphraseNotRequired === 'boolean')) return null;
       const id = (bookmark.id as string).trim();
       const host = (bookmark.host as string).trim();
       const username = (bookmark.username as string).trim();
@@ -260,6 +280,7 @@ function parseBookmarkExport(raw: string): Connection[] | null {
         username,
         initialPath: (bookmark.initialPath as string).trim() || '/',
         keyPath: typeof bookmark.keyPath === 'string' && bookmark.keyPath ? bookmark.keyPath : undefined,
+        keyPassphraseNotRequired: bookmark.keyPassphraseNotRequired === true,
         hostKey: typeof bookmark.hostKey === 'string' && bookmark.hostKey ? bookmark.hostKey : undefined,
         localDirectory: typeof bookmark.localDirectory === 'string' && bookmark.localDirectory ? bookmark.localDirectory : undefined,
         tags: bookmark.tags as string,
@@ -302,7 +323,7 @@ export default function App() {
   const [directoryHistoryIndex, setDirectoryHistoryIndex] = useState(-1);
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [query, setQuery] = useState('');
-  const [showConnect, setShowConnect] = useState(false);
+  const [showConnect, setShowConnect] = useState(() => new URLSearchParams(window.location.search).get('newConnection') === '1');
   const [showPreferences, setShowPreferences] = useState(false);
   const [showSoftwareUpdate, setShowSoftwareUpdate] = useState(false);
   const [softwareUpdate, setSoftwareUpdate] = useState<SoftwareUpdateState>({ phase: 'idle', currentVersion: '', downloadedBytes: 0 });
@@ -494,12 +515,17 @@ export default function App() {
   }, [preferences]);
 
   useEffect(() => {
+    const title = active ? `${active.name} — ${t.title}` : t.title;
+    void getCurrentWebviewWindow().setTitle(title).catch(() => undefined);
+  }, [active, t.title]);
+
+  useEffect(() => {
     const onShortcut = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey)) return;
+      if (event.key.toLowerCase() === 'n') { event.preventDefault(); if (!event.repeat) void openNewWindow(); return; }
       const target = event.target as HTMLElement | null;
       if (target?.matches('input, textarea, select, [contenteditable="true"]')) return;
       if (event.key === ',') { event.preventDefault(); setShowPreferences(true); }
-      if (event.key.toLowerCase() === 'n') { event.preventDefault(); setConnectingBookmark(null); setConnectSheetMode('connect'); setShowConnect(true); }
       if (event.key.toLowerCase() === 'r' && active) { event.preventDefault(); void loadDirectory(active, path); }
     };
     window.addEventListener('keydown', onShortcut);
@@ -767,14 +793,16 @@ export default function App() {
 
   async function openKeyManagerWindow() {
     try {
-      const existing = await WebviewWindow.getByLabel('ssh-key-manager');
+      const sourceLabel = getCurrentWebviewWindow().label;
+      const keyWindowLabel = `ssh-key-manager-${sourceLabel}`;
+      const existing = await WebviewWindow.getByLabel(keyWindowLabel);
       if (existing) {
         await existing.show();
         await existing.setFocus();
         return;
       }
-      const keyWindow = new WebviewWindow('ssh-key-manager', {
-        url: 'index.html#ssh-keys',
+      const keyWindow = new WebviewWindow(keyWindowLabel, {
+        url: `index.html?target=${encodeURIComponent(sourceLabel)}#ssh-keys`,
         title: t.keyManager,
         width: 720,
         height: 560,
@@ -786,6 +814,27 @@ export default function App() {
       });
       await keyWindow.once('tauri://error', (event) => setError(String(event.payload)));
     } catch (reason) { setError(String(reason)); }
+  }
+
+  async function openNewWindow() {
+    try {
+      const label = `main-${crypto.randomUUID()}`;
+      const appWindow = new WebviewWindow(label, {
+        url: 'index.html?newConnection=1',
+        title: t.title,
+        width: 1240,
+        height: 780,
+        minWidth: 900,
+        minHeight: 620,
+        center: true,
+        resizable: true,
+        focus: true,
+        titleBarStyle: 'overlay',
+        hiddenTitle: true,
+        trafficLightPosition: new LogicalPosition(14, 19),
+      });
+      await appWindow.once('tauri://error', (event) => setError(`${windowCopy[language].newWindowFailed}: ${String(event.payload)}`));
+    } catch (reason) { setError(`${windowCopy[language].newWindowFailed}: ${invokeErrorMessage(reason)}`); }
   }
 
   async function exportBookmarks() {
@@ -830,7 +879,7 @@ export default function App() {
         const updated = saved.find((bookmark) => bookmark.id === current.id);
         if (!updated) return current;
         const targetChanged = connectionTargetChanged(current, updated);
-        return targetChanged ? null : { ...current, name: updated.name, initialPath: updated.initialPath, keyPath: updated.keyPath, localDirectory: updated.localDirectory, tags: updated.tags };
+        return targetChanged ? null : { ...current, name: updated.name, initialPath: updated.initialPath, keyPath: updated.keyPath, keyPassphraseNotRequired: updated.keyPassphraseNotRequired, localDirectory: updated.localDirectory, tags: updated.tags };
       });
       setNotice(t.bookmarksImported.replace('{{count}}', String(imported.length)));
     } catch (reason) { setError(String(reason)); }
@@ -1277,6 +1326,7 @@ export default function App() {
     <header className="toolbar" onPointerDown={startWindowDrag}>
       <div className="brand"><Cloud size={21}/><span>{t.title}</span></div>
       <button className="icon-button" aria-label={sidebarCollapsed ? queueText.showSidebar : queueText.hideSidebar} title={sidebarCollapsed ? queueText.showSidebar : queueText.hideSidebar} aria-expanded={!sidebarCollapsed} onClick={() => setSidebarCollapsed((current) => !current)}>{sidebarCollapsed ? <PanelLeftOpen size={17}/> : <PanelLeftClose size={17}/>}</button>
+      <button aria-label={`${windowCopy[language].newWindow} (⌘N)`} title={`${windowCopy[language].newWindow} (⌘N)`} onClick={() => void openNewWindow()}><AppWindow size={16}/>{windowCopy[language].newWindow}</button>
       <button className="primary" onClick={() => { setConnectingBookmark(null); setSelectedKeyPath(''); setConnectSheetMode('connect'); setShowConnect(true); }}><span>+</span>{t.connect}</button>
       <button onClick={() => void openKeyManagerWindow()}><KeyRound size={16}/>{t.keys}</button>
       <button onClick={() => setShowPreferences(true)}><Settings size={16}/>{t.settings}</button>
@@ -1301,7 +1351,6 @@ export default function App() {
       </aside>
       <section className={`browser ${isDragOver ? 'drag-over' : ''}`} ref={browserZoneRef}>
         {notice && <div className="notice-banner" role="status" aria-live="polite">{notice}</div>}
-        {isDragOver && <div className="drop-overlay"><Upload size={32}/><strong>{p2.drop}</strong></div>}
         {active ? <>
           <div className="browser-toolbar">
             <button aria-label={t.refresh} onClick={() => void loadDirectory()}><RefreshCw size={17} className={busy ? 'spinning' : ''}/></button>
@@ -1322,6 +1371,8 @@ export default function App() {
           </div>
           {error && <div className="error-banner"><strong>{t.error}:</strong> {error}</div>}
           <div className="connection-strip"><span className="online-dot" />{active.name}<span>·</span><span>{active.username}@{active.host}</span><span className="connected">{t.connected}</span></div>
+          <div className="file-display-region">
+          {isDragOver && <div className="drop-overlay"><Upload size={32}/><strong>{p2.drop}</strong></div>}
           {viewMode === 'list' && <div className="file-table" role="table" style={{ '--file-columns': `${visibleColumns.map((column) => column === 'name' ? `minmax(${columnWidths[column]}px, 1fr)` : `${columnWidths[column]}px`).join(' ')} 30px`, '--file-min-width': `${visibleColumns.reduce((total, column) => total + columnWidths[column], 0) + 40 + visibleColumns.length * 8}px` } as React.CSSProperties}>
             <div className="file-header" role="row" onContextMenu={openColumnVisibilityMenu}>
               {visibleColumns.map((column) => <ResizableColumnHeader key={column} label={columnLabel(column)} column={column} width={columnWidths[column]} resizeLabel={columnsText.resize} sorted={sortColumn === column} direction={sortDirection} onSort={sortByColumn} onStart={startColumnResize} onAdjust={adjustColumnWidth}/>)}<span className="actions-column-heading" role="columnheader" />
@@ -1355,6 +1406,7 @@ export default function App() {
               </section>;
             })}
           </div>}
+          </div>
           <nav className="breadcrumb-bar" aria-label={t.breadcrumbs}>
             {breadcrumbs.map((crumb, index) => <span className="breadcrumb-item" key={crumb.path}>
               {index > 0 && <ChevronRight size={13} aria-hidden="true"/>}
@@ -1412,12 +1464,12 @@ export default function App() {
       await loadDirectory(active, path);
     }}
     />}
-    {showConnect && <ConnectSheet mode={connectSheetMode} bookmark={connectingBookmark} initialKeyPath={selectedKeyPath} defaultProtocol={preferences.defaultProtocol} t={t} phaseCopy={p1} localCopy={bookmarkLocalText} s3Text={s3Copy[language]} onClose={() => setShowConnect(false)} onSaved={(connection) => {
+    {showConnect && <ConnectSheet mode={connectSheetMode} bookmark={connectingBookmark} initialKeyPath={selectedKeyPath} defaultProtocol={preferences.defaultProtocol} t={t} phaseCopy={p1} passphraseText={sshPassphrasePromptCopy[language]} localCopy={bookmarkLocalText} s3Text={s3Copy[language]} onClose={() => setShowConnect(false)} onSaved={(connection) => {
       setConnections((current) => [connection, ...current.filter((item) => item.id !== connection.id)]);
       setActive((current) => {
         if (current?.id !== connection.id) return current;
         const targetChanged = connectionTargetChanged(current, connection);
-        return targetChanged ? null : { ...current, name: connection.name, initialPath: connection.initialPath, keyPath: connection.keyPath, localDirectory: connection.localDirectory, tags: connection.tags };
+        return targetChanged ? null : { ...current, name: connection.name, initialPath: connection.initialPath, keyPath: connection.keyPath, keyPassphraseNotRequired: connection.keyPassphraseNotRequired, localDirectory: connection.localDirectory, tags: connection.tags };
       });
       setNotice(t.bookmarkSaved);
       setShowConnect(false);
@@ -1518,7 +1570,7 @@ function SyncPreviewSheet({ preview, localDirectory, remoteDirectory, direction,
   </section></div>;
 }
 
-function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phaseCopy, localCopy, s3Text, onClose, onSaved, onConnected }: { mode: 'connect' | 'edit'; bookmark: Connection | null; initialKeyPath: string; defaultProtocol: Protocol; t: typeof copy[keyof typeof copy]; phaseCopy: typeof phaseOneCopy[keyof typeof phaseOneCopy]; localCopy: typeof bookmarkLocalCopy[keyof typeof bookmarkLocalCopy]; s3Text: typeof s3Copy[keyof typeof s3Copy]; onClose: () => void; onSaved: (connection: Connection) => void; onConnected: (connection: Connection) => void }) {
+function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phaseCopy, passphraseText, localCopy, s3Text, onClose, onSaved, onConnected }: { mode: 'connect' | 'edit'; bookmark: Connection | null; initialKeyPath: string; defaultProtocol: Protocol; t: typeof copy[keyof typeof copy]; phaseCopy: typeof phaseOneCopy[keyof typeof phaseOneCopy]; passphraseText: typeof sshPassphrasePromptCopy[keyof typeof sshPassphrasePromptCopy]; localCopy: typeof bookmarkLocalCopy[keyof typeof bookmarkLocalCopy]; s3Text: typeof s3Copy[keyof typeof s3Copy]; onClose: () => void; onSaved: (connection: Connection) => void; onConnected: (connection: Connection) => void }) {
   const [bookmarkName, setBookmarkName] = useState(bookmark?.name ?? '');
   const [protocol, setProtocol] = useState<Protocol>(bookmark?.protocol ?? defaultProtocol);
   const [host, setHost] = useState(bookmark?.host ?? '');
@@ -1532,19 +1584,42 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phas
   const [s3ForcePathStyle, setS3ForcePathStyle] = useState(bookmark?.s3ForcePathStyle ?? false);
   const [s3PreserveEmptyDirectories, setS3PreserveEmptyDirectories] = useState(bookmark?.s3PreserveEmptyDirectories ?? false);
   const [keyPath, setKeyPath] = useState(initialKeyPath || bookmark?.keyPath || '');
+  const [keyPassphraseNotRequired, setKeyPassphraseNotRequired] = useState(bookmark?.keyPassphraseNotRequired ?? false);
+  const [saveKeyPassphrase, setSaveKeyPassphrase] = useState(true);
   const [tags, setTags] = useState(bookmark?.tags ?? '');
   const [localDirectory, setLocalDirectory] = useState(bookmark?.localDirectory ?? '');
   const [busy, setBusy] = useState(false);
+  const [busyMessage, setBusyMessage] = useState('');
   const [error, setError] = useState('');
+  const [showPassphrasePrompt, setShowPassphrasePrompt] = useState(false);
+  const passphrasePromptOverride = useRef(false);
   function updateProtocol(value: Protocol) { setProtocol(value); setPort(defaultPort(value)); }
   async function selectLocalDirectory() {
     const selected = await open({ multiple: false, directory: true });
     if (selected && !Array.isArray(selected)) setLocalDirectory(selected);
   }
-  useEffect(() => { if (bookmark) void invoke<string | null>('credential_load', { bookmarkId: bookmark.id }).then((saved) => { if (!saved) return; if (bookmark.protocol === 's3') { try { const value = JSON.parse(saved) as { accessKeyId?: string; secretAccessKey?: string; sessionToken?: string }; setUsername(value.accessKeyId ?? ''); setPassword(value.secretAccessKey ?? ''); setS3SessionToken(value.sessionToken ?? ''); } catch { setUsername(''); setPassword(''); } } else setPassword(saved); }).catch(() => undefined); }, [bookmark]);
+  async function selectSshKey() {
+    const selected = await open({ multiple: false, directory: false });
+    if (selected && !Array.isArray(selected)) setKeyPath(selected);
+  }
+  useEffect(() => { if (bookmark) void invoke<string | null>('credential_load', { bookmarkId: bookmark.id }).then((saved) => { if (!saved) return; if (bookmark.protocol === 's3') { try { const value = JSON.parse(saved) as { accessKeyId?: string; secretAccessKey?: string; sessionToken?: string }; setUsername(value.accessKeyId ?? ''); setPassword(value.secretAccessKey ?? ''); setS3SessionToken(value.sessionToken ?? ''); } catch { setUsername(''); setPassword(''); } } else if (!bookmark.keyPassphraseNotRequired) setPassword(saved); }).catch((reason) => setError(`${passphraseText.keychainLoadFailed} ${invokeErrorMessage(reason)}`)); }, [bookmark, passphraseText.keychainLoadFailed]);
   async function submit(event: React.FormEvent) {
-    event.preventDefault(); setBusy(true); setError('');
+    event.preventDefault(); setError('');
+    if (!Number.isInteger(port) || port < 1 || port > 65535) { setError(t.invalidPort); return; }
+    setBusy(true); setBusyMessage(protocol === 'sftp' ? t.checkingHostKey : t.connectingToServer);
     try {
+      const useNoKeyPassphrase = protocol === 'sftp' && Boolean(keyPath.trim()) && keyPassphraseNotRequired && !passphrasePromptOverride.current;
+      const usesSshKeyPassphrase = protocol === 'sftp' && Boolean(keyPath.trim()) && !useNoKeyPassphrase;
+      let resolvedPassword = password;
+      if (usesSshKeyPassphrase && !resolvedPassword && saveKeyPassphrase && bookmark) {
+        resolvedPassword = await invoke<string | null>('credential_load', { bookmarkId: bookmark.id }) ?? '';
+        if (resolvedPassword) setPassword(resolvedPassword);
+      }
+      if (usesSshKeyPassphrase && !resolvedPassword) {
+        setError(passphraseText.keychainEntryMissing);
+        setShowPassphrasePrompt(true);
+        return;
+      }
       const endpointUnchanged = bookmark?.protocol === protocol && bookmark.host === host && bookmark.port === port;
       let hostKey = endpointUnchanged ? bookmark?.hostKey : undefined;
       if (mode === 'connect') {
@@ -1552,40 +1627,57 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phas
         if (bookmark?.hostKey && endpointUnchanged && bookmark.hostKey !== hostKey) { setError(t.hostKeyChanged); return; }
         if (hostKey && (!bookmark?.hostKey || !endpointUnchanged) && !window.confirm(t.trustHostKey.replace('{{fingerprint}}', hostKey))) return;
       }
-      const connection: Connection = { id: bookmark?.id ?? crypto.randomUUID(), name: bookmarkName.trim() || host, protocol, host, port, username: protocol === 's3' ? '' : username, initialPath: initialDirectory.trim() || '/', keyPath: keyPath || undefined, hostKey, localDirectory: localDirectory || undefined, tags, s3Region: protocol === 's3' ? s3Region.trim() : undefined, s3Endpoint: protocol === 's3' && s3Endpoint.trim() ? s3Endpoint.trim() : undefined, s3ForcePathStyle: protocol === 's3' && s3ForcePathStyle, s3PreserveEmptyDirectories: protocol === 's3' && s3PreserveEmptyDirectories };
-      const storedCredential = protocol === 's3' ? JSON.stringify({ accessKeyId: username, secretAccessKey: password, sessionToken: s3SessionToken || undefined }) : password;
+      const connection: Connection = { id: bookmark?.id ?? crypto.randomUUID(), name: bookmarkName.trim() || host, protocol, host, port, username: protocol === 's3' ? '' : username, initialPath: initialDirectory.trim() || '/', keyPath: keyPath || undefined, keyPassphraseNotRequired: useNoKeyPassphrase, hostKey, localDirectory: localDirectory || undefined, tags, s3Region: protocol === 's3' ? s3Region.trim() : undefined, s3Endpoint: protocol === 's3' && s3Endpoint.trim() ? s3Endpoint.trim() : undefined, s3ForcePathStyle: protocol === 's3' && s3ForcePathStyle, s3PreserveEmptyDirectories: protocol === 's3' && s3PreserveEmptyDirectories };
+      const storedCredential = protocol === 's3' ? JSON.stringify({ accessKeyId: username, secretAccessKey: resolvedPassword, sessionToken: s3SessionToken || undefined }) : resolvedPassword;
+      const shouldStoreCredential = !(protocol === 'sftp' && keyPath.trim()) || saveKeyPassphrase;
       if (mode === 'edit') {
-        if (password) await invoke('credential_save', { bookmarkId: connection.id, password: storedCredential });
+        if (connection.keyPassphraseNotRequired || !shouldStoreCredential) await invoke('credential_delete', { bookmarkId: connection.id });
+        else if (resolvedPassword) await invoke('credential_save', { bookmarkId: connection.id, password: storedCredential });
         await invoke('bookmark_save', { bookmark: connection });
         onSaved(connection);
         return;
       }
-      await invoke('connection_connect', { request: { connectionId: connection.id, protocol, host, port, username, password: password || null, keyPath: keyPath || null, passphrase: null, expectedHostKey: hostKey ?? null, initialPath: connection.initialPath, s3Region: connection.s3Region ?? null, s3Endpoint: connection.s3Endpoint ?? null, s3SessionToken: s3SessionToken || null, s3ForcePathStyle: connection.s3ForcePathStyle ?? false, s3PreserveEmptyDirectories: connection.s3PreserveEmptyDirectories ?? false } });
-      if (password) await invoke('credential_save', { bookmarkId: connection.id, password: storedCredential });
+      setBusyMessage(t.connectingToServer);
+      await invoke('connection_connect', { request: { connectionId: connection.id, protocol, host: host.trim(), port, username, password: protocol === 'sftp' && keyPath.trim() ? null : resolvedPassword || null, keyPath: keyPath.trim() || null, passphrase: usesSshKeyPassphrase ? resolvedPassword : null, expectedHostKey: hostKey ?? null, initialPath: connection.initialPath, s3Region: connection.s3Region ?? null, s3Endpoint: connection.s3Endpoint ?? null, s3SessionToken: s3SessionToken || null, s3ForcePathStyle: connection.s3ForcePathStyle ?? false, s3PreserveEmptyDirectories: connection.s3PreserveEmptyDirectories ?? false } });
+      if (connection.keyPassphraseNotRequired || !shouldStoreCredential) await invoke('credential_delete', { bookmarkId: connection.id });
+      else if (resolvedPassword) await invoke('credential_save', { bookmarkId: connection.id, password: storedCredential });
       onConnected(connection);
-    } catch (reason) { setError(String(reason)); }
-    finally { setBusy(false); }
+    } catch (reason) {
+      const message = invokeErrorMessage(reason);
+      setError(message);
+      if (protocol === 'sftp' && keyPath.trim() && keyPassphraseNotRequired && /(passphrase|encrypted|decrypt)/i.test(message)) {
+        setPassword('');
+        setShowPassphrasePrompt(true);
+      }
+    }
+    finally { setBusy(false); setBusyMessage(''); }
   }
   return <div className="modal-backdrop" role="presentation"><form className="connect-sheet bookmark-sheet" onSubmit={submit}>
     <div className="sheet-title"><div><h2>{mode === 'edit' ? t.editBookmarkTitle : t.connectTitle}</h2><p>{mode === 'edit' ? t.editBookmark : t.connect}</p></div><button type="button" onClick={onClose}>×</button></div>
     <div className="bookmark-sheet-scroll">
       <label>{t.bookmarkName}<input required value={bookmarkName} onChange={(event) => setBookmarkName(event.target.value)} placeholder={t.bookmarkNameHint}/></label>
       <label>{t.protocol}<select value={protocol} onChange={(event) => updateProtocol(event.target.value as Protocol)}><option value="sftp">SFTP</option><option value="ftp">FTP</option><option value="ftps">Explicit FTPS</option><option value="webdav">WebDAV (HTTPS)</option><option value="s3">Amazon S3 / S3-compatible (read-only)</option></select></label>
-      <div className="form-grid"><label>{protocol === 's3' ? s3Text.bucket : t.host}<input required value={host} onChange={(event) => setHost(event.target.value)} placeholder={protocol === 's3' ? 'example-bucket' : 'example.com'}/></label>{protocol !== 's3' && <label>{t.port}<input required type="number" value={port} onChange={(event) => setPort(Number(event.target.value))}/></label>}</div>
+      <div className="form-grid"><label>{protocol === 's3' ? s3Text.bucket : t.host}<input required value={host} onChange={(event) => setHost(event.target.value)} placeholder={protocol === 's3' ? 'example-bucket' : 'example.com'}/></label>{protocol !== 's3' && <label>{t.port}<input required min={1} max={65535} step={1} type="number" value={port} onChange={(event) => setPort(Number(event.target.value))}/></label>}</div>
       {protocol === 'webdav' && <p className="protocol-security-hint">{phaseCopy.webdavHint}</p>}
       <label>{t.initialDirectory}<input required value={initialDirectory} onChange={(event) => setInitialDirectory(event.target.value)} placeholder={t.initialDirectoryHint}/></label>
       {protocol === 's3' && <><p className="protocol-security-hint">{s3Text.readOnly}</p><div className="form-grid"><label>{s3Text.region}<input required value={s3Region} onChange={(event) => setS3Region(event.target.value)} placeholder="ap-northeast-1"/></label><label>{s3Text.endpoint}<input type="url" value={s3Endpoint} onChange={(event) => setS3Endpoint(event.target.value)} placeholder="https://s3.example.com"/></label></div></>}
-      <label>{protocol === 's3' ? s3Text.accessKey : t.user}<input required value={username} onChange={(event) => setUsername(event.target.value)}/></label><label>{protocol === 's3' ? s3Text.secretKey : t.password}<input required={protocol === 'webdav' || protocol === 's3'} type="password" value={password} onChange={(event) => setPassword(event.target.value)}/></label>
+      <label>{protocol === 's3' ? s3Text.accessKey : t.user}<input required value={username} onChange={(event) => setUsername(event.target.value)}/></label>{!(protocol === 'sftp' && keyPath.trim()) && <label>{protocol === 's3' ? s3Text.secretKey : t.password}<input required={protocol === 'webdav' || protocol === 's3'} type="password" value={password} onChange={(event) => setPassword(event.target.value)}/></label>}
       {protocol === 's3' && <><label>{s3Text.sessionToken}<input type="password" value={s3SessionToken} onChange={(event) => setS3SessionToken(event.target.value)}/></label><label className="check-row"><input type="checkbox" checked={s3ForcePathStyle} onChange={(event) => setS3ForcePathStyle(event.target.checked)}/><span>{s3Text.pathStyle}</span></label><label className="check-row"><input type="checkbox" checked={s3PreserveEmptyDirectories} onChange={(event) => setS3PreserveEmptyDirectories(event.target.checked)}/><span>{s3Text.preserveEmpty}</span></label></>}
-      {protocol === 'sftp' && <label>{t.key}<input value={keyPath} onChange={(event) => setKeyPath(event.target.value)} placeholder="~/.ssh/id_ed25519"/></label>}
+      {protocol === 'sftp' && <label>{t.key}<span className="ssh-key-picker"><input value={keyPath} onChange={(event) => setKeyPath(event.target.value)} placeholder="~/.ssh/id_ed25519"/><button type="button" onClick={() => void selectSshKey()}>{t.chooseKey}</button></span><small className="field-hint">{t.keyFormatHint}</small></label>}
+      {protocol === 'sftp' && keyPath.trim() && <><label className="check-row"><input type="checkbox" checked={keyPassphraseNotRequired} onChange={(event) => { passphrasePromptOverride.current = false; setKeyPassphraseNotRequired(event.target.checked); if (event.target.checked) setPassword(''); }}/><span>{passphraseText.withoutPassphrase}</span></label><p className="protocol-security-hint ssh-passphrase-option-hint">{passphraseText.withoutPassphraseDetail}</p>{!keyPassphraseNotRequired && <><label>{t.keyPassphrase}<input type="password" value={password} onChange={(event) => setPassword(event.target.value)}/></label><label className="check-row"><input type="checkbox" checked={saveKeyPassphrase} onChange={(event) => setSaveKeyPassphrase(event.target.checked)}/><span>{passphraseText.saveInKeychain}</span></label><p className="protocol-security-hint ssh-passphrase-option-hint">{passphraseText.saveInKeychainDetail}</p></>}</>}
       <label>{phaseCopy.tags}<input value={tags} onChange={(event) => setTags(event.target.value)} placeholder={phaseCopy.tagHint}/></label>
       <section className="bookmark-local-directory-section">
         <div className="bookmark-local-directory-copy"><strong>{localCopy.title}</strong><p>{localCopy.detail}</p></div>
         <div className="bookmark-local-directory-picker"><div className={`local-directory-path ${localDirectory ? '' : 'empty'}`} title={localDirectory || localCopy.none}><Folder size={16}/><span>{localDirectory || localCopy.none}</span></div><button type="button" onClick={() => void selectLocalDirectory()}>{localCopy.select}</button>{localDirectory && <button type="button" onClick={() => setLocalDirectory('')}>{localCopy.clear}</button>}</div>
       </section>
-      {error && <p className="form-error">{error}</p>}
     </div>
+    {(busyMessage || error) && <div className={`connection-feedback ${error ? 'is-error' : ''}`} role={error ? 'alert' : 'status'} aria-live={error ? 'assertive' : 'polite'}>{error ? <><strong>{t.connectionFailed}</strong><span>{error}</span></> : <span>{busyMessage}</span>}</div>}
     <div className="form-actions"><button type="button" onClick={onClose}>{t.cancel}</button><button className="primary" disabled={busy}>{busy && <LoaderCircle className="spinning" size={16}/>} {mode === 'edit' ? t.saveBookmark : t.start}</button></div>
+    {showPassphrasePrompt && <div className="modal-backdrop passphrase-prompt-backdrop" role="presentation"><section className="connect-sheet passphrase-prompt" role="dialog" aria-modal="true" aria-labelledby="ssh-passphrase-prompt-title">
+      <div className="sheet-title"><div><h2 id="ssh-passphrase-prompt-title">{passphraseText.title}</h2><p>{passphraseText.detail}</p></div></div>
+      <label>{t.keyPassphrase}<input autoFocus type="password" value={password} onChange={(event) => setPassword(event.target.value)}/></label>
+      <div className="form-actions"><button type="button" onClick={() => { passphrasePromptOverride.current = false; setShowPassphrasePrompt(false); }}>{t.cancel}</button><button type="submit" className="primary" disabled={!password} onClick={() => { passphrasePromptOverride.current = true; setShowPassphrasePrompt(false); }}>{passphraseText.retry}</button></div>
+    </section></div>}
   </form></div>;
 }
 
@@ -1667,7 +1759,8 @@ export function SshKeyManagerWindow() {
   const keyText = sshKeyCopy[preferences.language];
   async function closeWindow() { await getCurrentWebviewWindow().close(); }
   async function selectKey(keyPath: string) {
-    await emitTo('main', 'ssh-key://selected', keyPath);
+    const targetLabel = new URLSearchParams(window.location.search).get('target') ?? 'main';
+    await emitTo(targetLabel, 'ssh-key://selected', keyPath);
     await closeWindow();
   }
   return <main className="key-manager-window"><KeyManager t={t} text={keyText} onClose={() => void closeWindow()} onUse={(keyPath) => void selectKey(keyPath)}/></main>;

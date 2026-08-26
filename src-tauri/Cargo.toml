@@ -1,6 +1,6 @@
 [package]
 name = "harbor-transfer"
-version = "0.2.0"
+version = "0.2.1"
 description = "A secure file transfer client"
 edition = "2021"
 
@@ -13,13 +13,16 @@ tauri-build = { version = "2.1", features = [] }
 
 [dependencies]
 anyhow = "1"
-keyring = "3"
+keyring = { version = "3", features = ["apple-native"] }
 futures-util = "0.3"
 percent-encoding = "2"
 quick-xml = "0.38"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 async-trait = "0.1"
 russh = { version = "0.44", features = ["openssl", "vendored-openssl"] }
+# RustCrypto's key parser adds native PuTTY PPK v2/v3 support while the
+# connection transport remains on the established russh implementation.
+ssh-key-ppk = { package = "ssh-key", version = "=0.7.0-rc.11", features = ["crypto", "ppk"] }
 russh-keys = "0.44"
 russh-sftp = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }

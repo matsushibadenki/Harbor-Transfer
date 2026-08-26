@@ -6,6 +6,7 @@ use std::time::Duration;
 pub static PREFERRED_HOST_KEY_ALGOS: &[russh_keys::key::Name] = &[
     russh_keys::key::ED25519,
     russh_keys::key::ECDSA_SHA2_NISTP256,
+    russh_keys::key::ECDSA_SHA2_NISTP384,
     russh_keys::key::ECDSA_SHA2_NISTP521,
     russh_keys::key::RSA_SHA2_256,
     russh_keys::key::RSA_SHA2_512,
@@ -36,14 +37,24 @@ pub async fn probe_host_key(host: &str, port: u16) -> Result<String, String> {
         },
         ..client::Config::default()
     };
-    let _ = tokio::time::timeout(
+    let result = tokio::time::timeout(
         Duration::from_secs(10),
         client::connect(Arc::new(configuration), (host, port), Client::observe(observed.clone())),
     )
     .await;
     let fingerprint = observed.lock().map_err(|_| "Host key probe failed.".to_string())?.clone();
-    fingerprint
-        .ok_or_else(|| "Could not read the server host key. Check the server address and port.".to_string())
+    if let Some(fingerprint) = fingerprint {
+        return Ok(fingerprint);
+    }
+    match result {
+        Err(_) => Err(format!(
+            "Timed out while connecting to {host}:{port}. Check the server address, custom port, firewall, and network."
+        )),
+        Ok(Err(error)) => Err(format!("Could not connect to {host}:{port}: {error}")),
+        Ok(Ok(_)) => Err(format!(
+            "Connected to {host}:{port}, but the server did not provide a supported SSH host key."
+        )),
+    }
 }
 
 #[async_trait::async_trait]

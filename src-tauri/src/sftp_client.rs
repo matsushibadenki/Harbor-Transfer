@@ -1,6 +1,5 @@
 use anyhow::Result;
 use russh::*;
-use russh_keys::*;
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::FileAttributes;
 use serde::{Deserialize, Serialize};
@@ -10,6 +9,52 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::ssh::Client;
+
+fn decode_private_key(
+    key_content: &str,
+    passphrase: Option<&str>,
+    key_path: &str,
+) -> Result<russh_keys::key::KeyPair> {
+    if key_content.trim_start().starts_with("PuTTY-User-Key-File-") {
+        let encrypted = !key_content.lines().any(|line| line.trim() == "Encryption: none");
+        if encrypted && passphrase.is_none() {
+            return Err(anyhow::anyhow!(
+                "This PuTTY PPK key is encrypted. Enter its passphrase and try again."
+            ));
+        }
+        let ppk_key = ssh_key_ppk::PrivateKey::from_ppk(key_content, passphrase.map(ToOwned::to_owned))
+            .map_err(|error| {
+                if encrypted {
+                    anyhow::anyhow!(
+                        "Failed to decrypt PuTTY PPK key from {}. Check the key passphrase. Details: {}",
+                        key_path,
+                        error
+                    )
+                } else {
+                    anyhow::anyhow!("Failed to load PuTTY PPK key from {}: {}", key_path, error)
+                }
+            })?;
+        let openssh = ppk_key
+            .to_openssh(ssh_key_ppk::LineEnding::LF)
+            .map_err(|error| anyhow::anyhow!("Failed to convert PuTTY PPK key: {}", error))?;
+        return russh_keys::decode_secret_key(openssh.as_str(), None)
+            .map_err(|error| anyhow::anyhow!("Failed to prepare PuTTY PPK key for SFTP: {}", error));
+    }
+
+    russh_keys::decode_secret_key(key_content, passphrase).map_err(|error| {
+        let detail = error.to_string();
+        let lower = detail.to_lowercase();
+        if lower.contains("encrypted") || lower.contains("passphrase") || lower.contains("password") {
+            anyhow::anyhow!("Failed to decrypt SSH key. Please provide the correct passphrase.")
+        } else {
+            anyhow::anyhow!(
+                "Failed to load SSH key from {}: {}. The file must contain a supported OpenSSH, PEM, or PuTTY PPK private key.",
+                key_path,
+                detail
+            )
+        }
+    })
+}
 
 /// Configuration for a standalone SFTP connection (SSH transport, no PTY).
 #[derive(Debug, Clone, Deserialize)]
@@ -166,13 +211,7 @@ impl StandaloneSftpClient {
                 let key_content = std::fs::read_to_string(&expanded_path)
                     .map_err(|e| anyhow::anyhow!("Failed to read SSH key from {}: {}", key_path, e))?
                     .replace("\r\n", "\n");
-                let key = decode_secret_key(&key_content, passphrase.as_deref()).map_err(|e| {
-                    if e.to_string().contains("encrypted") || e.to_string().contains("passphrase") {
-                        anyhow::anyhow!("Failed to decrypt SSH key. Please provide the correct passphrase.")
-                    } else {
-                        anyhow::anyhow!("Failed to load SSH key from {}: {}.", key_path, e)
-                    }
-                })?;
+                let key = decode_private_key(&key_content, passphrase.as_deref(), key_path)?;
 
                 ssh_session
                     .authenticate_publickey(&config.username, Arc::new(key))
@@ -578,14 +617,14 @@ mod tests {
     }
 
     #[test]
-    fn test_sftp_config_publickey() {
-        let json = r#"{"host":"server","port":2222,"username":"deploy","auth_method":{"type":"PublicKey","key_path":"/home/user/.ssh/id_rsa","passphrase":null}}"#;
+    fn test_sftp_config_publickey_accepts_custom_port_key_extension_and_passphrase() {
+        let json = r#"{"host":"server","port":10022,"username":"deploy","auth_method":{"type":"PublicKey","key_path":"/home/user/.ssh/production.key","passphrase":"key-secret"}}"#;
         let config: SftpConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.port, 2222);
+        assert_eq!(config.port, 10022);
         match config.auth_method {
             SftpAuthMethod::PublicKey { key_path, passphrase } => {
-                assert_eq!(key_path, "/home/user/.ssh/id_rsa");
-                assert!(passphrase.is_none());
+                assert_eq!(key_path, "/home/user/.ssh/production.key");
+                assert_eq!(passphrase.as_deref(), Some("key-secret"));
             }
             _ => panic!("Expected PublicKey auth method"),
         }
