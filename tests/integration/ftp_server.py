@@ -24,4 +24,4 @@ handler.passive_ports = range(
     int(os.environ.get("PASV_MAX_PORT", "30009")) + 1,
 )
 
-FTPServer(("0.0.0.0", 21), handler).serve_forever()
+FTPServer(("0.0.0.0", int(os.environ.get("FTP_PORT", "21"))), handler).serve_forever()
