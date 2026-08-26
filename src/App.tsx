@@ -26,7 +26,7 @@ type FileProgress = { transferId: string; transferredBytes: number; totalBytes: 
 type LocalPathInfo = { name: string; isDirectory: boolean };
 type TransferHistory = { id: string; name: string; direction: 'Upload' | 'Download'; status: 'Completed' | 'Failed' | 'Cancelled'; detail: string; bytes: number; completedAt: string };
 type Language = 'ja' | 'en' | 'zh-CN';
-type Preferences = { language: Language; theme: 'system' | 'light' | 'dark'; defaultProtocol: Protocol; conflictPolicy: 'ask' | 'overwrite' | 'skip'; confirmDelete: boolean; transferNotifications: boolean; editorPath: string; autoCheckUpdates: boolean };
+type Preferences = { language: Language; theme: 'system' | 'light' | 'dark'; fileNameFontSize: number; defaultProtocol: Protocol; conflictPolicy: 'ask' | 'overwrite' | 'skip'; confirmDelete: boolean; transferNotifications: boolean; editorPath: string; autoCheckUpdates: boolean };
 type SoftwareUpdatePhase = 'idle' | 'checking' | 'current' | 'available' | 'downloading' | 'ready' | 'error';
 type SoftwareUpdateState = { phase: SoftwareUpdatePhase; currentVersion: string; version?: string; body?: string; downloadedBytes: number; totalBytes?: number; error?: string };
 type RemoteEdit = { editId: string; connectionId: string; name: string; remotePath: string; status: 'watching' | 'waiting' | 'failed'; detail?: string };
@@ -65,8 +65,13 @@ type DropConflictPrompt = {
   resolve: (choice: DropConflictChoice) => void;
 };
 
-const defaultPreferences: Preferences = { language: 'ja', theme: 'system', defaultProtocol: 'sftp', conflictPolicy: 'ask', confirmDelete: true, transferNotifications: true, editorPath: '', autoCheckUpdates: true };
-function loadPreferences(): Preferences { try { return { ...defaultPreferences, ...JSON.parse(localStorage.getItem('harbor-transfer.preferences') ?? '{}') }; } catch { return defaultPreferences; } }
+const defaultPreferences: Preferences = { language: 'ja', theme: 'system', fileNameFontSize: 13, defaultProtocol: 'sftp', conflictPolicy: 'ask', confirmDelete: true, transferNotifications: true, editorPath: '', autoCheckUpdates: true };
+function loadPreferences(): Preferences {
+  try {
+    const saved = { ...defaultPreferences, ...JSON.parse(localStorage.getItem('harbor-transfer.preferences') ?? '{}') };
+    return { ...saved, fileNameFontSize: Math.min(20, Math.max(10, Number(saved.fileNameFontSize) || defaultPreferences.fileNameFontSize)) };
+  } catch { return defaultPreferences; }
+}
 async function chooseEditorApplication(): Promise<string | null> {
   const selected = await open({ defaultPath: '/Applications', multiple: false, directory: false, filters: [{ name: 'macOS Applications', extensions: ['app'] }] });
   return selected && !Array.isArray(selected) ? selected : null;
@@ -143,9 +148,9 @@ const browserContextMenuCopy = {
 } as const;
 
 const preferencesCopy = {
-  ja: { title: '環境設定', detail: 'すべての接続に適用する共通設定です。', general: '一般', appearance: '外観', theme: 'カラーテーマ', system: 'システム設定', light: 'ライト', dark: 'ダーク', transfers: '転送', security: '安全性', editor: 'リモートファイルエディタ', editorDetail: 'キャッシュを開くアプリケーションです。保存を検知すると、同名のリモートファイルを自動的に上書きします。', chooseEditor: 'エディタを選択', clearEditor: '解除', noEditor: '選択されていません', language: '表示言語', defaultProtocol: '新規接続の既定プロトコル', conflictPolicy: '同名ファイルの既定動作', ask: '毎回確認', overwrite: '上書き', skip: 'スキップ', confirmDelete: '削除前に確認する', notifications: '転送結果を画面内に通知する', save: '保存' },
-  en: { title: 'Preferences', detail: 'These settings apply to every connection.', general: 'General', appearance: 'Appearance', theme: 'Color theme', system: 'System', light: 'Light', dark: 'Dark', transfers: 'Transfers', security: 'Safety', editor: 'Remote File Editor', editorDetail: 'This application opens cached copies. Saving automatically overwrites the file at the same remote path.', chooseEditor: 'Choose Editor', clearEditor: 'Clear', noEditor: 'Not selected', language: 'Display language', defaultProtocol: 'Default protocol for new connections', conflictPolicy: 'Default duplicate-file action', ask: 'Ask every time', overwrite: 'Overwrite', skip: 'Skip', confirmDelete: 'Confirm before deleting', notifications: 'Show in-app transfer notifications', save: 'Save' },
-  'zh-CN': { title: '偏好设置', detail: '这些设置适用于所有连接。', general: '通用', appearance: '外观', theme: '颜色主题', system: '跟随系统', light: '浅色', dark: '深色', transfers: '传输', security: '安全性', editor: '远程文件编辑器', editorDetail: '此应用用于打开缓存副本。保存后会自动覆盖同一路径下的远程文件。', chooseEditor: '选择编辑器', clearEditor: '清除', noEditor: '未选择', language: '显示语言', defaultProtocol: '新连接的默认协议', conflictPolicy: '同名文件的默认操作', ask: '每次询问', overwrite: '覆盖', skip: '跳过', confirmDelete: '删除前确认', notifications: '在应用内显示传输结果通知', save: '保存' },
+  ja: { title: '環境設定', detail: 'すべての接続に適用する共通設定です。', general: '一般', appearance: 'アピアランス', theme: 'カラーテーマ', system: 'システム設定', light: 'ライト', dark: 'ダーク', fileNameSize: 'ファイル名の文字サイズ', fileNameSizeDetail: 'リスト、アイコン、カラム表示のファイル名に適用されます。', fileNamePreview: 'ファイル名の表示サンプル.txt', transfers: '転送', security: '安全性', updates: 'アップデート', editorTab: 'エディタ', editor: 'リモートファイルエディタ', editorDetail: 'キャッシュを開くアプリケーションです。保存を検知すると、同名のリモートファイルを自動的に上書きします。', chooseEditor: 'エディタを選択', clearEditor: '解除', noEditor: '選択されていません', language: '表示言語', defaultProtocol: '新規接続の既定プロトコル', conflictPolicy: '同名ファイルの既定動作', ask: '毎回確認', overwrite: '上書き', skip: 'スキップ', confirmDelete: '削除前に確認する', notifications: '転送結果を画面内に通知する', save: '保存' },
+  en: { title: 'Preferences', detail: 'These settings apply to every connection.', general: 'General', appearance: 'Appearance', theme: 'Color theme', system: 'System', light: 'Light', dark: 'Dark', fileNameSize: 'File name text size', fileNameSizeDetail: 'Applied to file names in list, icon, and column views.', fileNamePreview: 'File name preview.txt', transfers: 'Transfers', security: 'Safety', updates: 'Updates', editorTab: 'Editor', editor: 'Remote File Editor', editorDetail: 'This application opens cached copies. Saving automatically overwrites the file at the same remote path.', chooseEditor: 'Choose Editor', clearEditor: 'Clear', noEditor: 'Not selected', language: 'Display language', defaultProtocol: 'Default protocol for new connections', conflictPolicy: 'Default duplicate-file action', ask: 'Ask every time', overwrite: 'Overwrite', skip: 'Skip', confirmDelete: 'Confirm before deleting', notifications: 'Show in-app transfer notifications', save: 'Save' },
+  'zh-CN': { title: '偏好设置', detail: '这些设置适用于所有连接。', general: '通用', appearance: '外观', theme: '颜色主题', system: '跟随系统', light: '浅色', dark: '深色', fileNameSize: '文件名文字大小', fileNameSizeDetail: '应用于列表、图标和分栏视图中的文件名。', fileNamePreview: '文件名显示示例.txt', transfers: '传输', security: '安全性', updates: '软件更新', editorTab: '编辑器', editor: '远程文件编辑器', editorDetail: '此应用用于打开缓存副本。保存后会自动覆盖同一路径下的远程文件。', chooseEditor: '选择编辑器', clearEditor: '清除', noEditor: '未选择', language: '显示语言', defaultProtocol: '新连接的默认协议', conflictPolicy: '同名文件的默认操作', ask: '每次询问', overwrite: '覆盖', skip: '跳过', confirmDelete: '删除前确认', notifications: '在应用内显示传输结果通知', save: '保存' },
 } as const;
 
 const softwareUpdateCopy = {
@@ -1168,18 +1173,13 @@ export default function App() {
 
   async function editRemoteFile(entry: FileEntry, basePath = path) {
     if (!active || entry.file_type !== 'File') return;
-    let editorPath = preferences.editorPath.trim();
+    const editorPath = preferences.editorPath.trim();
     if (!editorPath) {
-      setNotice(editText.configure);
-      try {
-        const selectedEditor = await chooseEditorApplication();
-        if (!selectedEditor) return;
-        editorPath = selectedEditor;
-        setPreferences((current) => ({ ...current, editorPath: selectedEditor }));
-      } catch (reason) {
-        setError(String(reason));
-        return;
-      }
+      // A double-click must never turn into a native file/download dialog.
+      // Editor selection belongs to Preferences, where it can be reviewed and
+      // saved explicitly before remote files are opened.
+      setError(editText.configure);
+      return;
     }
     const remotePath = joinPath(basePath, entry.name);
     const existing = remoteEdits.find((edit) => edit.connectionId === active.id && edit.remotePath === remotePath);
@@ -1245,7 +1245,10 @@ export default function App() {
     dragSelectionTimer.current = window.setTimeout(() => {
       dragSelectionTimer.current = null;
       void prepareRemoteDrag(entry, basePath);
-    }, 220);
+      // Keep the preparation outside the platform double-click interval. Without
+      // this delay the first click of a double-click can start a drag-export
+      // download before the edit action has a chance to cancel it.
+    }, 900);
   }
 
   function cancelScheduledDragPreparation() {
@@ -1417,7 +1420,7 @@ export default function App() {
     } catch (reason) { setError(String(reason)); }
   }
 
-  return <main className={`app-shell ${transferPanelCollapsed ? 'queue-collapsed' : ''}`}>
+  return <main className={`app-shell ${transferPanelCollapsed ? 'queue-collapsed' : ''}`} style={{ '--file-name-font-size': `${preferences.fileNameFontSize}px` } as React.CSSProperties}>
     <header className="toolbar" onPointerDown={startWindowDrag}>
       <div className="brand"><Cloud size={21}/><span>{t.title}</span></div>
       <button className="icon-button" aria-label={sidebarCollapsed ? queueText.showSidebar : queueText.hideSidebar} title={sidebarCollapsed ? queueText.showSidebar : queueText.hideSidebar} aria-expanded={!sidebarCollapsed} onClick={() => setSidebarCollapsed((current) => !current)}>{sidebarCollapsed ? <PanelLeftOpen size={17}/> : <PanelLeftClose size={17}/>}</button>
@@ -1807,32 +1810,49 @@ function PreferencesSheet({ value, language, t, softwareUpdate, onCheckUpdate, o
   const [draft, setDraft] = useState(value);
   const text = preferencesCopy[language];
   const updateText = softwareUpdateCopy[language];
+  const tabs = [
+    { id: 'general' as const, label: text.general },
+    { id: 'appearance' as const, label: text.appearance },
+    { id: 'transfers' as const, label: text.transfers },
+    { id: 'editor' as const, label: text.editorTab },
+    { id: 'security' as const, label: text.security },
+    { id: 'updates' as const, label: text.updates },
+  ];
+  const [activeTab, setActiveTab] = useState<(typeof tabs)[number]['id']>('general');
   async function selectEditor() {
     const selected = await chooseEditorApplication();
     if (selected) setDraft((current) => ({ ...current, editorPath: selected }));
   }
   return <div className="modal-backdrop" role="presentation"><form className="connect-sheet preferences-sheet" onSubmit={(event) => { event.preventDefault(); onSave(draft); }}>
     <div className="sheet-title"><div><h2>{text.title}</h2><p>{text.detail}</p></div><button type="button" onClick={onClose}>×</button></div>
-    <div className="preferences-sheet-scroll">
-      <fieldset><legend>{text.general}</legend>
-        <label>{text.language}<select value={draft.language} onChange={(event) => setDraft((current) => ({ ...current, language: event.target.value as Language }))}><option value="ja">日本語</option><option value="en">English</option><option value="zh-CN">简体中文</option></select></label>
-        <label>{text.defaultProtocol}<select value={draft.defaultProtocol} onChange={(event) => setDraft((current) => ({ ...current, defaultProtocol: event.target.value as Protocol }))}><option value="sftp">SFTP</option><option value="ftp">FTP</option><option value="ftps">Explicit FTPS</option><option value="webdav">WebDAV (HTTPS)</option><option value="s3">Amazon S3 / S3-compatible</option></select></label>
-      </fieldset>
-      <fieldset><legend>{text.appearance}</legend><label>{text.theme}<select value={draft.theme} onChange={(event) => setDraft((current) => ({ ...current, theme: event.target.value as Preferences['theme'] }))}><option value="system">{text.system}</option><option value="light">{text.light}</option><option value="dark">{text.dark}</option></select></label></fieldset>
-      <fieldset><legend>{updateText.title}</legend><p className="preferences-field-detail">{updateText.detail}</p>
-        <div className="software-update-summary"><span>{updateText.currentVersion}</span><strong>{softwareUpdate.currentVersion || '—'}</strong></div>
-        <label className="check-row"><input type="checkbox" checked={draft.autoCheckUpdates} onChange={(event) => setDraft((current) => ({ ...current, autoCheckUpdates: event.target.checked }))}/><span>{updateText.automatic}</span></label>
-        <div className="software-update-actions"><button type="button" disabled={softwareUpdate.phase === 'checking' || softwareUpdate.phase === 'downloading'} onClick={onCheckUpdate}>{softwareUpdate.phase === 'checking' ? <><LoaderCircle className="spinning" size={14}/>{updateText.checking}</> : updateText.check}</button>{(softwareUpdate.phase === 'available' || softwareUpdate.phase === 'downloading' || softwareUpdate.phase === 'ready') && <button type="button" className="primary" onClick={onShowUpdate}>{updateText.details}</button>}</div>
-        {softwareUpdate.phase === 'current' && <p className="software-update-status success"><Check size={14}/>{updateText.current}</p>}
-        {softwareUpdate.phase === 'available' && <p className="software-update-status">{updateText.available.replace('{{version}}', softwareUpdate.version ?? '')}</p>}
-        {softwareUpdate.phase === 'error' && <p className="software-update-status error" title={softwareUpdate.error}>{updateText.failed}</p>}
-      </fieldset>
-      <fieldset><legend>{text.editor}</legend><p className="preferences-field-detail">{text.editorDetail}</p><div className="editor-picker"><input readOnly value={draft.editorPath} placeholder={text.noEditor}/><button type="button" onClick={() => void selectEditor()}>{text.chooseEditor}</button>{draft.editorPath && <button type="button" onClick={() => setDraft((current) => ({ ...current, editorPath: '' }))}>{text.clearEditor}</button>}</div></fieldset>
-      <fieldset><legend>{text.transfers}</legend>
-        <label>{text.conflictPolicy}<select value={draft.conflictPolicy} onChange={(event) => setDraft((current) => ({ ...current, conflictPolicy: event.target.value as Preferences['conflictPolicy'] }))}><option value="ask">{text.ask}</option><option value="overwrite">{text.overwrite}</option><option value="skip">{text.skip}</option></select></label>
-        <label className="check-row"><input type="checkbox" checked={draft.transferNotifications} onChange={(event) => setDraft((current) => ({ ...current, transferNotifications: event.target.checked }))}/><span>{text.notifications}</span></label>
-      </fieldset>
-      <fieldset><legend>{text.security}</legend><label className="check-row"><input type="checkbox" checked={draft.confirmDelete} onChange={(event) => setDraft((current) => ({ ...current, confirmDelete: event.target.checked }))}/><span>{text.confirmDelete}</span></label></fieldset>
+    <div className="preferences-layout">
+      <nav className="preferences-tabs" role="tablist" aria-orientation="vertical" aria-label={text.title}>
+        {tabs.map((tab) => <button key={tab.id} type="button" role="tab" aria-selected={activeTab === tab.id} aria-controls={`preferences-panel-${tab.id}`} tabIndex={activeTab === tab.id ? 0 : -1} className={activeTab === tab.id ? 'active' : ''} onClick={() => setActiveTab(tab.id)}>{tab.label}</button>)}
+      </nav>
+      <div className="preferences-sheet-scroll">
+        {activeTab === 'general' && <section className="preferences-panel" id="preferences-panel-general" role="tabpanel"><h3>{text.general}</h3>
+          <label>{text.language}<select value={draft.language} onChange={(event) => setDraft((current) => ({ ...current, language: event.target.value as Language }))}><option value="ja">日本語</option><option value="en">English</option><option value="zh-CN">简体中文</option></select></label>
+          <label>{text.defaultProtocol}<select value={draft.defaultProtocol} onChange={(event) => setDraft((current) => ({ ...current, defaultProtocol: event.target.value as Protocol }))}><option value="sftp">SFTP</option><option value="ftp">FTP</option><option value="ftps">Explicit FTPS</option><option value="webdav">WebDAV (HTTPS)</option><option value="s3">Amazon S3 / S3-compatible</option></select></label>
+        </section>}
+        {activeTab === 'appearance' && <section className="preferences-panel" id="preferences-panel-appearance" role="tabpanel"><h3>{text.appearance}</h3>
+          <label>{text.theme}<select value={draft.theme} onChange={(event) => setDraft((current) => ({ ...current, theme: event.target.value as Preferences['theme'] }))}><option value="system">{text.system}</option><option value="light">{text.light}</option><option value="dark">{text.dark}</option></select></label>
+          <div className="file-name-size-setting"><div className="preference-setting-heading"><strong>{text.fileNameSize}</strong><output>{draft.fileNameFontSize}px</output></div><p className="preferences-field-detail">{text.fileNameSizeDetail}</p><input aria-label={text.fileNameSize} type="range" min="10" max="20" step="1" value={draft.fileNameFontSize} onChange={(event) => setDraft((current) => ({ ...current, fileNameFontSize: Number(event.target.value) }))}/><div className="file-name-size-preview" style={{ fontSize: `${draft.fileNameFontSize}px` }}><FileText size={18}/><span>{text.fileNamePreview}</span></div></div>
+        </section>}
+        {activeTab === 'transfers' && <section className="preferences-panel" id="preferences-panel-transfers" role="tabpanel"><h3>{text.transfers}</h3>
+          <label>{text.conflictPolicy}<select value={draft.conflictPolicy} onChange={(event) => setDraft((current) => ({ ...current, conflictPolicy: event.target.value as Preferences['conflictPolicy'] }))}><option value="ask">{text.ask}</option><option value="overwrite">{text.overwrite}</option><option value="skip">{text.skip}</option></select></label>
+          <label className="check-row"><input type="checkbox" checked={draft.transferNotifications} onChange={(event) => setDraft((current) => ({ ...current, transferNotifications: event.target.checked }))}/><span>{text.notifications}</span></label>
+        </section>}
+        {activeTab === 'editor' && <section className="preferences-panel" id="preferences-panel-editor" role="tabpanel"><h3>{text.editor}</h3><p className="preferences-field-detail">{text.editorDetail}</p><div className="editor-picker"><input readOnly value={draft.editorPath} placeholder={text.noEditor}/><button type="button" onClick={() => void selectEditor()}>{text.chooseEditor}</button>{draft.editorPath && <button type="button" onClick={() => setDraft((current) => ({ ...current, editorPath: '' }))}>{text.clearEditor}</button>}</div></section>}
+        {activeTab === 'security' && <section className="preferences-panel" id="preferences-panel-security" role="tabpanel"><h3>{text.security}</h3><label className="check-row"><input type="checkbox" checked={draft.confirmDelete} onChange={(event) => setDraft((current) => ({ ...current, confirmDelete: event.target.checked }))}/><span>{text.confirmDelete}</span></label></section>}
+        {activeTab === 'updates' && <section className="preferences-panel" id="preferences-panel-updates" role="tabpanel"><h3>{updateText.title}</h3><p className="preferences-field-detail">{updateText.detail}</p>
+          <div className="software-update-summary"><span>{updateText.currentVersion}</span><strong>{softwareUpdate.currentVersion || '—'}</strong></div>
+          <label className="check-row"><input type="checkbox" checked={draft.autoCheckUpdates} onChange={(event) => setDraft((current) => ({ ...current, autoCheckUpdates: event.target.checked }))}/><span>{updateText.automatic}</span></label>
+          <div className="software-update-actions"><button type="button" disabled={softwareUpdate.phase === 'checking' || softwareUpdate.phase === 'downloading'} onClick={onCheckUpdate}>{softwareUpdate.phase === 'checking' ? <><LoaderCircle className="spinning" size={14}/>{updateText.checking}</> : updateText.check}</button>{(softwareUpdate.phase === 'available' || softwareUpdate.phase === 'downloading' || softwareUpdate.phase === 'ready') && <button type="button" className="primary" onClick={onShowUpdate}>{updateText.details}</button>}</div>
+          {softwareUpdate.phase === 'current' && <p className="software-update-status success"><Check size={14}/>{updateText.current}</p>}
+          {softwareUpdate.phase === 'available' && <p className="software-update-status">{updateText.available.replace('{{version}}', softwareUpdate.version ?? '')}</p>}
+          {softwareUpdate.phase === 'error' && <p className="software-update-status error" title={softwareUpdate.error}>{updateText.failed}</p>}
+        </section>}
+      </div>
     </div>
     <div className="form-actions"><button type="button" onClick={onClose}>{t.cancel}</button><button className="primary">{text.save}</button></div>
   </form></div>;

@@ -739,7 +739,8 @@ input:disabled {
 
 .preferences-sheet {
   display: flex;
-  width: min(560px, 100%);
+  width: min(720px, 100%);
+  min-height: min(500px, calc(100dvh - 48px));
   max-height: calc(100dvh - 48px);
   flex-direction: column;
   overflow: hidden;
@@ -749,13 +750,112 @@ input:disabled {
   flex: none;
 }
 
-.preferences-sheet-scroll {
+.preferences-layout {
+  display: grid;
   min-height: 0;
   flex: 1 1 auto;
+  grid-template-columns: 152px minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid #e1e9e7;
+  border-radius: 10px;
+}
+
+.preferences-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px;
+  border-right: 1px solid #e1e9e7;
+  background: #f5f8f7;
+}
+
+.preferences-tabs button {
+  min-height: 35px;
+  justify-content: flex-start;
+  padding: 0 11px !important;
+  border-radius: 7px !important;
+  color: #647a75;
+  font-size: 12px !important;
+  font-weight: 650 !important;
+  text-align: left;
+}
+
+.preferences-tabs button.active {
+  color: #116f61;
+  background: #dfeeea;
+}
+
+.preferences-sheet-scroll {
+  min-height: 0;
   overflow: auto;
-  padding-right: 4px;
+  padding: 20px 22px;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+}
+
+.preferences-panel h3 {
+  margin: 0 0 18px;
+  color: #294740;
+  font-size: 16px;
+}
+
+.file-name-size-setting {
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid #e1e9e7;
+}
+
+.preference-setting-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #476861;
+  font-size: 12px;
+}
+
+.preference-setting-heading output {
+  min-width: 38px;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: #edf4f2;
+  color: #276e60;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  text-align: center;
+}
+
+.file-name-size-setting input[type='range'] {
+  height: 24px;
+  padding: 0;
+  accent-color: #147a6d;
+  cursor: pointer;
+}
+
+.file-name-size-preview {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  gap: 9px;
+  margin-top: 10px;
+  padding: 8px 12px;
+  overflow: hidden;
+  border: 1px solid #e1e9e7;
+  border-radius: 8px;
+  background: #f7f9f8;
+  color: #000;
+  font-weight: 650;
+}
+
+.file-name-size-preview svg {
+  flex: none;
+  color: #dc2626;
+}
+
+.file-name-size-preview span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .preferences-sheet > .form-actions {
@@ -764,6 +864,23 @@ input:disabled {
   padding-top: 14px;
   border-top: 1px solid #dfe8e5;
   background: #fff;
+}
+
+@media (max-width: 620px) {
+  .preferences-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .preferences-tabs {
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid #e1e9e7;
+  }
+
+  .preferences-tabs button {
+    flex: none;
+  }
 }
 
 .bookmark-sheet {
@@ -2236,4 +2353,42 @@ html[data-resolved-theme='dark'] .key-row-public .key-type-badge { color: #8dccf
     max-width: none;
     text-align: left;
   }
+}
+
+/* User-controlled file-name typography is shared by all browser views. */
+.file-name-text,
+.icon-entry-main strong,
+.column-entry-main > span {
+  font-size: var(--file-name-font-size, 13px);
+}
+
+html[data-resolved-theme='dark'] .preferences-layout,
+html[data-resolved-theme='dark'] .preferences-tabs,
+html[data-resolved-theme='dark'] .file-name-size-setting,
+html[data-resolved-theme='dark'] .file-name-size-preview {
+  border-color: var(--ht-rule);
+}
+
+html[data-resolved-theme='dark'] .preferences-tabs {
+  background: var(--ht-surface-1);
+}
+
+html[data-resolved-theme='dark'] .preferences-tabs button {
+  color: var(--ht-text-secondary);
+}
+
+html[data-resolved-theme='dark'] .preferences-tabs button.active,
+html[data-resolved-theme='dark'] .preference-setting-heading output {
+  color: var(--ht-accent-strong);
+  background: var(--ht-selected);
+}
+
+html[data-resolved-theme='dark'] .preferences-panel h3,
+html[data-resolved-theme='dark'] .preference-setting-heading {
+  color: var(--ht-text-primary);
+}
+
+html[data-resolved-theme='dark'] .file-name-size-preview {
+  color: var(--ht-file-name);
+  background: var(--ht-field);
 }
