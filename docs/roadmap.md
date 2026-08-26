@@ -29,7 +29,7 @@
 - [Done] S3向けフォルダアップロード、空フォルダ方針、copy＋delete操作、同期を実装
 - [Done] rsync互換のサイズ＋更新日時quick-checkを選択可能な高度差分同期として実装
 - [Done] Tauri updaterによる署名付き自動更新、手動確認、進捗表示、再起動適用を英語・日本語・简体中文で実装
-- [Next] updater対応初回版`0.2.0`を署名・公証し、GitHub Releasesへ更新メタデータ付きで公開
+- [Done] updater対応版`0.2.0`と`0.2.1`を署名・公証し、GitHub Releasesへ更新メタデータ付きで公開
 
 ## Phase 0 — プロジェクト基盤 [Done]
 
@@ -133,5 +133,5 @@
 - [Done] Tauri updater/processプラグイン、最小権限、HTTPS endpoint、専用公開鍵を設定
 - [Done] リリースワークフローへupdater archive、署名、`latest.json`生成設定を追加
 - [Done] FTP統合テストでEPSV probeがデータlistenerを残す問題を修正し、UTF-8 fixtureとPASV port範囲を明示
-- [Next] GitHub Actions Secretsへupdater秘密鍵を登録し、`0.2.0`を初回手動更新版として公開
+- [Done] GitHub Actions Secretsへupdater秘密鍵を登録し、`0.2.0`と`0.2.1`を署名付き自動更新対応版として公開
 - [Later] 安定版／プレリリース版の更新チャネル分離と段階配信
