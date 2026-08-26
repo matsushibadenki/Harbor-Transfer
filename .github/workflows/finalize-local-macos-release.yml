@@ -1,0 +1,89 @@
+name: Finalize Local macOS Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing draft release tag
+        required: true
+        type: string
+      release_notes:
+        description: Release notes used by the in-app updater
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: finalize-local-macos-release
+  cancel-in-progress: false
+
+jobs:
+  sign-updater-and-publish:
+    name: Sign updater metadata and publish
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_NOTES: ${{ inputs.release_notes }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Verify inputs and updater signing secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid release tag"; exit 1; }
+          test -n "$TAURI_SIGNING_PRIVATE_KEY" || { echo "Missing TAURI_SIGNING_PRIVATE_KEY"; exit 1; }
+          test -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" || { echo "Missing TAURI_SIGNING_PRIVATE_KEY_PASSWORD"; exit 1; }
+          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = "true" || { echo "Release must be a draft"; exit 1; }
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Download and sign the notarized updater archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release-assets
+          gh release download "$RELEASE_TAG" --pattern '*.app.tar.gz' --dir release-assets
+          ARCHIVE="$(find release-assets -maxdepth 1 -name '*.app.tar.gz' -type f -print -quit)"
+          test -n "$ARCHIVE" || { echo "Updater archive is missing"; exit 1; }
+          pnpm tauri signer sign "$ARCHIVE"
+          test -s "$ARCHIVE.sig"
+
+      - name: Create updater metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCHIVE="$(find release-assets -maxdepth 1 -name '*.app.tar.gz' -type f -print -quit)"
+          VERSION="${RELEASE_TAG#v}"
+          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/$(basename "$ARCHIVE")"
+          SIGNATURE="$(cat "$ARCHIVE.sig")"
+          jq -n \
+            --arg version "$VERSION" \
+            --arg notes "$RELEASE_NOTES" \
+            --arg pub_date "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            --arg signature "$SIGNATURE" \
+            --arg url "$DOWNLOAD_URL" \
+            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: {"darwin-aarch64": {signature: $signature, url: $url}, "darwin-x86_64": {signature: $signature, url: $url}}}' \
+            > release-assets/latest.json
+
+      - name: Upload signed updater files and publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCHIVE="$(find release-assets -maxdepth 1 -name '*.app.tar.gz' -type f -print -quit)"
+          gh release upload "$RELEASE_TAG" "$ARCHIVE.sig" release-assets/latest.json --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --latest
