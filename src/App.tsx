@@ -323,7 +323,7 @@ export default function App() {
   const [directoryHistoryIndex, setDirectoryHistoryIndex] = useState(-1);
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [query, setQuery] = useState('');
-  const [showConnect, setShowConnect] = useState(() => new URLSearchParams(window.location.search).get('newConnection') === '1');
+  const [showConnect, setShowConnect] = useState(false);
   const [showPreferences, setShowPreferences] = useState(false);
   const [showSoftwareUpdate, setShowSoftwareUpdate] = useState(false);
   const [softwareUpdate, setSoftwareUpdate] = useState<SoftwareUpdateState>({ phase: 'idle', currentVersion: '', downloadedBytes: 0 });
@@ -820,7 +820,7 @@ export default function App() {
     try {
       const label = `main-${crypto.randomUUID()}`;
       const appWindow = new WebviewWindow(label, {
-        url: 'index.html?newConnection=1',
+        url: 'index.html',
         title: t.title,
         width: 1240,
         height: 780,
