@@ -28,6 +28,8 @@
 - [Done] MinIOのS3互換テスト環境でmultipart・取消・Unicode key・1,000件超一覧を統合検証
 - [Done] S3向けフォルダアップロード、空フォルダ方針、copy＋delete操作、同期を実装
 - [Done] rsync互換のサイズ＋更新日時quick-checkを選択可能な高度差分同期として実装
+- [Done] Tauri updaterによる署名付き自動更新、手動確認、進捗表示、再起動適用を英語・日本語・简体中文で実装
+- [Next] updater対応初回版`0.2.0`を署名・公証し、GitHub Releasesへ更新メタデータ付きで公開
 
 ## Phase 0 — プロジェクト基盤 [Done]
 
@@ -121,3 +123,15 @@
 
 計画済みのPhase 0〜6とrsync互換quick-checkは完了した。今後の新規Phaseを開始する場合も、削除を自動同期へ含めず、プレビュー・競合保護・停止・履歴という既存の安全境界を維持する。
 - [Done] 三点リーダー／右クリックのファイル情報画面へ名称変更、パーミッション、更新日時、SFTPの所有者UID・グループGID編集を統合
+
+## Phase 7 — ソフトウェアアップデート [Next]
+
+**完了条件:** 署名検証されたGitHub Releaseをアプリ内で確認・取得し、安全に再起動適用できる。
+
+- [Done] 起動時の自動確認と環境設定からの手動確認を追加
+- [Done] バージョン、リリースノート、ダウンロード進捗、エラー、再起動適用UIを3言語で追加
+- [Done] Tauri updater/processプラグイン、最小権限、HTTPS endpoint、専用公開鍵を設定
+- [Done] リリースワークフローへupdater archive、署名、`latest.json`生成設定を追加
+- [Done] FTP統合テストでEPSV probeがデータlistenerを残す問題を修正し、UTF-8 fixtureとPASV port範囲を明示
+- [Next] GitHub Actions Secretsへupdater秘密鍵を登録し、`0.2.0`を初回手動更新版として公開
+- [Later] 安定版／プレリリース版の更新チャネル分離と段階配信

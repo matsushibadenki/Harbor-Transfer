@@ -868,6 +868,120 @@ input:disabled {
   line-height: 1.45;
 }
 
+.software-update-summary,
+.software-update-version {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--ht-text-secondary, #55716b);
+  font-size: 12px;
+}
+
+.software-update-summary strong,
+.software-update-version strong {
+  color: var(--ht-text-primary, #243b36);
+  font-variant-numeric: tabular-nums;
+}
+
+.software-update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.software-update-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 7px 0 0;
+  color: var(--ht-text-secondary, #55716b);
+  font-size: 11px;
+}
+
+.software-update-status.success,
+.software-update-ready {
+  color: var(--ht-accent-strong, #167a67);
+}
+
+.software-update-status.error {
+  color: #bd4d48;
+}
+
+.software-update-sheet {
+  display: flex;
+  width: min(520px, 100%);
+  max-height: calc(100dvh - 48px);
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.software-update-content {
+  min-height: 0;
+  overflow: auto;
+  padding: 5px 2px 8px;
+}
+
+.software-update-version {
+  padding: 12px 14px;
+  border: 1px solid var(--ht-rule, #dce7e4);
+  border-radius: 9px;
+  background: var(--ht-field, #f8fbfa);
+}
+
+.release-notes {
+  margin-top: 14px;
+}
+
+.release-notes h3 {
+  margin: 0 0 6px;
+  color: var(--ht-text-primary, #243b36);
+  font-size: 12px;
+}
+
+.release-notes p {
+  max-height: 180px;
+  overflow: auto;
+  margin: 0;
+  color: var(--ht-text-secondary, #55716b);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.update-progress {
+  display: grid;
+  gap: 7px;
+  margin-top: 16px;
+}
+
+.update-progress > div {
+  display: flex;
+  justify-content: space-between;
+  color: var(--ht-text-secondary, #55716b);
+  font-size: 12px;
+}
+
+.update-progress progress {
+  width: 100%;
+  height: 7px;
+  accent-color: var(--ht-accent, #1a8c76);
+}
+
+.software-update-ready {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 16px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.software-update-ready svg {
+  flex: none;
+}
+
 .editor-picker {
   display: grid;
   min-width: 0;

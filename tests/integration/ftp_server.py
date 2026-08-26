@@ -17,6 +17,7 @@ else:
     handler = FTPHandler
 
 handler.authorizer = authorizer
+handler.encoding = "utf-8"
 handler.masquerade_address = "127.0.0.1"
 handler.passive_ports = range(
     int(os.environ.get("PASV_MIN_PORT", "30000")),

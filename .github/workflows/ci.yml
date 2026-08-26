@@ -53,7 +53,7 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
       - run: pnpm install --frozen-lockfile
-      - run: pnpm tauri build --debug --bundles app
+      - run: pnpm tauri build --debug --bundles app --config src-tauri/tauri.ci.conf.json
       - uses: actions/upload-artifact@v6
         with:
           name: harbor-transfer-macos-debug

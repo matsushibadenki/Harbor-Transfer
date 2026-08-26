@@ -34,6 +34,8 @@ Configure these repository secrets under **Settings → Secrets and variables �
 | `APPLE_CERTIFICATE_PASSWORD` | Password chosen when exporting the `.p12` file |
 | `APPLE_ID` | Apple account email used for notarization |
 | `APPLE_PASSWORD` | Apple app-specific password, not the normal Apple account password |
+| `TAURI_SIGNING_PRIVATE_KEY` | Private key dedicated to signing updater archives |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the updater signing private key |
 
 Create the certificate in the Apple Developer portal using the **Developer ID Application** type. After importing the issued certificate into Keychain Access, export it together with its private key as a password-protected `.p12`. Encode it on macOS with:
 
@@ -41,11 +43,11 @@ Create the certificate in the Apple Developer portal using the **Developer ID Ap
 openssl base64 -A -in DeveloperIDApplication.p12
 ```
 
-Copy the output directly into `APPLE_CERTIFICATE`; never commit the `.p12`, its password, or the app-specific password. Once all secrets exist, open **Actions → Release macOS → Run workflow**. Version `0.1.0` is published as tag `v0.1.0`; increase both the Tauri and Cargo package versions before a later release.
+Copy the output directly into `APPLE_CERTIFICATE`; never commit the `.p12`, either private key, or any password. Once all secrets exist, open **Actions → Release macOS → Run workflow**. The workflow creates the signed universal application, DMG, updater archive and signature, plus `latest.json` for in-app update discovery. Increase the package, Tauri, and Cargo versions together before every release.
 
 ## Update delivery policy
 
-Until a signed update endpoint and offline recovery path are operated, releases are delivered as notarized DMGs from the project's GitHub Releases page. Do not enable an updater with placeholder keys or an unsigned feed. A future automatic updater must use a separate Tauri updater signing key, HTTPS, a staged channel, rollback instructions, and a manually downloadable DMG for recovery.
+Harbor Transfer checks the HTTPS `latest.json` published with the newest GitHub Release. The updater verifies every downloaded archive with the dedicated public key embedded in the application before installation. Keep the notarized DMG attached to every release as an offline recovery and manual-install path. Version `0.2.0` is the first updater-capable build, so users of `0.1.0` must install `0.2.0` manually once; later releases can update in-app.
 
 ## Crash diagnostics and privacy
 

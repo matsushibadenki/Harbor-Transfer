@@ -16,6 +16,8 @@ use tauri::Manager;
 pub fn run() {
     tracing_subscriber::fmt::init();
     tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_drag::init())
         .plugin(tauri_plugin_fs::init())

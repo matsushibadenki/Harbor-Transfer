@@ -1,7 +1,10 @@
 import { invoke } from '@tauri-apps/api/core';
+import { getVersion } from '@tauri-apps/api/app';
 import { startDrag } from '@crabnebula/tauri-plugin-drag';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
+import { relaunch } from '@tauri-apps/plugin-process';
+import { check, type DownloadEvent, type Update } from '@tauri-apps/plugin-updater';
 import { emitTo, listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { getCurrentWebviewWindow, WebviewWindow } from '@tauri-apps/api/webviewWindow';
@@ -22,7 +25,9 @@ type FileProgress = { transferId: string; transferredBytes: number; totalBytes: 
 type LocalPathInfo = { name: string; isDirectory: boolean };
 type TransferHistory = { id: string; name: string; direction: 'Upload' | 'Download'; status: 'Completed' | 'Failed' | 'Cancelled'; detail: string; bytes: number; completedAt: string };
 type Language = 'ja' | 'en' | 'zh-CN';
-type Preferences = { language: Language; theme: 'system' | 'light' | 'dark'; defaultProtocol: Protocol; conflictPolicy: 'ask' | 'overwrite' | 'skip'; confirmDelete: boolean; transferNotifications: boolean; editorPath: string };
+type Preferences = { language: Language; theme: 'system' | 'light' | 'dark'; defaultProtocol: Protocol; conflictPolicy: 'ask' | 'overwrite' | 'skip'; confirmDelete: boolean; transferNotifications: boolean; editorPath: string; autoCheckUpdates: boolean };
+type SoftwareUpdatePhase = 'idle' | 'checking' | 'current' | 'available' | 'downloading' | 'ready' | 'error';
+type SoftwareUpdateState = { phase: SoftwareUpdatePhase; currentVersion: string; version?: string; body?: string; downloadedBytes: number; totalBytes?: number; error?: string };
 type RemoteEdit = { editId: string; connectionId: string; name: string; remotePath: string; status: 'watching' | 'waiting' | 'failed'; detail?: string };
 type RemoteEditOpenResult = { editId: string; name: string; remotePath: string };
 type RemoteEditPollResult = { editId: string; remotePath: string; status: 'clean' | 'waiting' | 'uploaded'; bytes: number };
@@ -51,7 +56,7 @@ type RemoteClipboard = { connectionId: string; sourcePath: string; entry: FileEn
 type SelectedRemoteItem = { connectionId: string; remotePath: string; basePath: string; entry: FileEntry };
 type FileInformationTarget = { items: SelectedRemoteItem[]; focus: 'name' | 'metadata' };
 
-const defaultPreferences: Preferences = { language: 'ja', theme: 'system', defaultProtocol: 'sftp', conflictPolicy: 'ask', confirmDelete: true, transferNotifications: true, editorPath: '' };
+const defaultPreferences: Preferences = { language: 'ja', theme: 'system', defaultProtocol: 'sftp', conflictPolicy: 'ask', confirmDelete: true, transferNotifications: true, editorPath: '', autoCheckUpdates: true };
 function loadPreferences(): Preferences { try { return { ...defaultPreferences, ...JSON.parse(localStorage.getItem('harbor-transfer.preferences') ?? '{}') }; } catch { return defaultPreferences; } }
 const listColumnOrder: ColumnKey[] = ['name', 'size', 'modified', 'permissions', 'owner', 'group', 'type'];
 const optionalColumnOrder: OptionalColumnKey[] = ['size', 'modified', 'permissions', 'owner', 'group', 'type'];
@@ -101,6 +106,12 @@ const preferencesCopy = {
   ja: { title: '環境設定', detail: 'すべての接続に適用する共通設定です。', general: '一般', appearance: '外観', theme: 'カラーテーマ', system: 'システム設定', light: 'ライト', dark: 'ダーク', transfers: '転送', security: '安全性', editor: 'リモートファイルエディタ', editorDetail: 'キャッシュを開くアプリケーションです。保存を検知すると、同名のリモートファイルを自動的に上書きします。', chooseEditor: 'エディタを選択', clearEditor: '解除', noEditor: '選択されていません', language: '表示言語', defaultProtocol: '新規接続の既定プロトコル', conflictPolicy: '同名ファイルの既定動作', ask: '毎回確認', overwrite: '上書き', skip: 'スキップ', confirmDelete: '削除前に確認する', notifications: '転送結果を画面内に通知する', save: '保存' },
   en: { title: 'Preferences', detail: 'These settings apply to every connection.', general: 'General', appearance: 'Appearance', theme: 'Color theme', system: 'System', light: 'Light', dark: 'Dark', transfers: 'Transfers', security: 'Safety', editor: 'Remote File Editor', editorDetail: 'This application opens cached copies. Saving automatically overwrites the file at the same remote path.', chooseEditor: 'Choose Editor', clearEditor: 'Clear', noEditor: 'Not selected', language: 'Display language', defaultProtocol: 'Default protocol for new connections', conflictPolicy: 'Default duplicate-file action', ask: 'Ask every time', overwrite: 'Overwrite', skip: 'Skip', confirmDelete: 'Confirm before deleting', notifications: 'Show in-app transfer notifications', save: 'Save' },
   'zh-CN': { title: '偏好设置', detail: '这些设置适用于所有连接。', general: '通用', appearance: '外观', theme: '颜色主题', system: '跟随系统', light: '浅色', dark: '深色', transfers: '传输', security: '安全性', editor: '远程文件编辑器', editorDetail: '此应用用于打开缓存副本。保存后会自动覆盖同一路径下的远程文件。', chooseEditor: '选择编辑器', clearEditor: '清除', noEditor: '未选择', language: '显示语言', defaultProtocol: '新连接的默认协议', conflictPolicy: '同名文件的默认操作', ask: '每次询问', overwrite: '覆盖', skip: '跳过', confirmDelete: '删除前确认', notifications: '在应用内显示传输结果通知', save: '保存' },
+} as const;
+
+const softwareUpdateCopy = {
+  ja: { title: 'ソフトウェアアップデート', detail: '署名を検証したHarbor Transferの正式リリースだけをインストールします。', automatic: '起動時にアップデートを自動確認する', currentVersion: '現在のバージョン', check: 'アップデートを確認', checking: '確認しています…', current: '最新バージョンです', available: 'バージョン {{version}}を利用できます', details: '詳細を表示', download: 'ダウンロードしてインストール', downloading: 'ダウンロード中', ready: 'インストールが完了しました。再起動して適用してください。', restart: '再起動して更新', later: '後で', failed: 'アップデートを確認できませんでした', releaseNotes: 'リリースノート' },
+  en: { title: 'Software Update', detail: 'Only official Harbor Transfer releases with a valid update signature are installed.', automatic: 'Automatically check for updates at launch', currentVersion: 'Current version', check: 'Check for Updates', checking: 'Checking…', current: 'Harbor Transfer is up to date', available: 'Version {{version}} is available', details: 'Show Details', download: 'Download and Install', downloading: 'Downloading', ready: 'Installation is complete. Restart to apply the update.', restart: 'Restart and Update', later: 'Later', failed: 'Unable to check for updates', releaseNotes: 'Release Notes' },
+  'zh-CN': { title: '软件更新', detail: '仅安装通过更新签名验证的Harbor Transfer正式版本。', automatic: '启动时自动检查更新', currentVersion: '当前版本', check: '检查更新', checking: '正在检查…', current: 'Harbor Transfer已是最新版本', available: '版本{{version}}可用', details: '显示详情', download: '下载并安装', downloading: '正在下载', ready: '安装已完成。请重新启动以应用更新。', restart: '重新启动并更新', later: '稍后', failed: '无法检查更新', releaseNotes: '发行说明' },
 } as const;
 
 const accessibilityCopy = {
@@ -293,6 +304,8 @@ export default function App() {
   const [query, setQuery] = useState('');
   const [showConnect, setShowConnect] = useState(false);
   const [showPreferences, setShowPreferences] = useState(false);
+  const [showSoftwareUpdate, setShowSoftwareUpdate] = useState(false);
+  const [softwareUpdate, setSoftwareUpdate] = useState<SoftwareUpdateState>({ phase: 'idle', currentVersion: '', downloadedBytes: 0 });
   const [selectedKeyPath, setSelectedKeyPath] = useState('');
   const [connectingBookmark, setConnectingBookmark] = useState<Connection | null>(null);
   const [connectSheetMode, setConnectSheetMode] = useState<'connect' | 'edit'>('connect');
@@ -337,6 +350,8 @@ export default function App() {
   const [entryContextMenu, setEntryContextMenu] = useState<EntryContextMenu | null>(null);
   const [remoteClipboard, setRemoteClipboard] = useState<RemoteClipboard | null>(null);
   const [fileInformationTarget, setFileInformationTarget] = useState<FileInformationTarget | null>(null);
+  const availableUpdate = useRef<Update | null>(null);
+  const automaticUpdateCheckStarted = useRef(false);
   const remoteEditPolling = useRef<Set<string>>(new Set());
   const dragPreparationSequence = useRef(0);
   const dragExportRef = useRef<DragExport | null>(null);
@@ -374,6 +389,53 @@ export default function App() {
     const segments = path.split('/').filter(Boolean);
     return [{ label: '/', path: '/' }, ...segments.map((segment, index) => ({ label: segment, path: `/${segments.slice(0, index + 1).join('/')}` }))];
   }, [path]);
+
+  async function checkForSoftwareUpdate(manual: boolean) {
+    if (softwareUpdate.phase === 'checking' || softwareUpdate.phase === 'downloading') return;
+    const currentVersion = softwareUpdate.currentVersion || await getVersion();
+    setSoftwareUpdate({ phase: 'checking', currentVersion, downloadedBytes: 0 });
+    try {
+      const update = await check({ timeout: 15_000 });
+      if (!update) {
+        availableUpdate.current = null;
+        setSoftwareUpdate({ phase: 'current', currentVersion, downloadedBytes: 0 });
+        return;
+      }
+      availableUpdate.current = update;
+      setSoftwareUpdate({ phase: 'available', currentVersion, version: update.version, body: update.body, downloadedBytes: 0 });
+      setShowSoftwareUpdate(true);
+    } catch (reason) {
+      setSoftwareUpdate({ phase: 'error', currentVersion, downloadedBytes: 0, error: String(reason) });
+      if (!manual) console.warn('Automatic software update check failed', reason);
+    }
+  }
+
+  async function downloadAndInstallSoftwareUpdate() {
+    const update = availableUpdate.current;
+    if (!update || softwareUpdate.phase === 'downloading') return;
+    let downloadedBytes = 0;
+    let totalBytes: number | undefined;
+    setSoftwareUpdate((current) => ({ ...current, phase: 'downloading', downloadedBytes: 0, totalBytes: undefined, error: undefined }));
+    try {
+      const onDownload = (event: DownloadEvent) => {
+        if (event.event === 'Started') totalBytes = event.data.contentLength;
+        if (event.event === 'Progress') downloadedBytes += event.data.chunkLength;
+        setSoftwareUpdate((current) => ({ ...current, downloadedBytes, totalBytes }));
+      };
+      await update.downloadAndInstall(onDownload, { timeout: 120_000 });
+      setSoftwareUpdate((current) => ({ ...current, phase: 'ready', downloadedBytes, totalBytes }));
+    } catch (reason) {
+      setSoftwareUpdate((current) => ({ ...current, phase: 'error', error: String(reason) }));
+    }
+  }
+
+  useEffect(() => {
+    void getVersion().then((currentVersion) => setSoftwareUpdate((current) => ({ ...current, currentVersion })));
+    if (!preferences.autoCheckUpdates || automaticUpdateCheckStarted.current) return;
+    automaticUpdateCheckStarted.current = true;
+    const timeout = window.setTimeout(() => void checkForSoftwareUpdate(false), 1_500);
+    return () => window.clearTimeout(timeout);
+  }, [preferences.autoCheckUpdates]);
 
   useEffect(() => {
     void Promise.all([
@@ -1360,7 +1422,8 @@ export default function App() {
       setNotice(t.bookmarkSaved);
       setShowConnect(false);
     }} onConnected={(connection) => { setConnections((current) => [connection, ...current.filter((item) => item.id !== connection.id)]); void Promise.all([invoke('bookmark_save', { bookmark: connection }), invoke('connection_history_record', { bookmark: connection })]).then(() => invoke<ConnectionHistory[]>('connection_history_list')).then(setHistory).catch((reason) => setError(String(reason))); setActive(connection); setShowConnect(false); void navigateDirectory(connection, connection.initialPath, true); }} />}
-    {showPreferences && <PreferencesSheet value={preferences} language={language} t={t} onClose={() => setShowPreferences(false)} onSave={(next) => { setPreferences(next); setShowPreferences(false); }} />}
+    {showPreferences && <PreferencesSheet value={preferences} language={language} t={t} softwareUpdate={softwareUpdate} onCheckUpdate={() => void checkForSoftwareUpdate(true)} onShowUpdate={() => setShowSoftwareUpdate(true)} onClose={() => setShowPreferences(false)} onSave={(next) => { setPreferences(next); setShowPreferences(false); }} />}
+    {showSoftwareUpdate && <SoftwareUpdateSheet state={softwareUpdate} language={language} onClose={() => { if (softwareUpdate.phase !== 'downloading') setShowSoftwareUpdate(false); }} onInstall={() => void downloadAndInstallSoftwareUpdate()} onRestart={() => void relaunch()} />}
     {syncLocalDirectory && <SyncPreviewSheet preview={syncPreview} localDirectory={syncLocalDirectory} remoteDirectory={path} direction={syncDirection} comparison={syncComparison} busy={syncPreviewBusy} executionBusy={syncExecutionBusy} error={syncPreviewError} exclusions={syncExclusions} conflictChoices={syncConflictChoices} progress={syncExecutionProgress} result={syncExecutionResult} history={syncHistory} t={t} text={syncText} onClose={() => { if (syncExecutionBusy) return; setSyncLocalDirectory(''); setSyncPreview(null); }} onDirection={(direction) => { setSyncDirection(direction); setSyncExecutionResult(null); void calculateSyncPreview(syncLocalDirectory, direction); }} onComparison={(comparison) => { setSyncComparison(comparison); setSyncPreview(null); setSyncExecutionResult(null); void calculateSyncPreview(syncLocalDirectory, syncDirection, syncExclusions, comparison); }} onExclusions={(value) => { setSyncExclusions(value); setSyncPreview(null); setSyncExecutionResult(null); }} onConflict={(itemPath, choice) => setSyncConflictChoices((current) => ({ ...current, [itemPath]: choice }))} onRefresh={() => void calculateSyncPreview()} onExecute={() => void executeSync()} onCancelExecution={() => void cancelSyncExecution()} onClearHistory={() => void clearSyncHistory()} />}
   </main>;
 }
@@ -1526,9 +1589,26 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phas
   </form></div>;
 }
 
-function PreferencesSheet({ value, language, t, onClose, onSave }: { value: Preferences; language: Language; t: typeof copy[keyof typeof copy]; onClose: () => void; onSave: (preferences: Preferences) => void }) {
+function SoftwareUpdateSheet({ state, language, onClose, onInstall, onRestart }: { state: SoftwareUpdateState; language: Language; onClose: () => void; onInstall: () => void; onRestart: () => void }) {
+  const text = softwareUpdateCopy[language];
+  const progress = state.totalBytes ? Math.min(100, Math.round((state.downloadedBytes / state.totalBytes) * 100)) : undefined;
+  return <div className="modal-backdrop" role="presentation"><section className="connect-sheet software-update-sheet" role="dialog" aria-modal="true" aria-labelledby="software-update-title">
+    <div className="sheet-title"><div><h2 id="software-update-title">{text.title}</h2><p>{state.version ? text.available.replace('{{version}}', state.version) : text.detail}</p></div><button type="button" disabled={state.phase === 'downloading'} onClick={onClose}>×</button></div>
+    <div className="software-update-content">
+      <div className="software-update-version"><span>Harbor Transfer</span><strong>{state.currentVersion || '—'}{state.version ? ` → ${state.version}` : ''}</strong></div>
+      {state.body && <section className="release-notes"><h3>{text.releaseNotes}</h3><p>{state.body}</p></section>}
+      {state.phase === 'downloading' && <div className="update-progress" aria-live="polite"><div><span>{text.downloading}</span><strong>{progress === undefined ? formatBytes(state.downloadedBytes) : `${progress}%`}</strong></div>{state.totalBytes ? <progress value={state.downloadedBytes} max={state.totalBytes}/> : <progress/>}</div>}
+      {state.phase === 'ready' && <p className="software-update-ready"><Check size={18}/>{text.ready}</p>}
+      {state.phase === 'error' && <p className="form-error">{text.failed}<br/><small>{state.error}</small></p>}
+    </div>
+    <div className="form-actions"><button type="button" disabled={state.phase === 'downloading'} onClick={onClose}>{text.later}</button>{state.phase === 'ready' ? <button type="button" className="primary" onClick={onRestart}>{text.restart}</button> : <button type="button" className="primary" disabled={state.phase === 'downloading' || !state.version} onClick={onInstall}>{state.phase === 'downloading' ? <><LoaderCircle className="spinning" size={15}/>{text.downloading}</> : text.download}</button>}</div>
+  </section></div>;
+}
+
+function PreferencesSheet({ value, language, t, softwareUpdate, onCheckUpdate, onShowUpdate, onClose, onSave }: { value: Preferences; language: Language; t: typeof copy[keyof typeof copy]; softwareUpdate: SoftwareUpdateState; onCheckUpdate: () => void; onShowUpdate: () => void; onClose: () => void; onSave: (preferences: Preferences) => void }) {
   const [draft, setDraft] = useState(value);
   const text = preferencesCopy[language];
+  const updateText = softwareUpdateCopy[language];
   async function selectEditor() {
     const selected = await open({ multiple: false, directory: false, filters: [{ name: 'macOS Applications', extensions: ['app'] }] });
     if (selected && !Array.isArray(selected)) setDraft((current) => ({ ...current, editorPath: selected }));
@@ -1541,6 +1621,14 @@ function PreferencesSheet({ value, language, t, onClose, onSave }: { value: Pref
         <label>{text.defaultProtocol}<select value={draft.defaultProtocol} onChange={(event) => setDraft((current) => ({ ...current, defaultProtocol: event.target.value as Protocol }))}><option value="sftp">SFTP</option><option value="ftp">FTP</option><option value="ftps">Explicit FTPS</option><option value="webdav">WebDAV (HTTPS)</option><option value="s3">Amazon S3 / S3-compatible</option></select></label>
       </fieldset>
       <fieldset><legend>{text.appearance}</legend><label>{text.theme}<select value={draft.theme} onChange={(event) => setDraft((current) => ({ ...current, theme: event.target.value as Preferences['theme'] }))}><option value="system">{text.system}</option><option value="light">{text.light}</option><option value="dark">{text.dark}</option></select></label></fieldset>
+      <fieldset><legend>{updateText.title}</legend><p className="preferences-field-detail">{updateText.detail}</p>
+        <div className="software-update-summary"><span>{updateText.currentVersion}</span><strong>{softwareUpdate.currentVersion || '—'}</strong></div>
+        <label className="check-row"><input type="checkbox" checked={draft.autoCheckUpdates} onChange={(event) => setDraft((current) => ({ ...current, autoCheckUpdates: event.target.checked }))}/><span>{updateText.automatic}</span></label>
+        <div className="software-update-actions"><button type="button" disabled={softwareUpdate.phase === 'checking' || softwareUpdate.phase === 'downloading'} onClick={onCheckUpdate}>{softwareUpdate.phase === 'checking' ? <><LoaderCircle className="spinning" size={14}/>{updateText.checking}</> : updateText.check}</button>{(softwareUpdate.phase === 'available' || softwareUpdate.phase === 'downloading' || softwareUpdate.phase === 'ready') && <button type="button" className="primary" onClick={onShowUpdate}>{updateText.details}</button>}</div>
+        {softwareUpdate.phase === 'current' && <p className="software-update-status success"><Check size={14}/>{updateText.current}</p>}
+        {softwareUpdate.phase === 'available' && <p className="software-update-status">{updateText.available.replace('{{version}}', softwareUpdate.version ?? '')}</p>}
+        {softwareUpdate.phase === 'error' && <p className="software-update-status error" title={softwareUpdate.error}>{updateText.failed}</p>}
+      </fieldset>
       <fieldset><legend>{text.editor}</legend><p className="preferences-field-detail">{text.editorDetail}</p><div className="editor-picker"><input readOnly value={draft.editorPath} placeholder={text.noEditor}/><button type="button" onClick={() => void selectEditor()}>{text.chooseEditor}</button>{draft.editorPath && <button type="button" onClick={() => setDraft((current) => ({ ...current, editorPath: '' }))}>{text.clearEditor}</button>}</div></fieldset>
       <fieldset><legend>{text.transfers}</legend>
         <label>{text.conflictPolicy}<select value={draft.conflictPolicy} onChange={(event) => setDraft((current) => ({ ...current, conflictPolicy: event.target.value as Preferences['conflictPolicy'] }))}><option value="ask">{text.ask}</option><option value="overwrite">{text.overwrite}</option><option value="skip">{text.skip}</option></select></label>
