@@ -8,7 +8,7 @@ import { getCurrentWebviewWindow, WebviewWindow } from '@tauri-apps/api/webviewW
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowUpToLine, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Cloud, Columns3, Copy, File, FileCog, Folder, FolderPlus, Grid2X2, HardDrive,
-  ClipboardPaste, Download, FileArchive, FileAudio, FileCode2, FileDown, FileImage, FileJson, FileSpreadsheet, FileText, FileUp, FileVideo, FolderSync, FolderUp, KeyRound, Link2, List, LoaderCircle, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, RefreshCw, Scissors, Search, Settings, Trash2, Upload,
+  ClipboardPaste, Download, FileArchive, FileAudio, FileCode2, FileDown, FileImage, FileJson, FileSpreadsheet, FileText, FileUp, FileVideo, FolderSync, FolderUp, KeyRound, Link2, List, LoaderCircle, LockKeyhole, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, RefreshCw, Scissors, Search, Settings, Share2, Trash2, Upload,
 } from 'lucide-react';
 
 type Protocol = 'sftp' | 'ftp' | 'ftps' | 'webdav' | 's3';
@@ -16,7 +16,7 @@ type FileEntry = { name: string; size: number; modified?: string; permissions?: 
 type Connection = { id: string; name: string; protocol: Protocol; host: string; port: number; username: string; initialPath: string; keyPath?: string; hostKey?: string; localDirectory?: string; tags: string; s3Region?: string; s3Endpoint?: string; s3ForcePathStyle?: boolean; s3PreserveEmptyDirectories?: boolean };
 type ConnectionHistory = { bookmarkId: string; name: string; protocol: Protocol; host: string; port: number; username: string; connectedAt: string };
 type Transfer = { id: string; name: string; direction: 'Upload' | 'Download'; status: 'Running' | 'Completed' | 'Failed' | 'Cancelled'; detail: string; localPath?: string; remotePath?: string; connectionId?: string; transferredBytes?: number; totalBytes?: number; speed?: number; etaSeconds?: number };
-type SshKey = { name: string; path: string; publicKeyPath?: string; kind: string };
+type SshKey = { name: string; path: string; publicKeyPath?: string; pairedKeyPath?: string; keyType: 'private' | 'public'; kind: string };
 type DirectoryProgress = { transferId: string; completedFiles: number; totalFiles: number; currentPath: string; status: string };
 type FileProgress = { transferId: string; transferredBytes: number; totalBytes: number; elapsedMs: number; status: string };
 type LocalPathInfo = { name: string; isDirectory: boolean };
@@ -107,6 +107,12 @@ const accessibilityCopy = {
   ja: { back: '戻る', forward: '進む', parent: '親フォルダ', more: 'その他の操作' },
   en: { back: 'Back', forward: 'Forward', parent: 'Parent folder', more: 'More actions' },
   'zh-CN': { back: '后退', forward: '前进', parent: '上级文件夹', more: '更多操作' },
+} as const;
+
+const sshKeyCopy = {
+  ja: { privateKey: '秘密鍵', publicKey: '公開鍵', pairedPublic: '対応する公開鍵あり', pairedPrivate: '対応する秘密鍵あり', usePrivate: '接続に使用', publicInfo: '公開鍵は接続認証には選択できません', noKeys: '~/.ssh に利用可能なSSH鍵がありません。' },
+  en: { privateKey: 'Private key', publicKey: 'Public key', pairedPublic: 'Matching public key found', pairedPrivate: 'Matching private key found', usePrivate: 'Use for Connection', publicInfo: 'Public keys cannot be selected for connection authentication', noKeys: 'No SSH keys are available in ~/.ssh.' },
+  'zh-CN': { privateKey: '私钥', publicKey: '公钥', pairedPublic: '已找到对应的公钥', pairedPrivate: '已找到对应的私钥', usePrivate: '用于连接', publicInfo: '公钥不能用于连接身份验证', noKeys: '~/.ssh 中没有可用的SSH密钥。' },
 } as const;
 
 const remoteEditCopy = {
@@ -295,7 +301,7 @@ export default function App() {
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [directoryProgress, setDirectoryProgress] = useState<DirectoryProgress | null>(null);
   const [directoryPaused, setDirectoryPaused] = useState(false);
-  const [transferPanelCollapsed, setTransferPanelCollapsed] = useState(false);
+  const [transferPanelCollapsed, setTransferPanelCollapsed] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('harbor-transfer.sidebar-collapsed') === 'true');
   const [columnWidths, setColumnWidths] = useState<ColumnWidths>(loadColumnWidths);
   const [columnVisibility, setColumnVisibility] = useState<ColumnVisibility>(loadColumnVisibility);
@@ -337,6 +343,7 @@ export default function App() {
   const dragPreparingRef = useRef('');
   const dragSelectionTimer = useRef<number | null>(null);
   const selectionAnchor = useRef<{ basePath: string; index: number } | null>(null);
+  const transferPanelUserControlled = useRef(false);
   const browserZoneRef = useRef<HTMLElement | null>(null);
   const visibleColumns = useMemo(() => listColumnOrder.filter((column) => column === 'name' || columnVisibility[column]), [columnVisibility]);
   const filteredEntries = useMemo(() => {
@@ -362,6 +369,7 @@ export default function App() {
     };
     return entries.filter((entry) => entry.name.toLowerCase().includes(query.toLowerCase())).sort(compare);
   }, [entries, language, query, sortColumn, sortDirection]);
+  const hasActiveTransfer = transfers.some((item) => item.status === 'Running') || Boolean(dragPreparingPath) || Boolean(directoryProgress && directoryProgress.status !== 'completed' && directoryProgress.status !== 'cancelled' && directoryProgress.status !== 'failed');
   const breadcrumbs = useMemo(() => {
     const segments = path.split('/').filter(Boolean);
     return [{ label: '/', path: '/' }, ...segments.map((segment, index) => ({ label: segment, path: `/${segments.slice(0, index + 1).join('/')}` }))];
@@ -408,6 +416,15 @@ export default function App() {
     const timeout = window.setTimeout(() => setNotice(''), 4000);
     return () => window.clearTimeout(timeout);
   }, [notice]);
+
+  useEffect(() => {
+    if (!transferPanelUserControlled.current) setTransferPanelCollapsed(!hasActiveTransfer);
+  }, [hasActiveTransfer]);
+
+  function toggleTransferPanel() {
+    transferPanelUserControlled.current = true;
+    setTransferPanelCollapsed((current) => !current);
+  }
 
   useEffect(() => {
     localStorage.setItem('harbor-transfer.preferences', JSON.stringify(preferences));
@@ -975,8 +992,13 @@ export default function App() {
       return;
     }
     const remotePath = joinPath(basePath, entry.name);
-    if (remoteEdits.some((edit) => edit.connectionId === active.id && edit.remotePath === remotePath)) {
-      setNotice(`${editText.watching}: ${entry.name}`);
+    const existing = remoteEdits.find((edit) => edit.connectionId === active.id && edit.remotePath === remotePath);
+    if (existing) {
+      setNotice(`${editText.opening}: ${entry.name}`);
+      try {
+        await invoke('remote_edit_reopen', { editId: existing.editId, editorPath: preferences.editorPath });
+        setNotice(`${editText.watching}: ${entry.name}`);
+      } catch (reason) { setError(String(reason)); }
       return;
     }
     setNotice(`${editText.opening}: ${entry.name}`);
@@ -1242,14 +1264,14 @@ export default function App() {
             <div className="file-header" role="row" onContextMenu={openColumnVisibilityMenu}>
               {visibleColumns.map((column) => <ResizableColumnHeader key={column} label={columnLabel(column)} column={column} width={columnWidths[column]} resizeLabel={columnsText.resize} sorted={sortColumn === column} direction={sortDirection} onSort={sortByColumn} onStart={startColumnResize} onAdjust={adjustColumnWidth}/>)}<span className="actions-column-heading" role="columnheader" />
             </div>
-            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`file-row interactive ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="row" aria-selected={selected} tabIndex={0} draggable={entry.file_type !== 'Symlink'} onContextMenu={(event) => openEntryContext(event, entry)} onClick={(event) => scheduleRemoteDragPreparation(event, entry)} onKeyDown={(event) => { if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(event, entry); } if (event.key === 'Enter') { entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); } }} onDragStart={(event) => startRemoteDrag(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }}>
+            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`file-row interactive ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="row" aria-selected={selected} tabIndex={0} draggable={entry.file_type !== 'Symlink'} onContextMenu={(event) => openEntryContext(event, entry)} onClick={(event) => scheduleRemoteDragPreparation(event, entry)} onKeyDown={(event) => { if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(event, entry); } if (event.key === 'Enter') { event.preventDefault(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); } }} onDragStart={(event) => startRemoteDrag(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); }}>
               {visibleColumns.map((column) => <span className={`list-cell ${column}-column`} role="cell" key={column}>{renderListCell(entry, column)}</span>)}<button aria-label={menuText.information} title={menuText.information} onClick={(event) => openFileInformation(event, entry)}><MoreHorizontal size={18}/></button>
             </div>; })}
           </div>}
           {viewMode === 'icons' && <div className="icon-grid" role="grid">
             {filteredEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
             {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`icon-entry ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} role="gridcell" aria-selected={selected} key={entry.name} draggable={entry.file_type !== 'Symlink'} onContextMenu={(event) => openEntryContext(event, entry)} onDragStart={(event) => startRemoteDrag(event, entry)}>
-              <button className="icon-entry-main" title={entry.name} onClick={(event) => scheduleRemoteDragPreparation(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }} onKeyDown={(event) => { if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(event, entry); } if (event.key !== 'Enter') return; entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void downloadFile(entry); }}>
+              <button className="icon-entry-main" title={entry.name} onClick={(event) => scheduleRemoteDragPreparation(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); }} onKeyDown={(event) => { if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(event, entry); } if (event.key !== 'Enter') return; event.preventDefault(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); }}>
                 <RemoteEntryIcon entry={entry} className="entry-art" size={entry.file_type === 'Directory' ? 46 : 44}/>
                 <strong>{entry.name}</strong><small>{entry.file_type === 'Directory' ? entry.permissions ?? '—' : formatBytes(entry.size)}</small>
               </button>
@@ -1263,7 +1285,7 @@ export default function App() {
                 <div className="directory-column-title" title={level.path}>{level.path}</div>
                 {visibleLevelEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
                 {visibleLevelEntries.map((entry) => { const remotePath = joinPath(level.path, entry.name); const selectedForAction = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`column-entry ${level.selectedName === entry.name || selectedForAction ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="option" aria-selected={level.selectedName === entry.name || selectedForAction} draggable={entry.file_type !== 'Symlink'} onContextMenu={(event) => openEntryContext(event, entry, level.path)} onDragStart={(event) => startRemoteDrag(event, entry, level.path)}>
-                  <button className="column-entry-main" title={entry.name} onClick={(event) => { if (event.detail <= 1) { cancelScheduledDragPreparation(); selectRemoteEntry(event, entry, level.path, visibleLevelEntries); if (!event.metaKey && !event.ctrlKey && !event.shiftKey) void openColumnEntry(levelIndex, entry); } }} onDoubleClick={() => { cancelScheduledDragPreparation(); if (entry.file_type !== 'Directory') void downloadFile(entry, level.path); }}>
+                  <button className="column-entry-main" title={entry.name} onClick={(event) => { if (event.detail <= 1) { cancelScheduledDragPreparation(); selectRemoteEntry(event, entry, level.path, visibleLevelEntries); if (!event.metaKey && !event.ctrlKey && !event.shiftKey) void openColumnEntry(levelIndex, entry); } }} onDoubleClick={() => { cancelScheduledDragPreparation(); if (entry.file_type !== 'Directory') void editRemoteFile(entry, level.path); }} onKeyDown={(event) => { if (event.key !== 'Enter') return; event.preventDefault(); entry.file_type === 'Directory' ? void openColumnEntry(levelIndex, entry) : void editRemoteFile(entry, level.path); }}>
                     <RemoteEntryIcon entry={entry} size={entry.file_type === 'Directory' ? 17 : 16}/><span>{entry.name}</span>{entry.file_type === 'Directory' ? <ChevronRight size={14}/> : <small>{formatBytes(entry.size)}</small>}
                   </button>
                   <button className="column-entry-more" aria-label={menuText.information} title={menuText.information} onClick={(event) => openFileInformation(event, entry, level.path)}><MoreHorizontal size={15}/></button>
@@ -1281,7 +1303,7 @@ export default function App() {
       </section>
     </section>
     <section className={`transfer-panel ${transferPanelCollapsed ? 'collapsed' : ''}`}>
-      <div className="transfer-heading"><span>{t.status}</span><small>{transfers.filter((item) => item.status === 'Running').length + remoteEdits.length + (dragPreparingPath ? 1 : 0)} active</small><span className="transfer-heading-spacer"/>{transfers.some((item) => item.status !== 'Running') && <button className="icon-button" aria-label={queueText.clearTransferHistory} title={queueText.clearTransferHistory} onClick={() => void clearTransferHistory()}><Trash2 size={15}/></button>}<button className="icon-button" aria-label={transferPanelCollapsed ? queueText.expand : queueText.collapse} title={transferPanelCollapsed ? queueText.expand : queueText.collapse} aria-expanded={!transferPanelCollapsed} onClick={() => setTransferPanelCollapsed((current) => !current)}>{transferPanelCollapsed ? <ChevronUp size={17}/> : <ChevronDown size={17}/>}</button></div>
+      <div className="transfer-heading"><span>{t.status}</span><small>{transfers.filter((item) => item.status === 'Running').length + remoteEdits.length + (dragPreparingPath ? 1 : 0)} active</small><span className="transfer-heading-spacer"/>{transfers.some((item) => item.status !== 'Running') && <button className="icon-button" aria-label={queueText.clearTransferHistory} title={queueText.clearTransferHistory} onClick={() => void clearTransferHistory()}><Trash2 size={15}/></button>}<button className="icon-button" aria-label={transferPanelCollapsed ? queueText.expand : queueText.collapse} title={transferPanelCollapsed ? queueText.expand : queueText.collapse} aria-expanded={!transferPanelCollapsed} onClick={toggleTransferPanel}>{transferPanelCollapsed ? <ChevronUp size={17}/> : <ChevronDown size={17}/>}</button></div>
       <div className="transfer-list">
         {directoryProgress && directoryProgress.status !== 'completed' && <div className="directory-progress"><span>{directoryProgress.completedFiles} / {directoryProgress.totalFiles || '…'}</span><strong>{directoryProgress.currentPath}</strong><button onClick={() => void controlDirectoryTransfer(directoryPaused ? 'resume' : 'pause')}>{directoryPaused ? t.resume : t.pause}</button><button onClick={() => void controlDirectoryTransfer('cancel')}>{t.cancel}</button></div>}
         {dragPreparingPath && <div className="drag-export-progress"><LoaderCircle className="spinning" size={15}/><strong>{dragPreparingPath.split('/').pop()}</strong><span>{dragText.preparing}</span></div>}
@@ -1530,7 +1552,7 @@ function PreferencesSheet({ value, language, t, onClose, onSave }: { value: Pref
   </form></div>;
 }
 
-function KeyManager({ t, onClose, onUse }: { t: typeof copy[keyof typeof copy]; onClose: () => void; onUse: (keyPath: string) => void }) {
+function KeyManager({ t, text, onClose, onUse }: { t: typeof copy[keyof typeof copy]; text: typeof sshKeyCopy[keyof typeof sshKeyCopy]; onClose: () => void; onUse: (keyPath: string) => void }) {
   const [keys, setKeys] = useState<SshKey[]>([]);
   const [error, setError] = useState('');
   const [loaded, setLoaded] = useState(false);
@@ -1540,8 +1562,12 @@ function KeyManager({ t, onClose, onUse }: { t: typeof copy[keyof typeof copy]; 
     <div className="sheet-title"><div><h2>{t.keyManager}</h2><p>{t.keyHint}</p></div><button type="button" onClick={onClose}>×</button></div>
     {error && <p className="form-error">{error}</p>}
     <div className="key-list">
-      {loaded && keys.length === 0 && <p className="muted key-empty">{t.noKeys}</p>}
-      {keys.map((key) => <div className="key-row" key={key.path}><KeyRound size={19}/><div><strong>{key.name}</strong><small>{key.kind} · {key.path}</small>{key.publicKeyPath && <em>{t.pairedKey}</em>}</div><button className="primary" onClick={() => onUse(key.path)}>{t.useKey}</button></div>)}
+      {loaded && keys.length === 0 && <p className="muted key-empty">{text.noKeys}</p>}
+      {keys.map((key) => <div className={`key-row key-row-${key.keyType}`} key={key.path}>
+        <span className="key-type-icon" aria-hidden="true">{key.keyType === 'private' ? <LockKeyhole size={19}/> : <Share2 size={19}/>}</span>
+        <div><span className="key-name-line"><strong>{key.name}</strong><span className="key-type-badge">{key.keyType === 'private' ? text.privateKey : text.publicKey}</span></span><small>{key.kind}</small><small title={key.path}>{key.path}</small>{key.pairedKeyPath && <em>{key.keyType === 'private' ? text.pairedPublic : text.pairedPrivate}</em>}</div>
+        {key.keyType === 'private' ? <button className="primary" onClick={() => onUse(key.path)}>{text.usePrivate}</button> : <span className="public-key-note">{text.publicInfo}</span>}
+      </div>)}
     </div>
     <div className="form-actions"><button type="button" onClick={() => void load()}>{t.refresh}</button><button type="button" onClick={onClose}>{t.cancel}</button></div>
   </section>;
@@ -1550,10 +1576,11 @@ function KeyManager({ t, onClose, onUse }: { t: typeof copy[keyof typeof copy]; 
 export function SshKeyManagerWindow() {
   const preferences = loadPreferences();
   const t = copy[preferences.language];
+  const keyText = sshKeyCopy[preferences.language];
   async function closeWindow() { await getCurrentWebviewWindow().close(); }
   async function selectKey(keyPath: string) {
     await emitTo('main', 'ssh-key://selected', keyPath);
     await closeWindow();
   }
-  return <main className="key-manager-window"><KeyManager t={t} onClose={() => void closeWindow()} onUse={(keyPath) => void selectKey(keyPath)}/></main>;
+  return <main className="key-manager-window"><KeyManager t={t} text={keyText} onClose={() => void closeWindow()} onUse={(keyPath) => void selectKey(keyPath)}/></main>;
 }

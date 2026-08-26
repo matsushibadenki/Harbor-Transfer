@@ -57,6 +57,7 @@ pub fn run() {
             commands::remote_set_metadata,
             commands::remote_delete,
             commands::remote_edit_open,
+            commands::remote_edit_reopen,
             commands::remote_edit_poll,
             commands::remote_edit_close,
             commands::drag_export_prepare,

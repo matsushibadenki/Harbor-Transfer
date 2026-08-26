@@ -535,6 +535,25 @@ pub async fn remote_edit_open(
 }
 
 #[tauri::command]
+pub async fn remote_edit_reopen(
+    edit_id: String,
+    editor_path: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let cache_file = state
+        .remote_edits
+        .lock()
+        .await
+        .get(&edit_id)
+        .map(|session| session.cache_file.clone())
+        .ok_or("Edit session not found.")?;
+    // Validate that the watched cache has not been replaced with a symlink or
+    // another unsafe file type before handing it to an external application.
+    content_hash(&cache_file)?;
+    launch_editor(Path::new(&editor_path), &cache_file)
+}
+
+#[tauri::command]
 pub async fn remote_edit_poll(
     edit_id: String,
     state: State<'_, Arc<AppState>>,
@@ -1026,6 +1045,8 @@ pub struct SshKeySummary {
     pub name: String,
     pub path: String,
     pub public_key_path: Option<String>,
+    pub paired_key_path: Option<String>,
+    pub key_type: String,
     pub kind: String,
 }
 
@@ -1146,23 +1167,42 @@ pub async fn ssh_keys_list() -> Result<Vec<SshKeySummary>, String> {
             let name = entry.file_name().to_string_lossy().to_string();
             if !entry.file_type().ok()?.is_file()
                 || name.starts_with('.')
-                || name.ends_with(".pub")
                 || ignored_names.contains(&name.as_str())
             {
                 return None;
             }
+            let is_public = name.ends_with(".pub");
+            let private_name = name.strip_suffix(".pub").unwrap_or(&name);
+            let private_key_path = path.with_file_name(private_name);
             let public_key_path = path.with_file_name(format!("{name}.pub"));
             Some(SshKeySummary {
-                kind: if name.starts_with("id_") { "OpenSSH".to_string() } else { "SSH key".to_string() },
+                kind: if private_name.starts_with("id_") {
+                    "OpenSSH".to_string()
+                } else {
+                    "SSH key".to_string()
+                },
                 name,
                 path: path.to_string_lossy().to_string(),
-                public_key_path: public_key_path
-                    .is_file()
+                public_key_path: (!is_public && public_key_path.is_file())
                     .then(|| public_key_path.to_string_lossy().to_string()),
+                paired_key_path: if is_public && private_key_path.is_file() {
+                    Some(private_key_path.to_string_lossy().to_string())
+                } else if !is_public && public_key_path.is_file() {
+                    Some(public_key_path.to_string_lossy().to_string())
+                } else {
+                    None
+                },
+                key_type: if is_public { "public".to_string() } else { "private".to_string() },
             })
         })
         .collect::<Vec<_>>();
-    keys.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+    keys.sort_by(|left, right| {
+        left.name
+            .trim_end_matches(".pub")
+            .to_lowercase()
+            .cmp(&right.name.trim_end_matches(".pub").to_lowercase())
+            .then_with(|| left.key_type.cmp(&right.key_type))
+    });
     Ok(keys)
 }
 
