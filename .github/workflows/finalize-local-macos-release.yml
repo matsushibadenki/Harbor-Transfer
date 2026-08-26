@@ -60,6 +60,10 @@ jobs:
           gh release download "$RELEASE_TAG" --pattern '*.app.tar.gz' --dir release-assets
           ARCHIVE="$(find release-assets -maxdepth 1 -name '*.app.tar.gz' -type f -print -quit)"
           test -n "$ARCHIVE" || { echo "Updater archive is missing"; exit 1; }
+          if gzip -dc "$ARCHIVE" | strings | grep -E '(^|/)\._|(^|/)__MACOSX|LIBARCHIVE\.xattr|SCHILY\.xattr' >/dev/null; then
+            echo "Updater archive contains unsupported macOS metadata"
+            exit 1
+          fi
           pnpm tauri signer sign "$ARCHIVE"
           test -s "$ARCHIVE.sig"
 
