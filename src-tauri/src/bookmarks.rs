@@ -28,6 +28,12 @@ pub struct Bookmark {
     pub s3_force_path_style: bool,
     #[serde(default)]
     pub s3_preserve_empty_directories: bool,
+    #[serde(default)]
+    pub smb_share: Option<String>,
+    #[serde(default)]
+    pub smb_domain: Option<String>,
+    #[serde(default)]
+    pub smb_guest: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,6 +105,9 @@ impl BookmarkStore {
                     s3_endpoint TEXT,
                     s3_force_path_style INTEGER NOT NULL DEFAULT 0,
                     s3_preserve_empty_directories INTEGER NOT NULL DEFAULT 0,
+                    smb_share TEXT,
+                    smb_domain TEXT,
+                    smb_guest INTEGER NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE TABLE IF NOT EXISTS connection_history (
@@ -150,6 +159,10 @@ impl BookmarkStore {
                 "ALTER TABLE bookmarks ADD COLUMN s3_preserve_empty_directories INTEGER NOT NULL DEFAULT 0",
                 [],
             );
+            let _ = connection.execute("ALTER TABLE bookmarks ADD COLUMN smb_share TEXT", []);
+            let _ = connection.execute("ALTER TABLE bookmarks ADD COLUMN smb_domain TEXT", []);
+            let _ = connection
+                .execute("ALTER TABLE bookmarks ADD COLUMN smb_guest INTEGER NOT NULL DEFAULT 0", []);
             Ok(())
         })?;
         Ok(store)
@@ -167,7 +180,8 @@ impl BookmarkStore {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
                 "SELECT id, name, protocol, host, port, username, initial_path, key_path, key_passphrase_not_required, host_key, local_directory, tags,
-                        s3_region, s3_endpoint, s3_force_path_style, s3_preserve_empty_directories
+                        s3_region, s3_endpoint, s3_force_path_style, s3_preserve_empty_directories,
+                        smb_share, smb_domain, smb_guest
                  FROM bookmarks ORDER BY updated_at DESC, name COLLATE NOCASE",
             )?;
             let bookmarks = statement
@@ -189,6 +203,9 @@ impl BookmarkStore {
                         s3_endpoint: row.get(13)?,
                         s3_force_path_style: row.get(14)?,
                         s3_preserve_empty_directories: row.get(15)?,
+                        smb_share: row.get(16)?,
+                        smb_domain: row.get(17)?,
+                        smb_guest: row.get(18)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -199,8 +216,8 @@ impl BookmarkStore {
     pub fn save(&self, bookmark: &Bookmark) -> Result<(), String> {
         self.with_connection(|connection| {
             connection.execute(
-                "INSERT INTO bookmarks (id, name, protocol, host, port, username, initial_path, key_path, key_passphrase_not_required, host_key, local_directory, tags, s3_region, s3_endpoint, s3_force_path_style, s3_preserve_empty_directories, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, CURRENT_TIMESTAMP)
+                "INSERT INTO bookmarks (id, name, protocol, host, port, username, initial_path, key_path, key_passphrase_not_required, host_key, local_directory, tags, s3_region, s3_endpoint, s3_force_path_style, s3_preserve_empty_directories, smb_share, smb_domain, smb_guest, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, CURRENT_TIMESTAMP)
                  ON CONFLICT(id) DO UPDATE SET name=excluded.name, protocol=excluded.protocol,
                  host=excluded.host, port=excluded.port, username=excluded.username,
                  initial_path=excluded.initial_path, key_path=excluded.key_path,
@@ -209,12 +226,15 @@ impl BookmarkStore {
                  s3_region=excluded.s3_region, s3_endpoint=excluded.s3_endpoint,
                  s3_force_path_style=excluded.s3_force_path_style,
                  s3_preserve_empty_directories=excluded.s3_preserve_empty_directories,
+                 smb_share=excluded.smb_share, smb_domain=excluded.smb_domain,
+                 smb_guest=excluded.smb_guest,
                  updated_at=CURRENT_TIMESTAMP",
                 params![bookmark.id, bookmark.name, bookmark.protocol, bookmark.host, bookmark.port,
                     bookmark.username, bookmark.initial_path, bookmark.key_path,
                     bookmark.key_passphrase_not_required, bookmark.host_key, bookmark.local_directory,
                     bookmark.tags, bookmark.s3_region, bookmark.s3_endpoint,
-                    bookmark.s3_force_path_style, bookmark.s3_preserve_empty_directories],
+                    bookmark.s3_force_path_style, bookmark.s3_preserve_empty_directories,
+                    bookmark.smb_share, bookmark.smb_domain, bookmark.smb_guest],
             )?;
             Ok(())
         })
@@ -421,6 +441,9 @@ mod tests {
             s3_endpoint: None,
             s3_force_path_style: false,
             s3_preserve_empty_directories: false,
+            smb_share: None,
+            smb_domain: None,
+            smb_guest: false,
         }
     }
 
@@ -434,6 +457,10 @@ mod tests {
         bookmark.name = "Production".to_string();
         bookmark.key_passphrase_not_required = true;
         bookmark.s3_preserve_empty_directories = true;
+        bookmark.protocol = "smb".to_string();
+        bookmark.smb_share = Some("Documents".to_string());
+        bookmark.smb_domain = Some("WORKGROUP".to_string());
+        bookmark.smb_guest = true;
         store.save(&bookmark).expect("update bookmark");
         let bookmarks = store.list().expect("list bookmarks");
 
@@ -443,6 +470,9 @@ mod tests {
         assert_eq!(bookmarks[0].local_directory.as_deref(), Some("/Users/alice/Sites/example"));
         assert!(bookmarks[0].key_passphrase_not_required);
         assert!(bookmarks[0].s3_preserve_empty_directories);
+        assert_eq!(bookmarks[0].smb_share.as_deref(), Some("Documents"));
+        assert_eq!(bookmarks[0].smb_domain.as_deref(), Some("WORKGROUP"));
+        assert!(bookmarks[0].smb_guest);
     }
 
     #[test]

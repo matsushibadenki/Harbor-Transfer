@@ -2,6 +2,7 @@ use crate::bookmarks::{Bookmark, BookmarkStore, ConnectionHistory, SyncHistory, 
 use crate::ftp_client::{FtpClient, FtpConfig};
 use crate::remote_fs::RemoteFileSystem;
 use crate::s3_client::{S3Client, S3Config};
+use crate::samba_client::{SambaClient, SambaConfig};
 use crate::sftp_client::{FileEntry, SftpAuthMethod, SftpConfig, StandaloneSftpClient};
 use crate::ssh;
 use crate::sync::{
@@ -101,6 +102,7 @@ enum RemoteConnection {
     Ftp { client: FtpClient, protocol: Protocol },
     WebDav(WebDavClient),
     S3(S3Client),
+    Samba(Box<SambaClient>),
 }
 
 impl RemoteConnection {
@@ -110,6 +112,7 @@ impl RemoteConnection {
             Self::Ftp { client, .. } => client,
             Self::WebDav(client) => client,
             Self::S3(client) => client,
+            Self::Samba(client) => client.as_mut(),
         }
     }
 
@@ -119,6 +122,7 @@ impl RemoteConnection {
             Self::Ftp { protocol, .. } => *protocol,
             Self::WebDav(_) => Protocol::Webdav,
             Self::S3(_) => Protocol::S3,
+            Self::Samba(_) => Protocol::Smb,
         }
     }
 }
@@ -144,6 +148,10 @@ pub struct ConnectRequest {
     pub s3_force_path_style: bool,
     #[serde(default)]
     pub s3_preserve_empty_directories: bool,
+    pub smb_share: Option<String>,
+    pub smb_domain: Option<String>,
+    #[serde(default)]
+    pub smb_guest: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy)]
@@ -154,6 +162,7 @@ pub enum Protocol {
     Ftps,
     Webdav,
     S3,
+    Smb,
 }
 
 #[derive(Debug, Serialize)]
@@ -1147,6 +1156,20 @@ pub async fn connection_connect(
             .await
             .map_err(|error| error.to_string())?,
         ),
+        Protocol::Smb => RemoteConnection::Samba(Box::new(
+            SambaClient::connect(SambaConfig {
+                host: request.host,
+                port: request.port,
+                share: request.smb_share.ok_or("An SMB share name is required.")?,
+                username: request.username,
+                password: request.password.unwrap_or_default(),
+                domain: request.smb_domain.unwrap_or_default(),
+                guest: request.smb_guest,
+                probe_path: request.initial_path.unwrap_or_else(|| "/".to_string()),
+            })
+            .await
+            .map_err(|error| error.to_string())?,
+        )),
     };
 
     state.connections.lock().await.insert(request.connection_id.clone(), connection);
@@ -1754,6 +1777,31 @@ pub async fn transfer_upload(
                 })
                 .await
         }
+        RemoteConnection::Samba(client) => {
+            let event_app = app.clone();
+            let event_id = transfer_id.clone();
+            client
+                .upload_file_with_progress(&request.local_path, &request.remote_path, move |done, total| {
+                    let event_app = event_app.clone();
+                    let event_id = event_id.clone();
+                    let control = control.clone();
+                    async move {
+                        control.wait_until_running().await.map_err(anyhow::Error::msg)?;
+                        let _ = event_app.emit(
+                            "transfer://file-progress",
+                            FileTransferProgress {
+                                transfer_id: event_id,
+                                transferred_bytes: done,
+                                total_bytes: total,
+                                elapsed_ms: started.elapsed().as_millis() as u64,
+                                status: "running".to_string(),
+                            },
+                        );
+                        Ok(())
+                    }
+                })
+                .await
+        }
     };
     drop(connections);
     state.transfer_controls.lock().await.remove(&transfer_id);
@@ -1839,6 +1887,31 @@ pub async fn transfer_download(
                 })
                 .await
         }
+        RemoteConnection::Samba(client) => {
+            let event_app = app.clone();
+            let event_id = transfer_id.clone();
+            client
+                .download_file_with_progress(&request.remote_path, &request.local_path, move |done, total| {
+                    let event_app = event_app.clone();
+                    let event_id = event_id.clone();
+                    let control = control.clone();
+                    async move {
+                        control.wait_until_running().await.map_err(anyhow::Error::msg)?;
+                        let _ = event_app.emit(
+                            "transfer://file-progress",
+                            FileTransferProgress {
+                                transfer_id: event_id,
+                                transferred_bytes: done,
+                                total_bytes: total,
+                                elapsed_ms: started.elapsed().as_millis() as u64,
+                                status: "running".to_string(),
+                            },
+                        );
+                        Ok(())
+                    }
+                })
+                .await
+        }
     };
     drop(connections);
     state.transfer_controls.lock().await.remove(&transfer_id);
@@ -1894,6 +1967,15 @@ pub async fn transfer_upload_directory(
                 let local_path_string = local_path.to_string_lossy().to_string();
                 let upload_result = match connection {
                     RemoteConnection::S3(client) => {
+                        let file_control = control.clone();
+                        client
+                            .upload_file_with_progress(&local_path_string, &remote_path, move |_, _| {
+                                let file_control = file_control.clone();
+                                async move { file_control.wait_until_running().await.map_err(anyhow::Error::msg) }
+                            })
+                            .await
+                    }
+                    RemoteConnection::Samba(client) => {
                         let file_control = control.clone();
                         client
                             .upload_file_with_progress(&local_path_string, &remote_path, move |_, _| {

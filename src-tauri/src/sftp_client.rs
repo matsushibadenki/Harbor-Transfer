@@ -41,7 +41,18 @@ fn decode_private_key(
             .map_err(|error| anyhow::anyhow!("Failed to prepare PuTTY PPK key for SFTP: {}", error));
     }
 
-    russh_keys::decode_secret_key(key_content, passphrase).map_err(|error| {
+    let decoded = russh_keys::decode_secret_key(key_content, passphrase);
+    let decoded = match decoded {
+        Ok(key) => return Ok(key),
+        Err(error) if passphrase.is_some() && key_is_already_decrypted(&error.to_string()) => {
+            // A stale Keychain passphrase may still exist after the bookmark
+            // is changed to an unencrypted key. Such a key is valid and must
+            // be decoded without trying to decrypt it.
+            russh_keys::decode_secret_key(key_content, None)
+        }
+        Err(error) => Err(error),
+    };
+    decoded.map_err(|error| {
         let detail = error.to_string();
         let lower = detail.to_lowercase();
         if lower.contains("encrypted") || lower.contains("passphrase") || lower.contains("password") {
@@ -54,6 +65,10 @@ fn decode_private_key(
             )
         }
     })
+}
+
+fn key_is_already_decrypted(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("private key is already decrypted")
 }
 
 /// Configuration for a standalone SFTP connection (SSH transport, no PTY).
@@ -487,6 +502,22 @@ mod tests {
     use super::*;
 
     // ---- Helper function tests ----
+
+    #[test]
+    fn recognizes_an_already_decrypted_key_error() {
+        assert!(key_is_already_decrypted("SshKey: private key is already decrypted"));
+        assert!(!key_is_already_decrypted("incorrect passphrase"));
+    }
+
+    #[test]
+    fn unencrypted_key_ignores_a_stale_keychain_passphrase() {
+        let Ok(path) = std::env::var("SSH_TEST_UNENCRYPTED_KEY") else {
+            return;
+        };
+        let content = std::fs::read_to_string(path).expect("read unencrypted test key");
+        decode_private_key(&content, Some("stale-keychain-passphrase"), "test-key")
+            .expect("decode unencrypted key without applying stale passphrase");
+    }
 
     #[test]
     fn test_format_permissions_full() {

@@ -1,5 +1,6 @@
 use crate::ftp_client::FtpClient;
 use crate::s3_client::S3Client;
+use crate::samba_client::SambaClient;
 use crate::sftp_client::{FileEntry, StandaloneSftpClient};
 use crate::webdav_client::WebDavClient;
 use anyhow::Result;
@@ -175,5 +176,49 @@ impl RemoteFileSystem for S3Client {
     }
     async fn disconnect(&mut self) -> Result<()> {
         S3Client::disconnect(self).await
+    }
+}
+
+#[async_trait]
+impl RemoteFileSystem for SambaClient {
+    async fn list_dir(&mut self, path: &str) -> Result<Vec<FileEntry>> {
+        SambaClient::list_dir(self, path).await
+    }
+    async fn upload_file(&mut self, local_path: &str, remote_path: &str) -> Result<u64> {
+        SambaClient::upload_file(self, local_path, remote_path).await
+    }
+    async fn download_file(&mut self, remote_path: &str, local_path: &str) -> Result<u64> {
+        SambaClient::download_file(self, remote_path, local_path).await
+    }
+    async fn create_dir(&mut self, path: &str) -> Result<()> {
+        SambaClient::create_dir(self, path).await
+    }
+    async fn rename(&mut self, old_path: &str, new_path: &str) -> Result<()> {
+        SambaClient::rename(self, old_path, new_path).await
+    }
+    async fn set_metadata(
+        &mut self,
+        path: &str,
+        permissions: Option<u32>,
+        modified: Option<u32>,
+        owner_id: Option<u32>,
+        group_id: Option<u32>,
+    ) -> Result<()> {
+        if permissions.is_some() || owner_id.is_some() || group_id.is_some() {
+            anyhow::bail!("SMB does not provide portable POSIX ownership or permission changes.");
+        }
+        if let Some(modified) = modified {
+            SambaClient::set_modified_time(self, path, modified).await?;
+        }
+        Ok(())
+    }
+    async fn delete_file(&mut self, path: &str) -> Result<()> {
+        SambaClient::delete_file(self, path).await
+    }
+    async fn delete_dir(&mut self, path: &str) -> Result<()> {
+        SambaClient::delete_dir(self, path).await
+    }
+    async fn disconnect(&mut self) -> Result<()> {
+        SambaClient::disconnect(self).await
     }
 }

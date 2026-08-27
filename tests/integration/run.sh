@@ -71,3 +71,9 @@ compose up --wait s3
 
 S3_TEST_ENDPOINT=http://127.0.0.1:9000 S3_TEST_ACCESS_KEY=harboraccess S3_TEST_SECRET_KEY=harborsecret123 \
   cargo test --manifest-path "$project_dir/src-tauri/Cargo.toml" s3_client::tests::live_s3_ -- --test-threads=1
+
+compose stop s3
+compose up --wait samba
+
+SMB_TEST_HOST=127.0.0.1 SMB_TEST_PORT=1445 SMB_TEST_SHARE=Documents SMB_TEST_USER=harbor SMB_TEST_PASS=harbor \
+  cargo test --manifest-path "$project_dir/src-tauri/Cargo.toml" samba_client::tests::live_samba_ -- --test-threads=1

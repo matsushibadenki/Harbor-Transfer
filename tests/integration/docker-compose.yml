@@ -97,3 +97,16 @@ services:
       interval: 2s
       timeout: 2s
       retries: 30
+  samba:
+    image: dperson/samba:latest
+    command: '-u "harbor;harbor" -s "Documents;/share;yes;no;no;harbor" -s "ReadOnly;/readonly;yes;yes;no;harbor" -g "server min protocol = SMB2"'
+    ports:
+      - "1445:445"
+    tmpfs:
+      - /share
+      - /readonly
+    healthcheck:
+      test: ["CMD-SHELL", "smbclient -L //127.0.0.1 -U 'harbor%harbor' >/dev/null"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
