@@ -1,6 +1,10 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -87,6 +91,8 @@ impl BookmarkStore {
             .map_err(|error| format!("Failed to create app data directory: {error}"))?;
         let store = Self { database_path: data_directory.join("harbor-transfer.sqlite3") };
         store.with_connection(|connection| {
+            connection.pragma_update(None, "journal_mode", "WAL")?;
+            connection.pragma_update(None, "synchronous", "NORMAL")?;
             connection.execute_batch(
                 "CREATE TABLE IF NOT EXISTS bookmarks (
                     id TEXT PRIMARY KEY NOT NULL,
@@ -108,6 +114,7 @@ impl BookmarkStore {
                     smb_share TEXT,
                     smb_domain TEXT,
                     smb_guest INTEGER NOT NULL DEFAULT 0,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE TABLE IF NOT EXISTS connection_history (
@@ -163,6 +170,31 @@ impl BookmarkStore {
             let _ = connection.execute("ALTER TABLE bookmarks ADD COLUMN smb_domain TEXT", []);
             let _ = connection
                 .execute("ALTER TABLE bookmarks ADD COLUMN smb_guest INTEGER NOT NULL DEFAULT 0", []);
+            let has_sort_order = connection.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('bookmarks') WHERE name = 'sort_order'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )? > 0;
+            if !has_sort_order {
+                connection.execute("ALTER TABLE bookmarks ADD COLUMN sort_order INTEGER", [])?;
+            }
+            let missing_sort_order = connection.query_row(
+                "SELECT COUNT(*) FROM bookmarks WHERE sort_order IS NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )? > 0;
+            if missing_sort_order {
+                connection.execute_batch(
+                    "WITH ordered AS (
+                        SELECT id, ROW_NUMBER() OVER (
+                            ORDER BY updated_at DESC, name COLLATE NOCASE, id
+                        ) - 1 AS position
+                        FROM bookmarks
+                    )
+                    UPDATE bookmarks
+                    SET sort_order = (SELECT position FROM ordered WHERE ordered.id = bookmarks.id);",
+                )?;
+            }
             Ok(())
         })?;
         Ok(store)
@@ -170,10 +202,11 @@ impl BookmarkStore {
 
     fn with_connection<T>(
         &self,
-        operation: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+        operation: impl FnOnce(&mut Connection) -> rusqlite::Result<T>,
     ) -> Result<T, String> {
-        let connection = Connection::open(&self.database_path).map_err(|error| error.to_string())?;
-        operation(&connection).map_err(|error| error.to_string())
+        let mut connection = Connection::open(&self.database_path).map_err(|error| error.to_string())?;
+        connection.busy_timeout(DATABASE_BUSY_TIMEOUT).map_err(|error| error.to_string())?;
+        operation(&mut connection).map_err(|error| error.to_string())
     }
 
     pub fn list(&self) -> Result<Vec<Bookmark>, String> {
@@ -182,7 +215,7 @@ impl BookmarkStore {
                 "SELECT id, name, protocol, host, port, username, initial_path, key_path, key_passphrase_not_required, host_key, local_directory, tags,
                         s3_region, s3_endpoint, s3_force_path_style, s3_preserve_empty_directories,
                         smb_share, smb_domain, smb_guest
-                 FROM bookmarks ORDER BY updated_at DESC, name COLLATE NOCASE",
+                 FROM bookmarks ORDER BY sort_order ASC, name COLLATE NOCASE, id",
             )?;
             let bookmarks = statement
                 .query_map([], |row| {
@@ -215,9 +248,18 @@ impl BookmarkStore {
 
     pub fn save(&self, bookmark: &Bookmark) -> Result<(), String> {
         self.with_connection(|connection| {
-            connection.execute(
-                "INSERT INTO bookmarks (id, name, protocol, host, port, username, initial_path, key_path, key_passphrase_not_required, host_key, local_directory, tags, s3_region, s3_endpoint, s3_force_path_style, s3_preserve_empty_directories, smb_share, smb_domain, smb_guest, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, CURRENT_TIMESTAMP)
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let exists = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM bookmarks WHERE id = ?1)",
+                params![bookmark.id],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !exists {
+                transaction.execute("UPDATE bookmarks SET sort_order = sort_order + 1", [])?;
+            }
+            transaction.execute(
+                "INSERT INTO bookmarks (id, name, protocol, host, port, username, initial_path, key_path, key_passphrase_not_required, host_key, local_directory, tags, s3_region, s3_endpoint, s3_force_path_style, s3_preserve_empty_directories, smb_share, smb_domain, smb_guest, sort_order, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, 0, CURRENT_TIMESTAMP)
                  ON CONFLICT(id) DO UPDATE SET name=excluded.name, protocol=excluded.protocol,
                  host=excluded.host, port=excluded.port, username=excluded.username,
                  initial_path=excluded.initial_path, key_path=excluded.key_path,
@@ -236,13 +278,43 @@ impl BookmarkStore {
                     bookmark.s3_force_path_style, bookmark.s3_preserve_empty_directories,
                     bookmark.smb_share, bookmark.smb_domain, bookmark.smb_guest],
             )?;
+            transaction.commit()?;
+            Ok(())
+        })
+    }
+
+    pub fn reorder(&self, bookmark_ids: &[String]) -> Result<(), String> {
+        if bookmark_ids.len() > 10_000 {
+            return Err("Too many bookmarks to reorder.".to_string());
+        }
+        self.with_connection(|connection| {
+            let existing = connection
+                .prepare("SELECT id FROM bookmarks")?
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<HashSet<_>, _>>()?;
+            let requested = bookmark_ids.iter().cloned().collect::<HashSet<_>>();
+            if bookmark_ids.len() != existing.len() || requested != existing {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "Bookmark order must contain every bookmark exactly once.".to_string(),
+                ));
+            }
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            {
+                let mut statement =
+                    transaction.prepare("UPDATE bookmarks SET sort_order = ?1 WHERE id = ?2")?;
+                for (position, id) in bookmark_ids.iter().enumerate() {
+                    statement.execute(params![position as i64, id])?;
+                }
+            }
+            transaction.commit()?;
             Ok(())
         })
     }
 
     pub fn record_history(&self, bookmark: &Bookmark) -> Result<(), String> {
         self.with_connection(|connection| {
-            connection.execute(
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute(
                 "INSERT INTO connection_history (bookmark_id, name, protocol, host, port, username)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
@@ -254,11 +326,12 @@ impl BookmarkStore {
                     bookmark.username
                 ],
             )?;
-            connection.execute(
+            transaction.execute(
                 "DELETE FROM connection_history WHERE id NOT IN
                  (SELECT id FROM connection_history ORDER BY id DESC LIMIT 20)",
                 [],
             )?;
+            transaction.commit()?;
             Ok(())
         })
     }
@@ -295,7 +368,8 @@ impl BookmarkStore {
 
     pub fn record_transfer(&self, transfer: &TransferHistory) -> Result<(), String> {
         self.with_connection(|connection| {
-            connection.execute(
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute(
                 "INSERT INTO transfer_history (id, name, direction, status, detail, bytes, completed_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP)
                  ON CONFLICT(id) DO UPDATE SET status=excluded.status, detail=excluded.detail,
@@ -309,11 +383,12 @@ impl BookmarkStore {
                     transfer.bytes
                 ],
             )?;
-            connection.execute(
+            transaction.execute(
                 "DELETE FROM transfer_history WHERE id NOT IN
                  (SELECT id FROM transfer_history ORDER BY completed_at DESC LIMIT 100)",
                 [],
             )?;
+            transaction.commit()?;
             Ok(())
         })
     }
@@ -350,7 +425,8 @@ impl BookmarkStore {
 
     pub fn record_sync_history(&self, sync: &SyncHistory) -> Result<(), String> {
         self.with_connection(|connection| {
-            connection.execute(
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute(
                 "INSERT INTO sync_history (id, direction, local_directory, remote_directory, status, completed_items, total_items, bytes, detail, completed_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, CURRENT_TIMESTAMP)
                  ON CONFLICT(id) DO UPDATE SET status=excluded.status,
@@ -368,11 +444,12 @@ impl BookmarkStore {
                     sync.detail
                 ],
             )?;
-            connection.execute(
+            transaction.execute(
                 "DELETE FROM sync_history WHERE id NOT IN
                  (SELECT id FROM sync_history ORDER BY completed_at DESC LIMIT 50)",
                 [],
             )?;
+            transaction.commit()?;
             Ok(())
         })
     }
@@ -476,6 +553,75 @@ mod tests {
     }
 
     #[test]
+    fn reorders_bookmarks_and_keeps_the_order_when_editing() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = BookmarkStore::new(directory.path()).expect("bookmark store");
+        let mut first = sample_bookmark();
+        first.id = "bookmark-first".to_string();
+        first.name = "First".to_string();
+        store.save(&first).expect("save first bookmark");
+        let mut second = sample_bookmark();
+        second.id = "bookmark-second".to_string();
+        second.name = "Second".to_string();
+        store.save(&second).expect("save second bookmark");
+
+        assert_eq!(
+            store.list().expect("list newest first").iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+            vec!["bookmark-second", "bookmark-first"]
+        );
+        store.reorder(&[first.id.clone(), second.id.clone()]).expect("reorder bookmarks");
+        second.name = "Second edited".to_string();
+        store.save(&second).expect("edit reordered bookmark");
+
+        let ordered = store.list().expect("list reordered bookmarks");
+        assert_eq!(
+            ordered.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+            vec!["bookmark-first", "bookmark-second"]
+        );
+        assert_eq!(ordered[1].name, "Second edited");
+        assert!(store.reorder(&[first.id]).is_err());
+    }
+
+    #[test]
+    fn migrates_existing_bookmarks_in_their_previous_display_order() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database_path = directory.path().join("harbor-transfer.sqlite3");
+        {
+            let connection = rusqlite::Connection::open(&database_path).expect("legacy database");
+            connection
+                .execute_batch(
+                    "CREATE TABLE bookmarks (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        name TEXT NOT NULL,
+                        protocol TEXT NOT NULL,
+                        host TEXT NOT NULL,
+                        port INTEGER NOT NULL,
+                        username TEXT NOT NULL,
+                        initial_path TEXT NOT NULL DEFAULT '/',
+                        key_path TEXT,
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );
+                    INSERT INTO bookmarks (id, name, protocol, host, port, username, updated_at)
+                    VALUES
+                        ('older', 'Older', 'sftp', 'older.example.com', 22, 'alice', '2026-01-01 00:00:00'),
+                        ('newer', 'Newer', 'sftp', 'newer.example.com', 22, 'alice', '2026-02-01 00:00:00');",
+                )
+                .expect("create legacy bookmarks");
+        }
+
+        let store = BookmarkStore::new(directory.path()).expect("migrate bookmark store");
+        assert_eq!(
+            store
+                .list()
+                .expect("list migrated bookmarks")
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["newer", "older"]
+        );
+    }
+
+    #[test]
     fn deletes_a_bookmark() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let store = BookmarkStore::new(directory.path()).expect("bookmark store");
@@ -497,6 +643,26 @@ mod tests {
         assert_eq!(history[0].host, "example.com");
         store.clear_history().expect("clear history");
         assert!(store.history().expect("list cleared history").is_empty());
+    }
+
+    #[test]
+    fn waits_for_a_transient_database_writer_instead_of_returning_locked() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = BookmarkStore::new(directory.path()).expect("bookmark store");
+        let database_path = store.database_path.clone();
+        let lock_connection = rusqlite::Connection::open(&database_path).expect("lock connection");
+        lock_connection.execute_batch("BEGIN IMMEDIATE").expect("hold write lock");
+
+        let bookmark = sample_bookmark();
+        let writer = std::thread::spawn(move || {
+            let concurrent_store = BookmarkStore { database_path };
+            concurrent_store.save(&bookmark)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        lock_connection.execute_batch("COMMIT").expect("release write lock");
+
+        writer.join().expect("writer thread").expect("wait for write lock");
+        assert_eq!(store.list().expect("list bookmarks").len(), 1);
     }
 
     #[test]

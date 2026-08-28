@@ -15,7 +15,12 @@ compose() {
 }
 
 mkdir -p "$cert_dir"
-if [ ! -f "$cert_dir/ca.crt" ]; then
+if [ ! -f "$cert_dir/ca.crt" ] || \
+  [ ! -f "$cert_dir/ca.key" ] || \
+  [ ! -f "$cert_dir/server.crt" ] || \
+  [ ! -f "$cert_dir/server.key" ] || \
+  ! openssl x509 -checkend 86400 -noout -in "$cert_dir/ca.crt" >/dev/null 2>&1 || \
+  ! openssl x509 -checkend 86400 -noout -in "$cert_dir/server.crt" >/dev/null 2>&1; then
   openssl req -x509 -nodes -newkey rsa:2048 -sha256 -days 2 \
     -subj '/CN=Harbor Transfer Integration CA' \
     -addext 'basicConstraints=critical,CA:TRUE' \

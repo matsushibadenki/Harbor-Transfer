@@ -2569,17 +2569,19 @@ dependencies = [
 
 [[package]]
 name = "harbor-transfer"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-trait",
  "aws-config",
  "aws-credential-types",
  "aws-sdk-s3",
+ "base64 0.22.1",
  "futures-util",
  "keyring",
  "percent-encoding",
  "quick-xml 0.38.4",
+ "rand 0.8.7",
  "reqwest 0.12.28",
  "rusqlite",
  "russh",
@@ -2589,6 +2591,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "smb2",
  "ssh-key 0.7.0-rc.11",
  "suppaftp",

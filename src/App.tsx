@@ -12,11 +12,11 @@ import { getCurrentWebviewWindow, WebviewWindow } from '@tauri-apps/api/webviewW
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AppWindow, ArrowUpToLine, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Cloud, Columns3, Copy, File, FileCog, Folder, FolderPlus, Grid2X2, HardDrive,
-  ClipboardPaste, Download, FileArchive, FileAudio, FileCode2, FileDown, FileImage, FileJson, FileSpreadsheet, FileText, FileUp, FileVideo, FolderSync, FolderUp, KeyRound, Link2, List, LoaderCircle, LockKeyhole, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, RefreshCw, Scissors, Search, Settings, Share2, Trash2, Upload,
+  ClipboardPaste, Download, FileArchive, FileAudio, FileCode2, FileDown, FileImage, FileJson, FileSpreadsheet, FileText, FileUp, FileVideo, FolderSync, FolderUp, GripVertical, KeyRound, Link2, List, LoaderCircle, LockKeyhole, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Plus, RefreshCw, Scissors, Search, Settings, Share2, Trash2, Upload,
 } from 'lucide-react';
 
-type Protocol = 'sftp' | 'ftp' | 'ftps' | 'webdav' | 's3' | 'smb';
-type FileEntry = { name: string; size: number; modified?: string; permissions?: string; owner?: string; group?: string; file_type: 'File' | 'Directory' | 'Symlink' };
+type Protocol = 'sftp' | 'ftp' | 'ftps' | 'webdav' | 's3' | 'smb' | 'googleDrive';
+type FileEntry = { name: string; path_component?: string; download_name?: string; size: number; modified?: string; permissions?: string; owner?: string; group?: string; file_type: 'File' | 'Directory' | 'Symlink' };
 type Connection = { id: string; name: string; protocol: Protocol; host: string; port: number; username: string; initialPath: string; keyPath?: string; keyPassphraseNotRequired?: boolean; hostKey?: string; localDirectory?: string; tags: string; s3Region?: string; s3Endpoint?: string; s3ForcePathStyle?: boolean; s3PreserveEmptyDirectories?: boolean; smbShare?: string; smbDomain?: string; smbGuest?: boolean };
 type ConnectionHistory = { bookmarkId: string; name: string; protocol: Protocol; host: string; port: number; username: string; connectedAt: string };
 type Transfer = { id: string; name: string; direction: 'Upload' | 'Download'; status: 'Running' | 'Completed' | 'Failed' | 'Cancelled'; detail: string; localPath?: string; remotePath?: string; connectionId?: string; transferredBytes?: number; totalBytes?: number; speed?: number; etaSeconds?: number };
@@ -26,7 +26,8 @@ type FileProgress = { transferId: string; transferredBytes: number; totalBytes: 
 type LocalPathInfo = { name: string; isDirectory: boolean };
 type TransferHistory = { id: string; name: string; direction: 'Upload' | 'Download'; status: 'Completed' | 'Failed' | 'Cancelled'; detail: string; bytes: number; completedAt: string };
 type Language = 'ja' | 'en' | 'zh-CN';
-type Preferences = { language: Language; theme: 'system' | 'light' | 'dark'; fileNameFontSize: number; defaultProtocol: Protocol; conflictPolicy: 'ask' | 'overwrite' | 'skip'; confirmDelete: boolean; transferNotifications: boolean; editorPath: string; autoCheckUpdates: boolean };
+type Preferences = { language: Language; theme: 'system' | 'light' | 'dark'; fileNameFontSize: number; fileNameFontWeight: 'normal' | 'bold'; fileRowDensity: 'extraCompact' | 'compact' | 'standard' | 'comfortable'; showHiddenFiles: boolean; googleClientId: string; defaultProtocol: Protocol; conflictPolicy: 'ask' | 'overwrite' | 'skip'; confirmDelete: boolean; transferNotifications: boolean; editorPath: string; autoCheckUpdates: boolean };
+type GoogleAuthorizationStatus = { authorized: boolean; email?: string; clientMatches: boolean; credentialsReady: boolean };
 type SoftwareUpdatePhase = 'idle' | 'checking' | 'current' | 'available' | 'downloading' | 'ready' | 'error';
 type SoftwareUpdateState = { phase: SoftwareUpdatePhase; currentVersion: string; version?: string; body?: string; downloadedBytes: number; totalBytes?: number; error?: string };
 type RemoteEdit = { editId: string; connectionId: string; name: string; remotePath: string; status: 'watching' | 'waiting' | 'failed'; detail?: string };
@@ -57,6 +58,7 @@ type BrowserContextMenu = { x: number; y: number; basePath: string };
 type RemoteClipboard = { connectionId: string; sourcePath: string; entry: FileEntry; mode: 'cut' | 'copy' };
 type SelectedRemoteItem = { connectionId: string; remotePath: string; basePath: string; entry: FileEntry };
 type FileInformationTarget = { items: SelectedRemoteItem[]; focus: 'name' | 'metadata' };
+type InlineRenameTarget = { connectionId: string; remotePath: string; basePath: string; entry: FileEntry; value: string };
 type DropConflictChoice = 'cancel' | 'overwrite' | 'merge' | 'replace';
 type DropConflictPrompt = {
   name: string;
@@ -65,11 +67,12 @@ type DropConflictPrompt = {
   resolve: (choice: DropConflictChoice) => void;
 };
 
-const defaultPreferences: Preferences = { language: 'ja', theme: 'system', fileNameFontSize: 13, defaultProtocol: 'sftp', conflictPolicy: 'ask', confirmDelete: true, transferNotifications: true, editorPath: '', autoCheckUpdates: true };
+const defaultPreferences: Preferences = { language: 'ja', theme: 'system', fileNameFontSize: 13, fileNameFontWeight: 'normal', fileRowDensity: 'standard', showHiddenFiles: true, googleClientId: '', defaultProtocol: 'sftp', conflictPolicy: 'ask', confirmDelete: true, transferNotifications: true, editorPath: '', autoCheckUpdates: true };
 function loadPreferences(): Preferences {
   try {
     const saved = { ...defaultPreferences, ...JSON.parse(localStorage.getItem('harbor-transfer.preferences') ?? '{}') };
-    return { ...saved, fileNameFontSize: Math.min(20, Math.max(10, Number(saved.fileNameFontSize) || defaultPreferences.fileNameFontSize)) };
+    const fileRowDensity = saved.fileRowDensity === 'extraCompact' || saved.fileRowDensity === 'compact' || saved.fileRowDensity === 'comfortable' ? saved.fileRowDensity : 'standard';
+    return { ...saved, fileNameFontSize: Math.min(20, Math.max(10, Number(saved.fileNameFontSize) || defaultPreferences.fileNameFontSize)), fileNameFontWeight: saved.fileNameFontWeight === 'bold' ? 'bold' : 'normal', fileRowDensity, showHiddenFiles: typeof saved.showHiddenFiles === 'boolean' ? saved.showHiddenFiles : defaultPreferences.showHiddenFiles, googleClientId: typeof saved.googleClientId === 'string' ? saved.googleClientId.trim().slice(0, 512) : '' };
   } catch { return defaultPreferences; }
 }
 async function chooseEditorApplication(): Promise<string | null> {
@@ -79,9 +82,21 @@ async function chooseEditorApplication(): Promise<string | null> {
 const listColumnOrder: ColumnKey[] = ['name', 'size', 'modified', 'permissions', 'owner', 'group', 'type'];
 const optionalColumnOrder: OptionalColumnKey[] = ['size', 'modified', 'permissions', 'owner', 'group', 'type'];
 const minimumColumnWidths: ColumnWidths = { name: 160, size: 76, modified: 150, permissions: 104, owner: 90, group: 90, type: 84 };
+const maximumColumnWidths: ColumnWidths = { name: 1200, size: 240, modified: 360, permissions: 280, owner: 320, group: 320, type: 240 };
 const defaultColumnWidths: ColumnWidths = { name: 320, size: 76, modified: 150, permissions: 104, owner: 110, group: 110, type: 92 };
 const defaultColumnVisibility: ColumnVisibility = { size: true, modified: true, permissions: true, owner: false, group: false, type: false };
 const technicalInputProps = { autoCapitalize: 'none' as const, autoCorrect: 'off' as const, spellCheck: false };
+const fileDensityMetrics = {
+  extraCompact: { list: 30, column: 26, icon: 120 },
+  compact: { list: 36, column: 30, icon: 128 },
+  standard: { list: 44, column: 34, icon: 136 },
+  comfortable: { list: 52, column: 40, icon: 148 },
+} as const;
+const defaultSidebarWidth = 244;
+const minimumSidebarWidth = 180;
+const maximumSidebarWidth = 480;
+function clampSidebarWidth(width: number, viewportWidth = window.innerWidth) { return Math.min(Math.max(minimumSidebarWidth, Math.min(maximumSidebarWidth, viewportWidth - 520)), Math.max(minimumSidebarWidth, width)); }
+function loadSidebarWidth() { const saved = Number(localStorage.getItem('harbor-transfer.sidebar-width')); return clampSidebarWidth(Number.isFinite(saved) && saved > 0 ? saved : defaultSidebarWidth); }
 function loadColumnWidths(): ColumnWidths { try { return { ...defaultColumnWidths, ...JSON.parse(localStorage.getItem('harbor-transfer.column-widths-v2') ?? '{}') }; } catch { return defaultColumnWidths; } }
 function loadColumnVisibility(): ColumnVisibility { try { return { ...defaultColumnVisibility, ...JSON.parse(localStorage.getItem('harbor-transfer.column-visibility') ?? '{}') }; } catch { return defaultColumnVisibility; } }
 
@@ -127,6 +142,27 @@ const sambaCopy = {
   'zh-CN': { share: '共享名称', shareHint: '例如：Documents', domain: '工作组／域（可选）', domainHint: '例如：WORKGROUP', guest: '以访客身份连接', security: '使用SMB 2/3。密码不会写入书签，而是安全地存储在macOS钥匙串中。' },
 } as const;
 
+const googleDriveCopy = {
+  ja: {
+    tab: 'Google Drive', setupTitle: 'Google Cloudの準備', setupDetail: 'Harbor Transfer側では共通のGCPプロジェクトを使用しません。ご自身のGoogle Cloudプロジェクトでデスクトップアプリ用OAuth Client IDを作成してください。',
+    developers: 'Google Developersを開く', project: '1. プロジェクトを作成', api: '2. Google Drive APIを有効化', consent: '3. Google Auth Platformを設定', client: '4. OAuth Client IDを作成',
+    stepProject: 'Google Cloud Consoleで新しいプロジェクトを作成します。', stepApi: 'APIライブラリからGoogle Drive APIを有効にします。', stepConsent: 'Google Auth Platformでアプリ名、サポートメール、対象ユーザーを設定し、スコープにGoogle Drive APIを追加します。Externalのテスト運用では自分のGoogleアカウントをテストユーザーに追加してください。', stepClient: 'Clientsから「デスクトップアプリ」を選んでOAuth Client IDを作成します。Webアプリではありません。', stepPaste: 'Google CloudからDesktop Clientのcredentials.jsonを読み込み、Googleアカウントを認証します。Client SecretはKeychainだけに保存します。',
+    clientId: 'OAuth Client ID', clientIdHint: '123456789-xxxxx.apps.googleusercontent.com', importCredentials: 'credentials.jsonを読み込む', credentialsReady: 'Client SecretはKeychainに保存されています', credentialsMissing: 'Desktop Clientのcredentials.jsonを読み込んでください。', scopeWarning: 'ファイル一覧・転送・同期にはGoogle Drive全体へのアクセス権を使用します。認証画面でアクセス内容を確認してください。', authorize: 'Googleアカウントを認証', authorizing: 'ブラウザでGoogle認証を完了してください…', disconnect: '認証を解除', connected: '認証済み', notConnected: '未認証', mismatch: '保存済み認証は別のClient ID用です。現在のClient IDで再認証してください。', invalidClientId: 'デスクトップアプリ用OAuth Client IDを入力してください。', connectHint: '先に環境設定のGoogle Driveでcredentials.jsonを読み込み、Googleアカウントを認証してください。', revokeConfirm: 'Keychainに保存したGoogle Drive認証情報を削除しますか？', authFailed: 'Google認証に失敗しました。', openFailed: 'Googleの設定ページを開けませんでした。', nativeExportUnsupported: 'Googleドキュメント形式の書き出しは今後の実装で対応します。'
+  },
+  en: {
+    tab: 'Google Drive', setupTitle: 'Prepare Google Cloud', setupDetail: 'Harbor Transfer does not use a shared GCP project. Create a Desktop OAuth Client ID in your own Google Cloud project.',
+    developers: 'Open Google Developers', project: '1. Create a project', api: '2. Enable Google Drive API', consent: '3. Configure Google Auth Platform', client: '4. Create an OAuth Client ID',
+    stepProject: 'Create a new project in Google Cloud Console.', stepApi: 'Enable Google Drive API from the API Library.', stepConsent: 'Configure the app name, support email, audience, and Google Drive scope in Google Auth Platform. For External testing, add your Google Account as a test user.', stepClient: 'In Clients, create an OAuth Client ID with application type “Desktop app,” not Web application.', stepPaste: 'Import the Desktop Client credentials.json from Google Cloud, then authorize your Google Account. The Client Secret is stored only in Keychain.',
+    clientId: 'OAuth Client ID', clientIdHint: '123456789-xxxxx.apps.googleusercontent.com', importCredentials: 'Import credentials.json', credentialsReady: 'Client Secret is stored in Keychain', credentialsMissing: 'Import the Desktop Client credentials.json.', scopeWarning: 'Browsing, transfers, and sync require access to your entire Google Drive. Review the requested access on Google’s consent screen.', authorize: 'Authorize Google Account', authorizing: 'Complete Google authorization in your browser…', disconnect: 'Remove authorization', connected: 'Authorized', notConnected: 'Not authorized', mismatch: 'The saved authorization belongs to another Client ID. Authorize the current Client ID again.', invalidClientId: 'Enter a Desktop OAuth Client ID.', connectHint: 'Import credentials.json and authorize Google Drive in Preferences before connecting.', revokeConfirm: 'Remove the Google Drive authorization stored in Keychain?', authFailed: 'Google authorization failed.', openFailed: 'Could not open the Google setup page.', nativeExportUnsupported: 'Exporting native Google document formats will be added separately.'
+  },
+  'zh-CN': {
+    tab: 'Google 云端硬盘', setupTitle: '准备 Google Cloud', setupDetail: 'Harbor Transfer 不使用共享的GCP项目。请在您自己的Google Cloud项目中创建桌面应用OAuth客户端ID。',
+    developers: '打开 Google Developers', project: '1. 创建项目', api: '2. 启用 Google Drive API', consent: '3. 配置 Google Auth Platform', client: '4. 创建 OAuth 客户端ID',
+    stepProject: '在Google Cloud Console中创建新项目。', stepApi: '从API库启用Google Drive API。', stepConsent: '在Google Auth Platform中设置应用名称、支持邮箱、目标用户和Google Drive权限范围。使用外部测试时，请将自己的Google账号添加为测试用户。', stepClient: '在客户端页面创建应用类型为“桌面应用”的OAuth客户端ID，不要选择Web应用。', stepPaste: '从Google Cloud导入桌面客户端credentials.json，然后授权Google账号。Client Secret仅存储在钥匙串中。',
+    clientId: 'OAuth 客户端ID', clientIdHint: '123456789-xxxxx.apps.googleusercontent.com', importCredentials: '导入 credentials.json', credentialsReady: 'Client Secret已存储在钥匙串中', credentialsMissing: '请导入桌面客户端credentials.json。', scopeWarning: '浏览、传输和同步需要访问整个Google云端硬盘。请在Google授权页面确认访问权限。', authorize: '授权 Google 账号', authorizing: '请在浏览器中完成Google授权…', disconnect: '移除授权', connected: '已授权', notConnected: '未授权', mismatch: '保存的授权属于另一个客户端ID。请使用当前客户端ID重新授权。', invalidClientId: '请输入桌面应用OAuth客户端ID。', connectHint: '请先在偏好设置中导入credentials.json并完成Google授权。', revokeConfirm: '要删除存储在钥匙串中的Google云端硬盘授权信息吗？', authFailed: 'Google授权失败。', openFailed: '无法打开Google设置页面。', nativeExportUnsupported: '原生Google文档格式的导出将在后续实现。'
+  },
+} as const;
+
 const phaseTwoCopy = {
   ja: { conflict: '同名の項目があります。「上書き」「スキップ」「別名」のいずれかを入力してください。', overwrite: '上書き', skip: 'スキップ', rename: '別名', action: '操作を入力してください: edit / download / rename / delete', renameTo: '新しい名前', deleteConfirm: 'この項目を削除しますか？', drop: 'ここにファイルやフォルダをドロップ', speed: '速度', eta: '残り', completed: '転送が完了しました', failed: '転送に失敗しました', cancelled: '転送を取り消しました' },
   en: { conflict: 'An item with this name exists. Enter overwrite, skip, or rename.', overwrite: 'overwrite', skip: 'skip', rename: 'rename', action: 'Enter action: edit / download / rename / delete', renameTo: 'New name', deleteConfirm: 'Delete this item?', drop: 'Drop files or folders here', speed: 'Speed', eta: 'ETA', completed: 'Transfer completed', failed: 'Transfer failed', cancelled: 'Transfer cancelled' },
@@ -155,9 +191,9 @@ const browserContextMenuCopy = {
 } as const;
 
 const preferencesCopy = {
-  ja: { title: '環境設定', detail: 'すべての接続に適用する共通設定です。', general: '一般', appearance: 'アピアランス', theme: 'カラーテーマ', system: 'システム設定', light: 'ライト', dark: 'ダーク', fileNameSize: 'ファイル名の文字サイズ', fileNameSizeDetail: 'リスト、アイコン、カラム表示のファイル名に適用されます。', fileNamePreview: 'ファイル名の表示サンプル.txt', transfers: '転送', security: '安全性', updates: 'アップデート', editorTab: 'エディタ', editor: 'リモートファイルエディタ', editorDetail: 'キャッシュを開くアプリケーションです。保存を検知すると、同名のリモートファイルを自動的に上書きします。', chooseEditor: 'エディタを選択', clearEditor: '解除', noEditor: '選択されていません', language: '表示言語', defaultProtocol: '新規接続の既定プロトコル', conflictPolicy: '同名ファイルの既定動作', ask: '毎回確認', overwrite: '上書き', skip: 'スキップ', confirmDelete: '削除前に確認する', notifications: '転送結果を画面内に通知する', save: '保存' },
-  en: { title: 'Preferences', detail: 'These settings apply to every connection.', general: 'General', appearance: 'Appearance', theme: 'Color theme', system: 'System', light: 'Light', dark: 'Dark', fileNameSize: 'File name text size', fileNameSizeDetail: 'Applied to file names in list, icon, and column views.', fileNamePreview: 'File name preview.txt', transfers: 'Transfers', security: 'Safety', updates: 'Updates', editorTab: 'Editor', editor: 'Remote File Editor', editorDetail: 'This application opens cached copies. Saving automatically overwrites the file at the same remote path.', chooseEditor: 'Choose Editor', clearEditor: 'Clear', noEditor: 'Not selected', language: 'Display language', defaultProtocol: 'Default protocol for new connections', conflictPolicy: 'Default duplicate-file action', ask: 'Ask every time', overwrite: 'Overwrite', skip: 'Skip', confirmDelete: 'Confirm before deleting', notifications: 'Show in-app transfer notifications', save: 'Save' },
-  'zh-CN': { title: '偏好设置', detail: '这些设置适用于所有连接。', general: '通用', appearance: '外观', theme: '颜色主题', system: '跟随系统', light: '浅色', dark: '深色', fileNameSize: '文件名文字大小', fileNameSizeDetail: '应用于列表、图标和分栏视图中的文件名。', fileNamePreview: '文件名显示示例.txt', transfers: '传输', security: '安全性', updates: '软件更新', editorTab: '编辑器', editor: '远程文件编辑器', editorDetail: '此应用用于打开缓存副本。保存后会自动覆盖同一路径下的远程文件。', chooseEditor: '选择编辑器', clearEditor: '清除', noEditor: '未选择', language: '显示语言', defaultProtocol: '新连接的默认协议', conflictPolicy: '同名文件的默认操作', ask: '每次询问', overwrite: '覆盖', skip: '跳过', confirmDelete: '删除前确认', notifications: '在应用内显示传输结果通知', save: '保存' },
+  ja: { title: '環境設定', detail: 'すべての接続に適用する共通設定です。', general: '一般', appearance: 'アピアランス', theme: 'カラーテーマ', system: 'システム設定', light: 'ライト', dark: 'ダーク', showHiddenFiles: '不可視ファイルを表示', showHiddenFilesDetail: '名前が「.」から始まるファイルとフォルダを表示します。', fileNameWeight: 'ファイル名の太さ', normal: '標準', bold: 'ボールド', fileRowDensity: 'ファイル表示の行間', extraCompact: '最小', compact: '狭い', standard: '標準', comfortable: '広い', fileNameSize: 'ファイル名の文字サイズ', fileNameSizeDetail: 'リスト、アイコン、カラム表示のファイル名に適用されます。', fileNamePreview: 'ファイル名の表示サンプル.txt', transfers: '転送', security: '安全性', updates: 'アップデート', editorTab: 'エディタ', editor: 'リモートファイルエディタ', editorDetail: 'キャッシュを開くアプリケーションです。保存を検知すると、同名のリモートファイルを自動的に上書きします。', chooseEditor: 'エディタを選択', clearEditor: '解除', noEditor: '選択されていません', language: '表示言語', defaultProtocol: '新規接続の既定プロトコル', conflictPolicy: '同名ファイルの既定動作', ask: '毎回確認', overwrite: '上書き', skip: 'スキップ', confirmDelete: '削除前に確認する', notifications: '転送結果を画面内に通知する', save: '保存' },
+  en: { title: 'Preferences', detail: 'These settings apply to every connection.', general: 'General', appearance: 'Appearance', theme: 'Color theme', system: 'System', light: 'Light', dark: 'Dark', showHiddenFiles: 'Show hidden files', showHiddenFilesDetail: 'Shows files and folders whose names begin with a period.', fileNameWeight: 'File name weight', normal: 'Regular', bold: 'Bold', fileRowDensity: 'File display spacing', extraCompact: 'Extra Compact', compact: 'Compact', standard: 'Standard', comfortable: 'Comfortable', fileNameSize: 'File name text size', fileNameSizeDetail: 'Applied to file names in list, icon, and column views.', fileNamePreview: 'File name preview.txt', transfers: 'Transfers', security: 'Safety', updates: 'Updates', editorTab: 'Editor', editor: 'Remote File Editor', editorDetail: 'This application opens cached copies. Saving automatically overwrites the file at the same remote path.', chooseEditor: 'Choose Editor', clearEditor: 'Clear', noEditor: 'Not selected', language: 'Display language', defaultProtocol: 'Default protocol for new connections', conflictPolicy: 'Default duplicate-file action', ask: 'Ask every time', overwrite: 'Overwrite', skip: 'Skip', confirmDelete: 'Confirm before deleting', notifications: 'Show in-app transfer notifications', save: 'Save' },
+  'zh-CN': { title: '偏好设置', detail: '这些设置适用于所有连接。', general: '通用', appearance: '外观', theme: '颜色主题', system: '跟随系统', light: '浅色', dark: '深色', showHiddenFiles: '显示隐藏文件', showHiddenFilesDetail: '显示名称以“.”开头的文件和文件夹。', fileNameWeight: '文件名字重', normal: '常规', bold: '粗体', fileRowDensity: '文件显示行距', extraCompact: '最紧凑', compact: '紧凑', standard: '标准', comfortable: '宽松', fileNameSize: '文件名文字大小', fileNameSizeDetail: '应用于列表、图标和分栏视图中的文件名。', fileNamePreview: '文件名显示示例.txt', transfers: '传输', security: '安全性', updates: '软件更新', editorTab: '编辑器', editor: '远程文件编辑器', editorDetail: '此应用用于打开缓存副本。保存后会自动覆盖同一路径下的远程文件。', chooseEditor: '选择编辑器', clearEditor: '清除', noEditor: '未选择', language: '显示语言', defaultProtocol: '新连接的默认协议', conflictPolicy: '同名文件的默认操作', ask: '每次询问', overwrite: '覆盖', skip: '跳过', confirmDelete: '删除前确认', notifications: '在应用内显示传输结果通知', save: '保存' },
 } as const;
 
 const softwareUpdateCopy = {
@@ -190,10 +226,16 @@ const dragOutCopy = {
   'zh-CN': { preparing: '正在准备拖放文件', ready: '可以拖到访达', retry: '文件仍在准备中。完成后请再次拖动。', copied: '文件已复制到访达', cancelled: '已取消文件拖动' },
 } as const;
 
+const bookmarkOrderCopy = {
+  ja: { handle: '「{{name}}」の順番を変更', hint: 'ドラッグ、または上下矢印キーで順番を変更', filtered: '「すべて」を選択すると順番を変更できます', saved: 'ブックマークの順番を保存しました' },
+  en: { handle: 'Reorder “{{name}}”', hint: 'Drag or use the Up and Down Arrow keys to reorder', filtered: 'Select All to reorder bookmarks', saved: 'Bookmark order saved' },
+  'zh-CN': { handle: '调整“{{name}}”的顺序', hint: '拖动或使用上下方向键调整顺序', filtered: '选择“全部”后可调整书签顺序', saved: '已保存书签顺序' },
+} as const;
+
 const queueCopy = {
-  ja: { collapse: '転送キューを折りたたむ', expand: '転送キューを展開', hideSidebar: 'サイドメニューを隠す', showSidebar: 'サイドメニューを表示', clearConnectionHistory: '接続履歴を削除', clearTransferHistory: '完了・失敗した転送履歴を削除', confirmConnection: '接続履歴をすべて削除しますか？', confirmTransfer: '完了・失敗・取消済みの転送履歴をすべて削除しますか？' },
-  en: { collapse: 'Collapse transfer queue', expand: 'Expand transfer queue', hideSidebar: 'Hide sidebar', showSidebar: 'Show sidebar', clearConnectionHistory: 'Clear connection history', clearTransferHistory: 'Clear completed and failed transfers', confirmConnection: 'Clear all connection history?', confirmTransfer: 'Clear all completed, failed, and cancelled transfer history?' },
-  'zh-CN': { collapse: '折叠传输队列', expand: '展开传输队列', hideSidebar: '隐藏侧边栏', showSidebar: '显示侧边栏', clearConnectionHistory: '清除连接历史记录', clearTransferHistory: '清除已完成和失败的传输', confirmConnection: '清除所有连接历史记录吗？', confirmTransfer: '清除所有已完成、失败和取消的传输历史记录吗？' },
+  ja: { collapse: '転送キューを折りたたむ', expand: '転送キューを展開', hideSidebar: 'サイドメニューを隠す', showSidebar: 'サイドメニューを表示', resizeSidebar: 'サイドメニューの幅を変更', clearConnectionHistory: '接続履歴を削除', clearTransferHistory: '完了・失敗した転送履歴を削除', confirmConnection: '接続履歴をすべて削除しますか？', confirmTransfer: '完了・失敗・取消済みの転送履歴をすべて削除しますか？' },
+  en: { collapse: 'Collapse transfer queue', expand: 'Expand transfer queue', hideSidebar: 'Hide sidebar', showSidebar: 'Show sidebar', resizeSidebar: 'Resize sidebar', clearConnectionHistory: 'Clear connection history', clearTransferHistory: 'Clear completed and failed transfers', confirmConnection: 'Clear all connection history?', confirmTransfer: 'Clear all completed, failed, and cancelled transfer history?' },
+  'zh-CN': { collapse: '折叠传输队列', expand: '展开传输队列', hideSidebar: '隐藏侧边栏', showSidebar: '显示侧边栏', resizeSidebar: '调整侧边栏宽度', clearConnectionHistory: '清除连接历史记录', clearTransferHistory: '清除已完成和失败的传输', confirmConnection: '清除所有连接历史记录吗？', confirmTransfer: '清除所有已完成、失败和取消的传输历史记录吗？' },
 } as const;
 
 const columnCopy = {
@@ -227,7 +269,21 @@ const syncUiCopy = {
 } as const;
 
 function joinPath(base: string, name: string) { return base === '/' ? `/${name}` : `${base.replace(/\/$/, '')}/${name}`; }
-function defaultPort(protocol: Protocol) { return protocol === 'sftp' ? 22 : protocol === 'smb' ? 445 : protocol === 'webdav' || protocol === 's3' ? 443 : 21; }
+function entryIdentity(entry: FileEntry) { return entry.path_component ?? entry.name; }
+function entryRemotePath(base: string, entry: FileEntry) { return joinPath(base, entryIdentity(entry)); }
+function visiblePathComponent(component: string) {
+  if (component.startsWith('~gdrive~')) {
+    try {
+      const encoded = component.slice('~gdrive~'.length, component.lastIndexOf('~'));
+      const base64 = encoded.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(encoded.length / 4) * 4, '=');
+      return new TextDecoder().decode(Uint8Array.from(atob(base64), (character) => character.charCodeAt(0)));
+    } catch { return component; }
+  }
+  return component.includes('\u001f') ? component.slice(0, component.lastIndexOf('\u001f')) : component;
+}
+function visibleRemotePath(path: string) { return path === '/' ? '/' : `/${path.split('/').filter(Boolean).map(visiblePathComponent).join('/')}`; }
+function localDownloadName(entry: FileEntry) { return (entry.download_name ?? entry.name).replaceAll('/', '／').replaceAll(':', '：'); }
+function defaultPort(protocol: Protocol) { return protocol === 'sftp' ? 22 : protocol === 'smb' ? 445 : protocol === 'webdav' || protocol === 's3' || protocol === 'googleDrive' ? 443 : 21; }
 function connectionTargetChanged(left: Connection, right: Connection) { return left.protocol !== right.protocol || left.host !== right.host || left.port !== right.port || left.username !== right.username || left.s3Region !== right.s3Region || left.s3Endpoint !== right.s3Endpoint || Boolean(left.s3ForcePathStyle) !== Boolean(right.s3ForcePathStyle) || Boolean(left.s3PreserveEmptyDirectories) !== Boolean(right.s3PreserveEmptyDirectories) || left.smbShare !== right.smbShare || left.smbDomain !== right.smbDomain || Boolean(left.smbGuest) !== Boolean(right.smbGuest); }
 function parentPath(path: string) { const parts = path.split('/').filter(Boolean); parts.pop(); return `/${parts.join('/')}` || '/'; }
 function formatBytes(bytes: number) { if (!bytes) return '—'; const units = ['B', 'KB', 'MB', 'GB']; const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), 3); return `${(bytes / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`; }
@@ -303,14 +359,14 @@ function parseBookmarkExport(raw: string): Connection[] | null {
       const port = bookmark.port;
       const requiredStrings = ['id', 'name', 'host', 'username', 'initialPath', 'tags'] as const;
       if (!requiredStrings.every((key) => typeof bookmark[key] === 'string' && (bookmark[key] as string).length <= 4096)) return null;
-      if (!(protocol === 'sftp' || protocol === 'ftp' || protocol === 'ftps' || protocol === 'webdav' || protocol === 's3' || protocol === 'smb') || !Number.isInteger(port) || (port as number) < 1 || (port as number) > 65535) return null;
+      if (!(protocol === 'sftp' || protocol === 'ftp' || protocol === 'ftps' || protocol === 'webdav' || protocol === 's3' || protocol === 'smb' || protocol === 'googleDrive') || !Number.isInteger(port) || (port as number) < 1 || (port as number) > 65535) return null;
       if (!(bookmark.keyPath === undefined || (typeof bookmark.keyPath === 'string' && bookmark.keyPath.length <= 4096)) || !(bookmark.hostKey === undefined || (typeof bookmark.hostKey === 'string' && bookmark.hostKey.length <= 4096)) || !(bookmark.localDirectory === undefined || (typeof bookmark.localDirectory === 'string' && bookmark.localDirectory.length <= 4096))) return null;
       if (!(bookmark.keyPassphraseNotRequired === undefined || typeof bookmark.keyPassphraseNotRequired === 'boolean')) return null;
       if (!(bookmark.smbShare === undefined || (typeof bookmark.smbShare === 'string' && bookmark.smbShare.length <= 255)) || !(bookmark.smbDomain === undefined || (typeof bookmark.smbDomain === 'string' && bookmark.smbDomain.length <= 255)) || !(bookmark.smbGuest === undefined || typeof bookmark.smbGuest === 'boolean')) return null;
       const id = (bookmark.id as string).trim();
       const host = (bookmark.host as string).trim();
       const username = (bookmark.username as string).trim();
-      if (!id || !host || (protocol !== 's3' && !(protocol === 'smb' && bookmark.smbGuest === true) && !username) || (protocol === 'smb' && !(typeof bookmark.smbShare === 'string' && bookmark.smbShare.trim()))) return null;
+      if (!id || !host || (protocol !== 's3' && protocol !== 'googleDrive' && !(protocol === 'smb' && bookmark.smbGuest === true) && !username) || (protocol === 'smb' && !(typeof bookmark.smbShare === 'string' && bookmark.smbShare.trim()))) return null;
       imported.set(id, {
         id,
         name: (bookmark.name as string).trim() || host,
@@ -343,6 +399,14 @@ function ResizableColumnHeader({ label, column, width, resizeLabel, sorted, dire
   return <span className="column-heading" role="columnheader" aria-sort={sorted ? direction : 'none'}><button type="button" className="column-sort-button" onClick={() => onSort(column)}><span>{label}</span>{sorted && (direction === 'ascending' ? <ChevronUp size={13}/> : <ChevronDown size={13}/>)}</button><span className="column-resizer" role="separator" aria-label={`${resizeLabel}: ${label}`} aria-orientation="vertical" aria-valuenow={width} tabIndex={0} onPointerDown={(event) => { event.stopPropagation(); onStart(event, column); }} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === 'ArrowLeft') { event.preventDefault(); onAdjust(column, -10); } if (event.key === 'ArrowRight') { event.preventDefault(); onAdjust(column, 10); } }}/></span>;
 }
 
+function upsertConnectionInOrder(current: Connection[], connection: Connection): Connection[] {
+  const index = current.findIndex((item) => item.id === connection.id);
+  if (index < 0) return [connection, ...current];
+  const next = [...current];
+  next[index] = connection;
+  return next;
+}
+
 export default function App() {
   const [preferences, setPreferences] = useState<Preferences>(loadPreferences);
   const language = preferences.language;
@@ -356,14 +420,18 @@ export default function App() {
   const syncText = syncUiCopy[language];
   const editText = remoteEditCopy[language];
   const dragText = dragOutCopy[language];
+  const bookmarkOrderText = bookmarkOrderCopy[language];
   const menuText = contextMenuCopy[language];
   const browserMenuText = browserContextMenuCopy[language];
   const dropConflictText = dropConflictCopy[language];
   const [connections, setConnections] = useState<Connection[]>([]);
   const [history, setHistory] = useState<ConnectionHistory[]>([]);
   const [selectedTag, setSelectedTag] = useState('');
+  const [draggedBookmarkId, setDraggedBookmarkId] = useState('');
+  const [bookmarkDropTarget, setBookmarkDropTarget] = useState<{ id: string; edge: 'before' | 'after' } | null>(null);
   const [active, setActive] = useState<Connection | null>(null);
   const [path, setPath] = useState('/');
+  const [pathDraft, setPathDraft] = useState('/');
   const [directoryHistory, setDirectoryHistory] = useState<string[]>([]);
   const [directoryHistoryIndex, setDirectoryHistoryIndex] = useState(-1);
   const [entries, setEntries] = useState<FileEntry[]>([]);
@@ -382,6 +450,7 @@ export default function App() {
   const [directoryPaused, setDirectoryPaused] = useState(false);
   const [transferPanelCollapsed, setTransferPanelCollapsed] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('harbor-transfer.sidebar-collapsed') === 'true');
+  const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const [columnWidths, setColumnWidths] = useState<ColumnWidths>(loadColumnWidths);
   const [columnVisibility, setColumnVisibility] = useState<ColumnVisibility>(loadColumnVisibility);
   const [sortColumn, setSortColumn] = useState<ColumnKey>('name');
@@ -417,6 +486,8 @@ export default function App() {
   const [browserContextMenu, setBrowserContextMenu] = useState<BrowserContextMenu | null>(null);
   const [remoteClipboard, setRemoteClipboard] = useState<RemoteClipboard | null>(null);
   const [fileInformationTarget, setFileInformationTarget] = useState<FileInformationTarget | null>(null);
+  const [inlineRenameTarget, setInlineRenameTarget] = useState<InlineRenameTarget | null>(null);
+  const [inlineRenameBusy, setInlineRenameBusy] = useState(false);
   const [dropConflict, setDropConflict] = useState<DropConflictPrompt | null>(null);
   const availableUpdate = useRef<Update | null>(null);
   const automaticUpdateCheckStarted = useRef(false);
@@ -424,10 +495,14 @@ export default function App() {
   const dragPreparationSequence = useRef(0);
   const dragExportRef = useRef<DragExport | null>(null);
   const dragPreparingRef = useRef('');
-  const dragSelectionTimer = useRef<number | null>(null);
+  const bookmarkDragIdRef = useRef('');
+  const bookmarkPointerDragRef = useRef<{ sourceId: string; pointerId: number; startX: number; startY: number; active: boolean } | null>(null);
+  const bookmarkDropTargetRef = useRef<{ id: string; edge: 'before' | 'after' } | null>(null);
+  const inlineRenameCommitting = useRef(false);
   const selectionAnchor = useRef<{ basePath: string; index: number } | null>(null);
   const transferPanelUserControlled = useRef(false);
   const browserZoneRef = useRef<HTMLElement | null>(null);
+  const pathInputRef = useRef<HTMLInputElement | null>(null);
   const visibleColumns = useMemo(() => listColumnOrder.filter((column) => column === 'name' || columnVisibility[column]), [columnVisibility]);
   const filteredEntries = useMemo(() => {
     const collator = new Intl.Collator(language, { numeric: true, sensitivity: 'base' });
@@ -450,12 +525,15 @@ export default function App() {
       const ordered = result || collator.compare(left.name, right.name);
       return sortDirection === 'ascending' ? ordered : -ordered;
     };
-    return entries.filter((entry) => entry.name.toLowerCase().includes(query.toLowerCase())).sort(compare);
-  }, [entries, language, query, sortColumn, sortDirection]);
+    const normalizedQuery = query.toLowerCase();
+    return entries
+      .filter((entry) => (preferences.showHiddenFiles || !entry.name.startsWith('.')) && entry.name.toLowerCase().includes(normalizedQuery))
+      .sort(compare);
+  }, [entries, language, preferences.showHiddenFiles, query, sortColumn, sortDirection]);
   const hasActiveTransfer = transfers.some((item) => item.status === 'Running') || Boolean(dragPreparingPath) || Boolean(directoryProgress && directoryProgress.status !== 'completed' && directoryProgress.status !== 'cancelled' && directoryProgress.status !== 'failed');
   const breadcrumbs = useMemo(() => {
     const segments = path.split('/').filter(Boolean);
-    return [{ label: '/', path: '/' }, ...segments.map((segment, index) => ({ label: segment, path: `/${segments.slice(0, index + 1).join('/')}` }))];
+    return [{ label: '/', path: '/' }, ...segments.map((segment, index) => ({ label: visiblePathComponent(segment), path: `/${segments.slice(0, index + 1).join('/')}` }))];
   }, [path]);
 
   async function checkForSoftwareUpdate(manual: boolean) {
@@ -563,6 +641,12 @@ export default function App() {
   }, [preferences]);
 
   useEffect(() => {
+    if (preferences.showHiddenFiles) return;
+    setSelectedRemoteItems((current) => current.filter((item) => !item.entry.name.startsWith('.')));
+    selectionAnchor.current = null;
+  }, [preferences.showHiddenFiles]);
+
+  useEffect(() => {
     const title = active ? `${active.name} — ${t.title}` : t.title;
     void getCurrentWebviewWindow().setTitle(title).catch(() => undefined);
   }, [active, t.title]);
@@ -640,6 +724,16 @@ export default function App() {
   }, [sidebarCollapsed]);
 
   useEffect(() => {
+    localStorage.setItem('harbor-transfer.sidebar-width', String(sidebarWidth));
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    const resize = () => setSidebarWidth((current) => clampSidebarWidth(current));
+    window.addEventListener('resize', resize);
+    return () => window.removeEventListener('resize', resize);
+  }, []);
+
+  useEffect(() => {
     let unlisten: (() => void) | undefined;
     void listen<string>('ssh-key://selected', (event) => {
       setSelectedKeyPath(event.payload);
@@ -672,6 +766,10 @@ export default function App() {
     let unlisten: (() => void) | undefined;
     if (!active) return;
     void getCurrentWebview().onDragDropEvent((event) => {
+      if (bookmarkDragIdRef.current) {
+        setIsDragOver(false);
+        return;
+      }
       if (event.payload.type === 'leave') setIsDragOver(false);
       else if (event.payload.type === 'drop') {
         setIsDragOver(false);
@@ -683,6 +781,100 @@ export default function App() {
 
   const availableTags = useMemo(() => Array.from(new Set(connections.flatMap((connection) => connection.tags.split(',').map((tag) => tag.trim()).filter(Boolean)))).sort(), [connections]);
   const visibleConnections = useMemo(() => selectedTag ? connections.filter((connection) => connection.tags.split(',').map((tag) => tag.trim()).includes(selectedTag)) : connections, [connections, selectedTag]);
+
+  useEffect(() => {
+    setPathDraft(visibleRemotePath(path));
+    const frame = window.requestAnimationFrame(() => {
+      if (pathInputRef.current) pathInputRef.current.scrollLeft = 0;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [path]);
+
+  async function moveBookmark(sourceId: string, targetId: string, edge: 'before' | 'after') {
+    if (selectedTag || sourceId === targetId) return;
+    const previous = connections;
+    const moving = previous.find((connection) => connection.id === sourceId);
+    if (!moving) return;
+    const next = previous.filter((connection) => connection.id !== sourceId);
+    const targetIndex = next.findIndex((connection) => connection.id === targetId);
+    if (targetIndex < 0) return;
+    next.splice(targetIndex + (edge === 'after' ? 1 : 0), 0, moving);
+    if (next.every((connection, index) => connection.id === previous[index]?.id)) return;
+    setConnections(next);
+    try {
+      await invoke('bookmarks_reorder', { bookmarkIds: next.map((connection) => connection.id) });
+      setNotice(bookmarkOrderText.saved);
+    } catch (reason) {
+      try { setConnections(await invoke<Connection[]>('bookmarks_list')); }
+      catch { setConnections(previous); }
+      setError(invokeErrorMessage(reason));
+    }
+  }
+
+  function setBookmarkPointerDropTarget(target: { id: string; edge: 'before' | 'after' } | null) {
+    bookmarkDropTargetRef.current = target;
+    setBookmarkDropTarget((current) => current?.id === target?.id && current?.edge === target?.edge ? current : target);
+  }
+
+  function startBookmarkPointerDrag(event: React.PointerEvent<HTMLButtonElement>, id: string) {
+    if (selectedTag || event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    bookmarkPointerDragRef.current = { sourceId: id, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, active: false };
+    bookmarkDragIdRef.current = id;
+    setIsDragOver(false);
+    setBookmarkPointerDropTarget(null);
+  }
+
+  function moveBookmarkPointerDrag(event: React.PointerEvent<HTMLButtonElement>) {
+    const drag = bookmarkPointerDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (!drag.active) {
+      if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 4) return;
+      drag.active = true;
+      document.body.classList.add('reordering-bookmarks');
+      setDraggedBookmarkId(drag.sourceId);
+    }
+    event.preventDefault();
+    const row = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>('[data-bookmark-id]');
+    const targetId = row?.dataset.bookmarkId;
+    if (!row || !targetId || targetId === drag.sourceId) {
+      setBookmarkPointerDropTarget(null);
+      return;
+    }
+    const bounds = row.getBoundingClientRect();
+    const edge = event.clientY < bounds.top + bounds.height / 2 ? 'before' : 'after';
+    setBookmarkPointerDropTarget({ id: targetId, edge });
+  }
+
+  function endBookmarkPointerDrag(event: React.PointerEvent<HTMLButtonElement>) {
+    const drag = bookmarkPointerDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    moveBookmarkPointerDrag(event);
+    const target = bookmarkDropTargetRef.current;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    finishBookmarkDrag();
+    if (drag.active && target) void moveBookmark(drag.sourceId, target.id, target.edge);
+  }
+
+  function finishBookmarkDrag() {
+    document.body.classList.remove('reordering-bookmarks');
+    bookmarkPointerDragRef.current = null;
+    bookmarkDragIdRef.current = '';
+    bookmarkDropTargetRef.current = null;
+    setIsDragOver(false);
+    setDraggedBookmarkId('');
+    setBookmarkDropTarget(null);
+  }
+
+  function moveBookmarkWithKeyboard(id: string, offset: -1 | 1) {
+    if (selectedTag) return;
+    const index = connections.findIndex((connection) => connection.id === id);
+    const target = connections[index + offset];
+    if (!target) return;
+    void moveBookmark(id, target.id, offset < 0 ? 'before' : 'after');
+  }
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -738,14 +930,14 @@ export default function App() {
     if (!active) return;
     const level = columnLevels[levelIndex];
     if (!level) return;
-    const selectedLevels = columnLevels.slice(0, levelIndex + 1).map((item, index) => index === levelIndex ? { ...item, selectedName: entry.name } : item);
+    const selectedLevels = columnLevels.slice(0, levelIndex + 1).map((item, index) => index === levelIndex ? { ...item, selectedName: entryIdentity(entry) } : item);
     if (entry.file_type !== 'Directory') {
       setColumnLevels(selectedLevels);
       setPath(level.path);
       setEntries(level.entries);
       return;
     }
-    const childPath = joinPath(level.path, entry.name);
+    const childPath = entryRemotePath(level.path, entry);
     setBusy(true); setError(null); setColumnLevels(selectedLevels);
     try {
       const childEntries = await invoke<FileEntry[]>('remote_list', { request: { connectionId: active.id, path: childPath } });
@@ -758,7 +950,29 @@ export default function App() {
   }
 
   function adjustColumnWidth(column: ColumnKey, delta: number) {
-    setColumnWidths((current) => ({ ...current, [column]: Math.max(minimumColumnWidths[column], current[column] + delta) }));
+    setColumnWidths((current) => ({ ...current, [column]: Math.min(maximumColumnWidths[column], Math.max(minimumColumnWidths[column], current[column] + delta)) }));
+  }
+
+  function adjustSidebarWidth(delta: number) {
+    setSidebarWidth((current) => clampSidebarWidth(current + delta));
+  }
+
+  function startSidebarResize(event: React.PointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startWidth = sidebarWidth;
+    document.body.classList.add('resizing-sidebar');
+    const move = (moveEvent: PointerEvent) => setSidebarWidth(clampSidebarWidth(startWidth + moveEvent.clientX - startX));
+    const stop = () => {
+      document.body.classList.remove('resizing-sidebar');
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('pointercancel', stop);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', stop);
+    window.addEventListener('pointercancel', stop);
   }
 
   function startColumnResize(event: React.PointerEvent, column: ColumnKey) {
@@ -767,7 +981,7 @@ export default function App() {
     const startX = event.clientX;
     const startWidth = columnWidths[column];
     document.body.classList.add('resizing-columns');
-    const move = (moveEvent: PointerEvent) => setColumnWidths((current) => ({ ...current, [column]: Math.max(minimumColumnWidths[column], startWidth + moveEvent.clientX - startX) }));
+    const move = (moveEvent: PointerEvent) => setColumnWidths((current) => ({ ...current, [column]: Math.min(maximumColumnWidths[column], Math.max(minimumColumnWidths[column], startWidth + moveEvent.clientX - startX)) }));
     const stop = () => {
       document.body.classList.remove('resizing-columns');
       window.removeEventListener('pointermove', move);
@@ -811,8 +1025,123 @@ export default function App() {
     return columnsText.file;
   }
 
-  function renderListCell(entry: FileEntry, column: ColumnKey) {
-    if (column === 'name') return <span className="file-name"><span className="file-name-icon"><RemoteEntryIcon entry={entry} size={18}/></span><span className="file-name-text">{entry.name}</span></span>;
+  function isInlineRenaming(entry: FileEntry, basePath: string) {
+    const target = inlineRenameTarget;
+    return Boolean(target && target.connectionId === active?.id && target.remotePath === entryRemotePath(basePath, entry));
+  }
+
+  function beginInlineRename(event: React.SyntheticEvent, entry: FileEntry, basePath: string) {
+    if (!active) return;
+    event.preventDefault();
+    event.stopPropagation();
+    cancelScheduledDragPreparation();
+    const item = selectedItem(entry, basePath);
+    if (!item) return;
+    setEntryContextMenu(null);
+    setBrowserContextMenu(null);
+    setSelectedRemoteItems([item]);
+    setInlineRenameTarget({ ...item, value: entry.name });
+  }
+
+  function cancelInlineRename() {
+    if (inlineRenameCommitting.current) return;
+    setInlineRenameTarget(null);
+  }
+
+  function applyInlineRenameResult(target: SelectedRemoteItem, name: string, refreshed?: FileEntry[]) {
+    const destinationPath = joinPath(target.basePath, name);
+    const renamedEntry = refreshed?.find((entry) => entry.name === name) ?? { ...target.entry, name };
+    const replaceRenamedEntry = (current: FileEntry[]) => refreshed ?? current.map((entry) => entryIdentity(entry) === entryIdentity(target.entry) ? renamedEntry : entry);
+
+    if (path === target.basePath || (target.entry.file_type === 'Directory' && path.startsWith(`${target.remotePath}/`))) {
+      setEntries(replaceRenamedEntry);
+    }
+    setColumnLevels((current) => {
+      const levelIndex = current.findIndex((level) => level.path === target.basePath);
+      if (levelIndex < 0) return current;
+      const next = current.slice(0, target.entry.file_type === 'Directory' ? levelIndex + 1 : current.length);
+      next[levelIndex] = { ...next[levelIndex], entries: replaceRenamedEntry(next[levelIndex].entries), selectedName: entryIdentity(renamedEntry) };
+      return next;
+    });
+    if (target.entry.file_type === 'Directory' && path !== target.basePath && path.startsWith(`${target.remotePath}/`)) {
+      setPath(target.basePath);
+    }
+    setSelectedRemoteItems([{ connectionId: target.connectionId, remotePath: destinationPath, basePath: target.basePath, entry: renamedEntry }]);
+  }
+
+  async function commitInlineRename() {
+    if (!active || !inlineRenameTarget || inlineRenameCommitting.current) return;
+    const target = inlineRenameTarget;
+    const name = target.value.trim();
+    if (!name || name.includes('/') || name === '.' || name === '..') {
+      setError(menuText.invalidName);
+      return;
+    }
+    if (name === target.entry.name) { setInlineRenameTarget(null); return; }
+    inlineRenameCommitting.current = true;
+    setInlineRenameBusy(true);
+    setError(null);
+    try {
+      const destinationPath = joinPath(target.basePath, name);
+      await invoke('remote_rename', { request: { connectionId: active.id, oldPath: target.remotePath, newPath: destinationPath } });
+      applyInlineRenameResult(target, name);
+      setInlineRenameTarget(null);
+      setNotice(menuText.saved);
+      void invoke<FileEntry[]>('remote_list', { request: { connectionId: active.id, path: target.basePath } })
+        .then((refreshed) => {
+          if (active.id === target.connectionId) applyInlineRenameResult(target, name, refreshed);
+        })
+        .catch(() => undefined);
+    } catch (reason) {
+      const message = invokeErrorMessage(reason);
+      if (/timeout/i.test(message)) {
+        try {
+          const refreshed = await invoke<FileEntry[]>('remote_list', { request: { connectionId: active.id, path: target.basePath } });
+          const renameCompleted = refreshed.some((entry) => entry.name === name)
+            && !refreshed.some((entry) => entry.name === target.entry.name);
+          if (renameCompleted) {
+            applyInlineRenameResult(target, name, refreshed);
+            setInlineRenameTarget(null);
+            setNotice(menuText.saved);
+            return;
+          }
+        } catch {
+          // Preserve the original rename error when the server cannot confirm its result.
+        }
+      }
+      setError(message);
+    }
+    finally {
+      inlineRenameCommitting.current = false;
+      setInlineRenameBusy(false);
+    }
+  }
+
+  function inlineRenameInput(mode: ViewMode) {
+    if (!inlineRenameTarget) return null;
+    return <input
+      className={`inline-rename-input ${mode}`}
+      aria-label={menuText.rename}
+      value={inlineRenameTarget.value}
+      readOnly={inlineRenameBusy}
+      autoFocus
+      {...technicalInputProps}
+      onFocus={(event) => event.currentTarget.select()}
+      onChange={(event) => setInlineRenameTarget((current) => current ? { ...current, value: event.target.value } : current)}
+      onClick={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
+      onPointerDown={(event) => event.stopPropagation()}
+      onBlur={cancelInlineRename}
+      onKeyDown={(event) => {
+        event.stopPropagation();
+        if (event.key === 'Enter') { event.preventDefault(); void commitInlineRename(); }
+        if (event.key === 'Escape') { event.preventDefault(); setInlineRenameTarget(null); }
+      }}
+    />;
+  }
+
+  function renderListCell(entry: FileEntry, column: ColumnKey, basePath: string, selected: boolean) {
+    if (column === 'name') return <span className="file-name"><span className="file-name-icon"><RemoteEntryIcon entry={entry} size={18}/></span>{isInlineRenaming(entry, basePath) ? inlineRenameInput('list') : <span className="file-name-text" title={selected ? menuText.rename : entry.name} onClick={(event) => { if (selected) beginInlineRename(event, entry, basePath); }}>{entry.name}</span>}</span>;
     if (column === 'size') return <span className="size-cell">{entry.file_type === 'Directory' ? '—' : formatBytes(entry.size)}</span>;
     if (column === 'modified') return <span className="modified-cell">{entry.modified ?? '—'}</span>;
     if (column === 'permissions') return <span className="permissions-cell">{entry.permissions ?? '—'}</span>;
@@ -823,7 +1152,7 @@ export default function App() {
 
   async function copyCurrentPath() {
     try {
-      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(path);
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(visibleRemotePath(path));
       else {
         const temporary = document.createElement('textarea');
         temporary.value = path;
@@ -920,6 +1249,13 @@ export default function App() {
         return targetChanged ? { ...bookmark, id: crypto.randomUUID() } : bookmark;
       });
       for (const bookmark of prepared) await invoke('bookmark_save', { bookmark });
+      const importedIds = new Set(prepared.map((bookmark) => bookmark.id));
+      const importedFirst = await invoke<Connection[]>('bookmarks_list');
+      const bookmarkIds = [
+        ...prepared.map((bookmark) => bookmark.id),
+        ...importedFirst.filter((bookmark) => !importedIds.has(bookmark.id)).map((bookmark) => bookmark.id),
+      ];
+      await invoke('bookmarks_reorder', { bookmarkIds });
       const saved = await invoke<Connection[]>('bookmarks_list');
       setConnections(saved);
       setSelectedTag('');
@@ -1156,9 +1492,9 @@ export default function App() {
 
   async function downloadFile(entry: FileEntry, basePath = path) {
     if (!active || entry.file_type === 'Directory') return;
-    const localPath = await save({ defaultPath: entry.name });
+    const localPath = await save({ defaultPath: localDownloadName(entry) });
     if (!localPath) return;
-    const transfer: Transfer = { id: crypto.randomUUID(), name: entry.name, direction: 'Download', status: 'Running', detail: basePath, localPath, remotePath: joinPath(basePath, entry.name), connectionId: active.id, transferredBytes: 0, totalBytes: entry.size };
+    const transfer: Transfer = { id: crypto.randomUUID(), name: entry.name, direction: 'Download', status: 'Running', detail: visibleRemotePath(basePath), localPath, remotePath: entryRemotePath(basePath, entry), connectionId: active.id, transferredBytes: 0, totalBytes: entry.size };
     setTransfers((current) => [transfer, ...current]);
     try {
       const bytes = await invoke<number>('transfer_download', { request: { transferId: transfer.id, connectionId: active.id, localPath, remotePath: transfer.remotePath } });
@@ -1184,6 +1520,10 @@ export default function App() {
 
   async function editRemoteFile(entry: FileEntry, basePath = path) {
     if (!active || entry.file_type !== 'File') return;
+    if (entry.download_name) {
+      await downloadFile(entry, basePath);
+      return;
+    }
     const editorPath = preferences.editorPath.trim();
     if (!editorPath) {
       // A double-click must never turn into a native file/download dialog.
@@ -1192,7 +1532,7 @@ export default function App() {
       setError(editText.configure);
       return;
     }
-    const remotePath = joinPath(basePath, entry.name);
+    const remotePath = entryRemotePath(basePath, entry);
     const existing = remoteEdits.find((edit) => edit.connectionId === active.id && edit.remotePath === remotePath);
     if (existing) {
       setNotice(`${editText.opening}: ${entry.name}`);
@@ -1222,13 +1562,13 @@ export default function App() {
 
   function selectedItem(entry: FileEntry, basePath: string): SelectedRemoteItem | null {
     if (!active) return null;
-    return { connectionId: active.id, remotePath: joinPath(basePath, entry.name), basePath, entry };
+    return { connectionId: active.id, remotePath: entryRemotePath(basePath, entry), basePath, entry };
   }
 
   function selectRemoteEntry(event: { metaKey: boolean; ctrlKey: boolean; shiftKey: boolean }, entry: FileEntry, basePath: string, orderedEntries: FileEntry[]) {
     const item = selectedItem(entry, basePath);
     if (!item) return;
-    const index = orderedEntries.findIndex((candidate) => candidate.name === entry.name);
+    const index = orderedEntries.findIndex((candidate) => entryIdentity(candidate) === entryIdentity(entry));
     if (event.shiftKey && selectionAnchor.current?.basePath === basePath && index >= 0) {
       const start = Math.min(selectionAnchor.current.index, index);
       const end = Math.max(selectionAnchor.current.index, index);
@@ -1244,32 +1584,21 @@ export default function App() {
 
   function scheduleRemoteDragPreparation(event: { metaKey: boolean; ctrlKey: boolean; shiftKey: boolean }, entry: FileEntry, basePath = path, orderedEntries = filteredEntries) {
     if (!active) return;
-    if (dragSelectionTimer.current !== null) window.clearTimeout(dragSelectionTimer.current);
     selectRemoteEntry(event, entry, basePath, orderedEntries);
-    if (event.metaKey || event.ctrlKey || event.shiftKey) { dragSelectionTimer.current = null; return; }
-    // Preparing a directory downloads its entire tree while holding the remote
-    // connection. Do that only after an actual drag gesture, never on selection.
-    if (entry.file_type === 'Directory') {
-      dragSelectionTimer.current = null;
-      return;
-    }
-    dragSelectionTimer.current = window.setTimeout(() => {
-      dragSelectionTimer.current = null;
-      void prepareRemoteDrag(entry, basePath);
-      // Keep the preparation outside the platform double-click interval. Without
-      // this delay the first click of a double-click can start a drag-export
-      // download before the edit action has a chance to cancel it.
-    }, 900);
   }
 
   function cancelScheduledDragPreparation() {
-    if (dragSelectionTimer.current !== null) window.clearTimeout(dragSelectionTimer.current);
-    dragSelectionTimer.current = null;
+    // Export preparation now starts only from an actual drag gesture. Invalidate
+    // any preparation already running when another action takes ownership.
+    if (!dragPreparingRef.current) return;
+    dragPreparationSequence.current += 1;
+    dragPreparingRef.current = '';
+    setDragPreparingPath('');
   }
 
   async function prepareRemoteDrag(entry: FileEntry, basePath = path) {
     if (!active) return;
-    const remotePath = joinPath(basePath, entry.name);
+    const remotePath = entryRemotePath(basePath, entry);
     const item = selectedItem(entry, basePath);
     if (item) setSelectedRemoteItems([item]);
     if (entry.file_type === 'Symlink') {
@@ -1288,7 +1617,7 @@ export default function App() {
     setNotice(`${dragText.preparing}: ${entry.name}`);
     await cleanupDragExport(prepared);
     try {
-      const result = await invoke<Omit<DragExport, 'connectionId'>>('drag_export_prepare', { request: { connectionId: active.id, remotePath, isDirectory: entry.file_type === 'Directory' } });
+      const result = await invoke<Omit<DragExport, 'connectionId'>>('drag_export_prepare', { request: { connectionId: active.id, remotePath, isDirectory: entry.file_type === 'Directory', displayName: localDownloadName(entry) } });
       const next = { ...result, connectionId: active.id };
       if (sequence !== dragPreparationSequence.current) {
         await invoke('drag_export_cleanup', { exportId: result.exportId, delayMs: 0 });
@@ -1313,7 +1642,7 @@ export default function App() {
     cancelScheduledDragPreparation();
     event.preventDefault();
     event.stopPropagation();
-    const remotePath = joinPath(basePath, entry.name);
+    const remotePath = entryRemotePath(basePath, entry);
     const prepared = dragExportRef.current;
     if (!prepared || prepared.connectionId !== active.id || prepared.remotePath !== remotePath) {
       const preparing = dragPreparingRef.current === remotePath;
@@ -1344,7 +1673,7 @@ export default function App() {
     setBrowserContextMenu(null);
     setColumnMenu(null);
     cancelScheduledDragPreparation();
-    const remotePath = joinPath(basePath, entry.name);
+    const remotePath = entryRemotePath(basePath, entry);
     if (!selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath)) {
       const item = selectedItem(entry, basePath);
       if (item) setSelectedRemoteItems([item]);
@@ -1398,14 +1727,14 @@ export default function App() {
     setEntryContextMenu(null);
     if (preferences.confirmDelete && !window.confirm(p2.deleteConfirm)) return;
     try {
-      await invoke('remote_delete', { request: { connectionId: active.id, path: joinPath(basePath, entry.name), isDirectory: entry.file_type === 'Directory' } });
+      await invoke('remote_delete', { request: { connectionId: active.id, path: entryRemotePath(basePath, entry), isDirectory: entry.file_type === 'Directory' } });
       await loadDirectory(active, basePath);
     } catch (reason) { setError(String(reason)); }
   }
 
   function placeOnRemoteClipboard(entry: FileEntry, basePath: string, mode: 'cut' | 'copy') {
     if (!active || entry.file_type === 'Symlink') return;
-    setRemoteClipboard({ connectionId: active.id, sourcePath: joinPath(basePath, entry.name), entry, mode });
+    setRemoteClipboard({ connectionId: active.id, sourcePath: entryRemotePath(basePath, entry), entry, mode });
     setEntryContextMenu(null);
     setNotice(`${mode === 'cut' ? menuText.cutReady : menuText.copied}: ${entry.name}`);
   }
@@ -1431,18 +1760,19 @@ export default function App() {
     } catch (reason) { setError(String(reason)); }
   }
 
-  return <main className={`app-shell ${transferPanelCollapsed ? 'queue-collapsed' : ''}`} style={{ '--file-name-font-size': `${preferences.fileNameFontSize}px` } as React.CSSProperties}>
+  const densityMetrics = fileDensityMetrics[preferences.fileRowDensity];
+  return <main className={`app-shell ${transferPanelCollapsed ? 'queue-collapsed' : ''}`} style={{ '--file-name-font-size': `${preferences.fileNameFontSize}px`, '--file-name-font-weight': preferences.fileNameFontWeight === 'normal' ? 400 : 650, '--file-row-height': `${densityMetrics.list}px`, '--column-row-height': `${densityMetrics.column}px`, '--icon-row-height': `${densityMetrics.icon}px` } as React.CSSProperties}>
     <header className="toolbar" onPointerDown={startWindowDrag}>
       <div className="brand"><Cloud size={21}/><span>{t.title}</span></div>
       <button className="icon-button" aria-label={sidebarCollapsed ? queueText.showSidebar : queueText.hideSidebar} title={sidebarCollapsed ? queueText.showSidebar : queueText.hideSidebar} aria-expanded={!sidebarCollapsed} onClick={() => setSidebarCollapsed((current) => !current)}>{sidebarCollapsed ? <PanelLeftOpen size={17}/> : <PanelLeftClose size={17}/>}</button>
-      <button aria-label={`${windowCopy[language].newWindow} (⌘N)`} title={`${windowCopy[language].newWindow} (⌘N)`} onClick={() => void openNewWindow()}><AppWindow size={16}/>{windowCopy[language].newWindow}</button>
-      <button className="primary" onClick={() => { setConnectingBookmark(null); setSelectedKeyPath(''); setConnectSheetMode('connect'); setShowConnect(true); }}><span>+</span>{t.connect}</button>
-      <button onClick={() => void openKeyManagerWindow()}><KeyRound size={16}/>{t.keys}</button>
-      <button onClick={() => setShowPreferences(true)}><Settings size={16}/>{t.settings}</button>
+      <button className="toolbar-action" aria-label={`${windowCopy[language].newWindow} (⌘N)`} title={`${windowCopy[language].newWindow} (⌘N)`} onClick={() => void openNewWindow()}><AppWindow size={16}/><span className="toolbar-action-label">{windowCopy[language].newWindow}</span></button>
+      <button className="primary toolbar-action" aria-label={t.connect} title={t.connect} onClick={() => { setConnectingBookmark(null); setSelectedKeyPath(''); setConnectSheetMode('connect'); setShowConnect(true); }}><Plus size={16}/><span className="toolbar-action-label">{t.connect}</span></button>
+      <button className="toolbar-action" aria-label={t.keys} title={t.keys} onClick={() => void openKeyManagerWindow()}><KeyRound size={16}/><span className="toolbar-action-label">{t.keys}</span></button>
+      <button className="toolbar-action" aria-label={t.settings} title={t.settings} onClick={() => setShowPreferences(true)}><Settings size={16}/><span className="toolbar-action-label">{t.settings}</span></button>
       <div className="toolbar-spacer" />
       <label className="language"><span>Language</span><select value={language} onChange={(event) => setPreferences((current) => ({ ...current, language: event.target.value as Language }))}><option value="ja">日本語</option><option value="en">English</option><option value="zh-CN">简体中文</option></select></label>
     </header>
-    <section className={`workspace ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
+    <section className={`workspace ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`} style={{ '--sidebar-width': `${sidebarWidth}px` } as React.CSSProperties}>
       <aside className="sidebar">
         <div className="sidebar-section-heading bookmarks-heading">
           <div className="sidebar-label">{t.bookmarks}</div>
@@ -1451,13 +1781,34 @@ export default function App() {
         </div>
         {availableTags.length > 0 && <div className="tag-filter"><button className={!selectedTag ? 'active' : ''} onClick={() => setSelectedTag('')}>{p1.all}</button>{availableTags.map((tag) => <button key={tag} className={selectedTag === tag ? 'active' : ''} onClick={() => setSelectedTag(tag)}>{tag}</button>)}</div>}
         {connections.length === 0 && <p className="muted">No saved connections</p>}
-        {visibleConnections.map((connection) => <div className="bookmark-row" key={connection.id}>
+        {visibleConnections.map((connection) => <div
+          className={`bookmark-row ${draggedBookmarkId === connection.id ? 'is-dragging' : ''} ${bookmarkDropTarget?.id === connection.id ? `drop-${bookmarkDropTarget.edge}` : ''}`}
+          key={connection.id}
+          data-bookmark-id={connection.id}
+        >
+          <button
+            type="button"
+            className="bookmark-drag-handle"
+            disabled={Boolean(selectedTag)}
+            aria-label={bookmarkOrderText.handle.replace('{{name}}', connection.name)}
+            title={selectedTag ? bookmarkOrderText.filtered : bookmarkOrderText.hint}
+            onPointerDown={(event) => startBookmarkPointerDrag(event, connection.id)}
+            onPointerMove={moveBookmarkPointerDrag}
+            onPointerUp={endBookmarkPointerDrag}
+            onPointerCancel={(event) => { if (bookmarkPointerDragRef.current?.pointerId === event.pointerId) finishBookmarkDrag(); }}
+            onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
+            onKeyDown={(event) => {
+              if (event.key === 'ArrowUp') { event.preventDefault(); moveBookmarkWithKeyboard(connection.id, -1); }
+              if (event.key === 'ArrowDown') { event.preventDefault(); moveBookmarkWithKeyboard(connection.id, 1); }
+            }}
+          ><GripVertical size={14}/></button>
           <button className={`bookmark bookmark-main ${active?.id === connection.id ? 'selected' : ''}`} onClick={() => { if (active?.id === connection.id) { void loadDirectory(connection, path); } else { setConnectingBookmark(connection); setSelectedKeyPath(connection.keyPath ?? ''); setConnectSheetMode('connect'); setShowConnect(true); } }}><HardDrive size={16}/><span>{connection.name}</span><small>{connection.protocol.toUpperCase()}</small></button>
           <button className="bookmark-edit-button" aria-label={`${t.editBookmark}: ${connection.name}`} title={t.editBookmark} onClick={() => { setConnectingBookmark(connection); setSelectedKeyPath(connection.keyPath ?? ''); setConnectSheetMode('edit'); setShowConnect(true); }}><Pencil size={14}/></button>
         </div>)}
         <div className="sidebar-section-heading history-label"><div className="sidebar-label">{t.history}</div>{history.length > 0 && <button className="icon-button" aria-label={queueText.clearConnectionHistory} title={queueText.clearConnectionHistory} onClick={() => void clearConnectionHistory()}><Trash2 size={14}/></button>}</div>
         {history.length === 0 ? <p className="muted">{p1.noHistory}</p> : history.slice(0, 6).map((item, index) => <button className="bookmark history-item" key={`${item.bookmarkId}-${item.connectedAt}-${index}`} onClick={() => { const saved = connections.find((connection) => connection.id === item.bookmarkId); const connection = saved ?? { id: item.bookmarkId, name: item.name, protocol: item.protocol, host: item.host, port: item.port, username: item.username, initialPath: '/', tags: '' }; setConnectingBookmark(connection); setSelectedKeyPath(connection.keyPath ?? ''); setConnectSheetMode('connect'); setShowConnect(true); }}><HardDrive size={14}/><span>{item.name}</span><small>{item.connectedAt.slice(5, 16)}</small></button>)}
       </aside>
+      <div className="sidebar-resizer" role="separator" aria-label={queueText.resizeSidebar} title={queueText.resizeSidebar} aria-orientation="vertical" aria-valuemin={minimumSidebarWidth} aria-valuemax={maximumSidebarWidth} aria-valuenow={sidebarWidth} tabIndex={0} onPointerDown={startSidebarResize} onDoubleClick={() => setSidebarWidth(defaultSidebarWidth)} onKeyDown={(event) => { if (event.key === 'ArrowLeft') { event.preventDefault(); adjustSidebarWidth(-10); } if (event.key === 'ArrowRight') { event.preventDefault(); adjustSidebarWidth(10); } if (event.key === 'Home') { event.preventDefault(); setSidebarWidth(defaultSidebarWidth); } }}/>
       <section className={`browser ${isDragOver ? 'drag-over' : ''}`} ref={browserZoneRef}>
         {notice && <div className="notice-banner" role="status" aria-live="polite">{notice}</div>}
         {active ? <>
@@ -1470,46 +1821,52 @@ export default function App() {
               <button className={viewMode === 'columns' ? 'active' : ''} aria-label={viewsText.columns} title={viewsText.columns} aria-pressed={viewMode === 'columns'} onClick={() => selectViewMode('columns')}><Columns3 size={16}/></button>
             </div>
             <div className="browser-toolbar-spacer" />
-            <button onClick={() => void openSyncPreview()}><FolderSync size={17}/>{syncText.button}</button><button disabled={active.protocol === 's3' && !active.s3PreserveEmptyDirectories} title={active.protocol === 's3' ? s3Copy[language].readOnly : undefined} onClick={() => void createDirectory()}><FolderPlus size={17}/>{t.newFolder}</button><button onClick={() => void uploadDirectory()}><FolderUp size={16}/>{t.uploadFolder}</button><button className="primary" onClick={() => void uploadFiles()}><Upload size={16}/>{t.upload}</button>
+            <button className="browser-toolbar-action" aria-label={syncText.button} title={syncText.button} onClick={() => void openSyncPreview()}><FolderSync size={17}/><span className="browser-toolbar-action-label">{syncText.button}</span></button>
+            <button className="browser-toolbar-action" aria-label={t.newFolder} disabled={active.protocol === 's3' && !active.s3PreserveEmptyDirectories} title={active.protocol === 's3' ? s3Copy[language].readOnly : t.newFolder} onClick={() => void createDirectory()}><FolderPlus size={17}/><span className="browser-toolbar-action-label">{t.newFolder}</span></button>
+            <button className="browser-toolbar-action" aria-label={t.uploadFolder} title={t.uploadFolder} onClick={() => void uploadDirectory()}><FolderUp size={16}/><span className="browser-toolbar-action-label">{t.uploadFolder}</span></button>
+            <button className="primary browser-toolbar-action" aria-label={t.upload} title={t.upload} onClick={() => void uploadFiles()}><Upload size={16}/><span className="browser-toolbar-action-label">{t.upload}</span></button>
           </div>
           <div className="path-toolbar">
             <button aria-label={accessibilityCopy[language].back} title={accessibilityCopy[language].back} disabled={directoryHistoryIndex <= 0} onClick={() => void navigateDirectoryHistory(-1)}><ChevronLeft size={18}/></button><button aria-label={accessibilityCopy[language].forward} title={accessibilityCopy[language].forward} disabled={directoryHistoryIndex < 0 || directoryHistoryIndex >= directoryHistory.length - 1} onClick={() => void navigateDirectoryHistory(1)}><ChevronRight size={18}/></button>
             <button className="parent-directory-button" aria-label={accessibilityCopy[language].parent} title={accessibilityCopy[language].parent} disabled={path === '/'} onClick={() => void navigateDirectory(active, parentPath(path))}><ArrowUpToLine size={18}/></button>
-            <div className="path-field"><span>{t.path}</span><input value={path} onChange={(event) => setPath(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void navigateDirectory()} /></div>
+            <div className="path-field"><span>{t.path}</span><input ref={pathInputRef} value={pathDraft} title={visibleRemotePath(path)} onChange={(event) => setPathDraft(event.target.value)} onBlur={() => setPathDraft(visibleRemotePath(path))} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); const requestedPath = pathDraft === visibleRemotePath(path) ? path : pathDraft; void navigateDirectory(active, requestedPath); } if (event.key === 'Escape') { event.preventDefault(); setPathDraft(visibleRemotePath(path)); event.currentTarget.blur(); } }} /></div>
             <button className="copy-path-button" aria-label={t.copyPath} title={t.copyPath} onClick={() => void copyCurrentPath()}>{pathCopied ? <Check size={17}/> : <Copy size={17}/>}</button>
           </div>
           {error && <div className="error-banner"><strong>{t.error}:</strong> {error}</div>}
           <div className="connection-strip"><span className="online-dot" />{active.name}<span>·</span><span>{active.username}@{active.host}</span><span className="connected">{t.connected}</span></div>
           <div className="file-display-region" onContextMenu={(event) => openBrowserContext(event)}>
           {isDragOver && <div className="drop-overlay"><Upload size={32}/><strong>{p2.drop}</strong></div>}
-          {viewMode === 'list' && <div className="file-table" role="table" style={{ '--file-columns': `${visibleColumns.map((column) => column === 'name' ? `minmax(${columnWidths[column]}px, 1fr)` : `${columnWidths[column]}px`).join(' ')} 30px`, '--file-min-width': `${visibleColumns.reduce((total, column) => total + columnWidths[column], 0) + 40 + visibleColumns.length * 8}px` } as React.CSSProperties}>
+          {viewMode === 'list' && <div className="file-table" role="table" style={{ '--file-columns': `${visibleColumns.map((column) => `${columnWidths[column]}px`).join(' ')} minmax(0, 1fr) 30px`, '--file-min-width': `${visibleColumns.reduce((total, column) => total + columnWidths[column], 0) + 48 + visibleColumns.length * 8}px` } as React.CSSProperties}>
             <div className="file-header" role="row" onContextMenu={openColumnVisibilityMenu}>
-              {visibleColumns.map((column) => <ResizableColumnHeader key={column} label={columnLabel(column)} column={column} width={columnWidths[column]} resizeLabel={columnsText.resize} sorted={sortColumn === column} direction={sortDirection} onSort={sortByColumn} onStart={startColumnResize} onAdjust={adjustColumnWidth}/>)}<span className="actions-column-heading" role="columnheader" />
+              {visibleColumns.map((column) => <ResizableColumnHeader key={column} label={columnLabel(column)} column={column} width={columnWidths[column]} resizeLabel={columnsText.resize} sorted={sortColumn === column} direction={sortDirection} onSort={sortByColumn} onStart={startColumnResize} onAdjust={adjustColumnWidth}/>)}<span className="file-grid-spacer" aria-hidden="true"/><span className="actions-column-heading" role="columnheader" />
             </div>
-            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`file-row interactive ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="row" aria-selected={selected} tabIndex={0} draggable={entry.file_type !== 'Symlink'} onContextMenu={(event) => openEntryContext(event, entry)} onClick={(event) => scheduleRemoteDragPreparation(event, entry)} onKeyDown={(event) => { if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(event, entry); } if (event.key === 'Enter') { event.preventDefault(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); } }} onDragStart={(event) => startRemoteDrag(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); }}>
-              {visibleColumns.map((column) => <span className={`list-cell ${column}-column`} role="cell" key={column}>{renderListCell(entry, column)}</span>)}<button aria-label={menuText.information} title={menuText.information} onClick={(event) => openFileInformation(event, entry)}><MoreHorizontal size={18}/></button>
+            {filteredEntries.map((entry) => { const remotePath = entryRemotePath(path, entry); const selected = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const renaming = isInlineRenaming(entry, path); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`file-row interactive ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entryIdentity(entry)} role="row" aria-selected={selected} tabIndex={0} draggable={entry.file_type !== 'Symlink' && !renaming} onContextMenu={(event) => openEntryContext(event, entry)} onClick={(event) => scheduleRemoteDragPreparation(event, entry)} onKeyDown={(event) => { if (event.key === 'F2') { beginInlineRename(event, entry, path); return; } if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(event, entry); } if (event.key === 'Enter') { event.preventDefault(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); } }} onDragStart={(event) => startRemoteDrag(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); }}>
+              {visibleColumns.map((column) => <span className={`list-cell ${column}-column`} role="cell" key={column}>{renderListCell(entry, column, path, selected)}</span>)}<span className="file-grid-spacer" aria-hidden="true"/><button aria-label={menuText.information} title={menuText.information} onClick={(event) => openFileInformation(event, entry)}><MoreHorizontal size={18}/></button>
             </div>; })}
           </div>}
           {viewMode === 'icons' && <div className="icon-grid" role="grid">
             {filteredEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
-            {filteredEntries.map((entry) => { const remotePath = joinPath(path, entry.name); const selected = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`icon-entry ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} role="gridcell" aria-selected={selected} key={entry.name} draggable={entry.file_type !== 'Symlink'} onContextMenu={(event) => openEntryContext(event, entry)} onDragStart={(event) => startRemoteDrag(event, entry)}>
-              <button className="icon-entry-main" title={entry.name} onClick={(event) => scheduleRemoteDragPreparation(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); }} onKeyDown={(event) => { if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(event, entry); } if (event.key !== 'Enter') return; event.preventDefault(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); }}>
+            {filteredEntries.map((entry) => { const remotePath = entryRemotePath(path, entry); const selected = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const renaming = isInlineRenaming(entry, path); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`icon-entry ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} role="gridcell" aria-selected={selected} key={entryIdentity(entry)} draggable={entry.file_type !== 'Symlink' && !renaming} onContextMenu={(event) => openEntryContext(event, entry)} onDragStart={(event) => startRemoteDrag(event, entry)}>
+              {renaming ? <div className="icon-entry-main inline-renaming">
+                <RemoteEntryIcon entry={entry} className="entry-art" size={entry.file_type === 'Directory' ? 46 : 44}/>
+                {inlineRenameInput('icons')}<small>{entry.file_type === 'Directory' ? entry.permissions ?? '—' : formatBytes(entry.size)}</small>
+              </div> : <button className="icon-entry-main" title={selected ? menuText.rename : entry.name} onClick={(event) => { if (selected) beginInlineRename(event, entry, path); else scheduleRemoteDragPreparation(event, entry); }} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); }} onKeyDown={(event) => { if (event.key === 'F2') { beginInlineRename(event, entry, path); return; } if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(event, entry); } if (event.key !== 'Enter') return; event.preventDefault(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); }}>
                 <RemoteEntryIcon entry={entry} className="entry-art" size={entry.file_type === 'Directory' ? 46 : 44}/>
                 <strong>{entry.name}</strong><small>{entry.file_type === 'Directory' ? entry.permissions ?? '—' : formatBytes(entry.size)}</small>
-              </button>
+              </button>}
               <button className="icon-entry-more" aria-label={menuText.information} title={menuText.information} onClick={(event) => openFileInformation(event, entry)}><MoreHorizontal size={16}/></button>
             </div>; })}
           </div>}
           {viewMode === 'columns' && <div className="column-browser" role="listbox" aria-label={viewsText.columns}>
             {columnLevels.map((level, levelIndex) => {
-              const visibleLevelEntries = level.entries.filter((entry) => entry.name.toLowerCase().includes(query.toLowerCase()));
+              const visibleLevelEntries = level.entries.filter((entry) => (preferences.showHiddenFiles || !entry.name.startsWith('.')) && entry.name.toLowerCase().includes(query.toLowerCase()));
               return <section className="directory-column" key={`${level.path}-${levelIndex}`} aria-label={level.path} onContextMenu={(event) => openBrowserContext(event, level.path)}>
-                <div className="directory-column-title" title={level.path}>{level.path}</div>
+                <div className="directory-column-title" title={visibleRemotePath(level.path)}>{visibleRemotePath(level.path)}</div>
                 {visibleLevelEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
-                {visibleLevelEntries.map((entry) => { const remotePath = joinPath(level.path, entry.name); const selectedForAction = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`column-entry ${level.selectedName === entry.name || selectedForAction ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entry.name} role="option" aria-selected={level.selectedName === entry.name || selectedForAction} draggable={entry.file_type !== 'Symlink'} onContextMenu={(event) => openEntryContext(event, entry, level.path)} onDragStart={(event) => startRemoteDrag(event, entry, level.path)}>
-                  <button className="column-entry-main" title={entry.name} onClick={(event) => { if (event.detail <= 1) { cancelScheduledDragPreparation(); selectRemoteEntry(event, entry, level.path, visibleLevelEntries); if (!event.metaKey && !event.ctrlKey && !event.shiftKey) void openColumnEntry(levelIndex, entry); } }} onDoubleClick={() => { cancelScheduledDragPreparation(); if (entry.file_type !== 'Directory') void editRemoteFile(entry, level.path); }} onKeyDown={(event) => { if (event.key !== 'Enter') return; event.preventDefault(); entry.file_type === 'Directory' ? void openColumnEntry(levelIndex, entry) : void editRemoteFile(entry, level.path); }}>
+                {visibleLevelEntries.map((entry) => { const remotePath = entryRemotePath(level.path, entry); const selectedForAction = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const selected = level.selectedName === entryIdentity(entry) || selectedForAction; const renaming = isInlineRenaming(entry, level.path); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`column-entry ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entryIdentity(entry)} role="option" aria-selected={selected} draggable={entry.file_type !== 'Symlink' && !renaming} onContextMenu={(event) => openEntryContext(event, entry, level.path)} onDragStart={(event) => startRemoteDrag(event, entry, level.path)}>
+                  {renaming ? <div className="column-entry-main inline-renaming"><RemoteEntryIcon entry={entry} size={entry.file_type === 'Directory' ? 17 : 16}/>{inlineRenameInput('columns')}</div> : <button className="column-entry-main" title={selectedForAction ? menuText.rename : entry.name} onClick={(event) => { if (selectedForAction) { beginInlineRename(event, entry, level.path); return; } if (event.detail <= 1) { cancelScheduledDragPreparation(); selectRemoteEntry(event, entry, level.path, visibleLevelEntries); if (!event.metaKey && !event.ctrlKey && !event.shiftKey) void openColumnEntry(levelIndex, entry); } }} onDoubleClick={() => { cancelScheduledDragPreparation(); if (entry.file_type !== 'Directory') void editRemoteFile(entry, level.path); }} onKeyDown={(event) => { if (event.key === 'F2') { beginInlineRename(event, entry, level.path); return; } if (event.key !== 'Enter') return; event.preventDefault(); entry.file_type === 'Directory' ? void openColumnEntry(levelIndex, entry) : void editRemoteFile(entry, level.path); }}>
                     <RemoteEntryIcon entry={entry} size={entry.file_type === 'Directory' ? 17 : 16}/><span>{entry.name}</span>{entry.file_type === 'Directory' ? <ChevronRight size={14}/> : <small>{formatBytes(entry.size)}</small>}
-                  </button>
+                  </button>}
                   <button className="column-entry-more" aria-label={menuText.information} title={menuText.information} onClick={(event) => openFileInformation(event, entry, level.path)}><MoreHorizontal size={15}/></button>
                 </div>; })}
               </section>;
@@ -1584,8 +1941,8 @@ export default function App() {
       </div> : <div className="form-actions"><button type="button" onClick={() => settleDropConflict('cancel')}>{dropConflictText.cancel}</button><button type="button" className="primary" onClick={() => settleDropConflict('overwrite')}>{dropConflictText.overwrite}</button></div>}
       {dropConflict.incomingIsDirectory && dropConflict.existingIsDirectory && <div className="form-actions"><button type="button" onClick={() => settleDropConflict('cancel')}>{dropConflictText.cancel}</button></div>}
     </section></div>}
-    {showConnect && <ConnectSheet mode={connectSheetMode} bookmark={connectingBookmark} initialKeyPath={selectedKeyPath} defaultProtocol={preferences.defaultProtocol} t={t} phaseCopy={p1} passphraseText={sshPassphrasePromptCopy[language]} localCopy={bookmarkLocalText} s3Text={s3Copy[language]} sambaText={sambaCopy[language]} onClose={() => setShowConnect(false)} onSaved={(connection) => {
-      setConnections((current) => [connection, ...current.filter((item) => item.id !== connection.id)]);
+    {showConnect && <ConnectSheet mode={connectSheetMode} bookmark={connectingBookmark} initialKeyPath={selectedKeyPath} defaultProtocol={preferences.defaultProtocol} googleClientId={preferences.googleClientId} t={t} phaseCopy={p1} passphraseText={sshPassphrasePromptCopy[language]} localCopy={bookmarkLocalText} s3Text={s3Copy[language]} sambaText={sambaCopy[language]} googleText={googleDriveCopy[language]} onClose={() => setShowConnect(false)} onSaved={(connection) => {
+      setConnections((current) => upsertConnectionInOrder(current, connection));
       setActive((current) => {
         if (current?.id !== connection.id) return current;
         const targetChanged = connectionTargetChanged(current, connection);
@@ -1593,7 +1950,7 @@ export default function App() {
       });
       setNotice(t.bookmarkSaved);
       setShowConnect(false);
-    }} onConnected={(connection) => { setConnections((current) => [connection, ...current.filter((item) => item.id !== connection.id)]); void Promise.all([invoke('bookmark_save', { bookmark: connection }), invoke('connection_history_record', { bookmark: connection })]).then(() => invoke<ConnectionHistory[]>('connection_history_list')).then(setHistory).catch((reason) => setError(String(reason))); setActive(connection); setShowConnect(false); void navigateDirectory(connection, connection.initialPath, true); }} />}
+    }} onConnected={(connection) => { setConnections((current) => upsertConnectionInOrder(current, connection)); void invoke('bookmark_save', { bookmark: connection }).then(() => invoke('connection_history_record', { bookmark: connection })).then(() => invoke<ConnectionHistory[]>('connection_history_list')).then(setHistory).catch((reason) => setError(invokeErrorMessage(reason))); setActive(connection); setShowConnect(false); void navigateDirectory(connection, connection.initialPath, true); }} />}
     {showPreferences && <PreferencesSheet value={preferences} language={language} t={t} softwareUpdate={softwareUpdate} onCheckUpdate={() => void checkForSoftwareUpdate(true)} onShowUpdate={() => setShowSoftwareUpdate(true)} onClose={() => setShowPreferences(false)} onSave={(next) => { setPreferences(next); setShowPreferences(false); }} />}
     {showSoftwareUpdate && <SoftwareUpdateSheet state={softwareUpdate} language={language} onClose={() => { if (softwareUpdate.phase !== 'downloading') setShowSoftwareUpdate(false); }} onInstall={() => void downloadAndInstallSoftwareUpdate()} onRestart={() => void relaunch()} />}
     {syncLocalDirectory && <SyncPreviewSheet preview={syncPreview} localDirectory={syncLocalDirectory} remoteDirectory={path} direction={syncDirection} comparison={syncComparison} busy={syncPreviewBusy} executionBusy={syncExecutionBusy} error={syncPreviewError} exclusions={syncExclusions} conflictChoices={syncConflictChoices} progress={syncExecutionProgress} result={syncExecutionResult} history={syncHistory} t={t} text={syncText} onClose={() => { if (syncExecutionBusy) return; setSyncLocalDirectory(''); setSyncPreview(null); }} onDirection={(direction) => { setSyncDirection(direction); setSyncExecutionResult(null); void calculateSyncPreview(syncLocalDirectory, direction); }} onComparison={(comparison) => { setSyncComparison(comparison); setSyncPreview(null); setSyncExecutionResult(null); void calculateSyncPreview(syncLocalDirectory, syncDirection, syncExclusions, comparison); }} onExclusions={(value) => { setSyncExclusions(value); setSyncPreview(null); setSyncExecutionResult(null); }} onConflict={(itemPath, choice) => setSyncConflictChoices((current) => ({ ...current, [itemPath]: choice }))} onRefresh={() => void calculateSyncPreview()} onExecute={() => void executeSync()} onCancelExecution={() => void cancelSyncExecution()} onClearHistory={() => void clearSyncHistory()} />}
@@ -1692,7 +2049,7 @@ function SyncPreviewSheet({ preview, localDirectory, remoteDirectory, direction,
   </section></div>;
 }
 
-function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phaseCopy, passphraseText, localCopy, s3Text, sambaText, onClose, onSaved, onConnected }: { mode: 'connect' | 'edit'; bookmark: Connection | null; initialKeyPath: string; defaultProtocol: Protocol; t: typeof copy[keyof typeof copy]; phaseCopy: typeof phaseOneCopy[keyof typeof phaseOneCopy]; passphraseText: typeof sshPassphrasePromptCopy[keyof typeof sshPassphrasePromptCopy]; localCopy: typeof bookmarkLocalCopy[keyof typeof bookmarkLocalCopy]; s3Text: typeof s3Copy[keyof typeof s3Copy]; sambaText: typeof sambaCopy[keyof typeof sambaCopy]; onClose: () => void; onSaved: (connection: Connection) => void; onConnected: (connection: Connection) => void }) {
+function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, googleClientId, t, phaseCopy, passphraseText, localCopy, s3Text, sambaText, googleText, onClose, onSaved, onConnected }: { mode: 'connect' | 'edit'; bookmark: Connection | null; initialKeyPath: string; defaultProtocol: Protocol; googleClientId: string; t: typeof copy[keyof typeof copy]; phaseCopy: typeof phaseOneCopy[keyof typeof phaseOneCopy]; passphraseText: typeof sshPassphrasePromptCopy[keyof typeof sshPassphrasePromptCopy]; localCopy: typeof bookmarkLocalCopy[keyof typeof bookmarkLocalCopy]; s3Text: typeof s3Copy[keyof typeof s3Copy]; sambaText: typeof sambaCopy[keyof typeof sambaCopy]; googleText: typeof googleDriveCopy[keyof typeof googleDriveCopy]; onClose: () => void; onSaved: (connection: Connection) => void; onConnected: (connection: Connection) => void }) {
   const [bookmarkName, setBookmarkName] = useState(bookmark?.name ?? '');
   const [protocol, setProtocol] = useState<Protocol>(bookmark?.protocol ?? defaultProtocol);
   const [host, setHost] = useState(bookmark?.host ?? '');
@@ -1727,13 +2084,14 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phas
     const selected = await open({ multiple: false, directory: false });
     if (selected && !Array.isArray(selected)) setKeyPath(selected);
   }
-  useEffect(() => { if (bookmark) void invoke<string | null>('credential_load', { bookmarkId: bookmark.id }).then((saved) => { if (!saved) return; if (bookmark.protocol === 's3') { try { const value = JSON.parse(saved) as { accessKeyId?: string; secretAccessKey?: string; sessionToken?: string }; setUsername(value.accessKeyId ?? ''); setPassword(value.secretAccessKey ?? ''); setS3SessionToken(value.sessionToken ?? ''); } catch { setUsername(''); setPassword(''); } } else if (!(bookmark.protocol === 'smb' && bookmark.smbGuest) && !bookmark.keyPassphraseNotRequired) setPassword(saved); }).catch((reason) => setError(`${passphraseText.keychainLoadFailed} ${invokeErrorMessage(reason)}`)); }, [bookmark, passphraseText.keychainLoadFailed]);
+  useEffect(() => { if (bookmark && bookmark.protocol !== 'googleDrive') void invoke<string | null>('credential_load', { bookmarkId: bookmark.id }).then((saved) => { if (!saved) return; if (bookmark.protocol === 's3') { try { const value = JSON.parse(saved) as { accessKeyId?: string; secretAccessKey?: string; sessionToken?: string }; setUsername(value.accessKeyId ?? ''); setPassword(value.secretAccessKey ?? ''); setS3SessionToken(value.sessionToken ?? ''); } catch { setUsername(''); setPassword(''); } } else if (!(bookmark.protocol === 'smb' && bookmark.smbGuest) && !bookmark.keyPassphraseNotRequired) setPassword(saved); }).catch((reason) => setError(`${passphraseText.keychainLoadFailed} ${invokeErrorMessage(reason)}`)); }, [bookmark, passphraseText.keychainLoadFailed]);
   async function submit(event: React.FormEvent) {
     event.preventDefault(); setError('');
     const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
     const intent: 'connect' | 'save' = submitter?.value === 'save' ? 'save' : 'connect';
     if (!Number.isInteger(port) || port < 1 || port > 65535) { setError(t.invalidPort); return; }
     if (protocol === 'smb' && !smbShare.trim()) { setError(`${sambaText.share}: ${sambaText.shareHint}`); return; }
+    if (protocol === 'googleDrive' && !googleClientId.trim().endsWith('.apps.googleusercontent.com')) { setError(googleText.invalidClientId); return; }
     setBusy(true); setBusyMessage(intent === 'connect' ? (protocol === 'sftp' ? t.checkingHostKey : t.connectingToServer) : '');
     try {
       const useNoKeyPassphrase = protocol === 'sftp' && Boolean(keyPath.trim()) && keyPassphraseNotRequired && !passphrasePromptOverride.current;
@@ -1755,19 +2113,27 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phas
         if (bookmark?.hostKey && endpointUnchanged && bookmark.hostKey !== hostKey) { setError(t.hostKeyChanged); return; }
         if (hostKey && (!bookmark?.hostKey || !endpointUnchanged) && !window.confirm(t.trustHostKey.replace('{{fingerprint}}', hostKey))) return;
       }
-      const connection: Connection = { id: bookmark?.id ?? crypto.randomUUID(), name: bookmarkName.trim() || host, protocol, host, port, username: protocol === 's3' || (protocol === 'smb' && smbGuest) ? '' : username, initialPath: initialDirectory.trim() || '/', keyPath: keyPath || undefined, keyPassphraseNotRequired: useNoKeyPassphrase, hostKey, localDirectory: localDirectory || undefined, tags, s3Region: protocol === 's3' ? s3Region.trim() : undefined, s3Endpoint: protocol === 's3' && s3Endpoint.trim() ? s3Endpoint.trim() : undefined, s3ForcePathStyle: protocol === 's3' && s3ForcePathStyle, s3PreserveEmptyDirectories: protocol === 's3' && s3PreserveEmptyDirectories, smbShare: protocol === 'smb' ? smbShare.trim() : undefined, smbDomain: protocol === 'smb' && smbDomain.trim() ? smbDomain.trim() : undefined, smbGuest: protocol === 'smb' && smbGuest };
+      let googleStatus: GoogleAuthorizationStatus | null = null;
+      if (protocol === 'googleDrive') {
+        googleStatus = await invoke<GoogleAuthorizationStatus>('google_drive_authorization_status', { clientId: googleClientId.trim() });
+        if (intent === 'connect' && (!googleStatus.authorized || !googleStatus.clientMatches)) { setError(googleStatus.authorized ? googleText.mismatch : googleText.connectHint); return; }
+      }
+      const connectionHost = protocol === 'googleDrive' ? 'drive.google.com' : host.trim();
+      const connectionUsername = protocol === 'googleDrive' ? (googleStatus?.email ?? 'Google Account') : protocol === 's3' || (protocol === 'smb' && smbGuest) ? '' : username;
+      const connection: Connection = { id: bookmark?.id ?? crypto.randomUUID(), name: bookmarkName.trim() || (protocol === 'googleDrive' ? 'Google Drive' : connectionHost), protocol, host: connectionHost, port, username: connectionUsername, initialPath: initialDirectory.trim() || '/', keyPath: keyPath || undefined, keyPassphraseNotRequired: useNoKeyPassphrase, hostKey, localDirectory: localDirectory || undefined, tags, s3Region: protocol === 's3' ? s3Region.trim() : undefined, s3Endpoint: protocol === 's3' && s3Endpoint.trim() ? s3Endpoint.trim() : undefined, s3ForcePathStyle: protocol === 's3' && s3ForcePathStyle, s3PreserveEmptyDirectories: protocol === 's3' && s3PreserveEmptyDirectories, smbShare: protocol === 'smb' ? smbShare.trim() : undefined, smbDomain: protocol === 'smb' && smbDomain.trim() ? smbDomain.trim() : undefined, smbGuest: protocol === 'smb' && smbGuest };
       const storedCredential = protocol === 's3' ? JSON.stringify({ accessKeyId: username, secretAccessKey: resolvedPassword, sessionToken: s3SessionToken || undefined }) : resolvedPassword;
-      const shouldStoreCredential = protocol === 'smb' && smbGuest ? false : !(protocol === 'sftp' && keyPath.trim()) || saveKeyPassphrase;
+      const shouldStoreCredential = protocol === 'googleDrive' || protocol === 'smb' && smbGuest ? false : !(protocol === 'sftp' && keyPath.trim()) || saveKeyPassphrase;
+      const shouldDeleteStoredCredential = Boolean(bookmark && bookmark.protocol !== 'googleDrive' && (connection.keyPassphraseNotRequired || !shouldStoreCredential));
       if (intent === 'save') {
-        if (connection.keyPassphraseNotRequired || !shouldStoreCredential) await invoke('credential_delete', { bookmarkId: connection.id });
+        if (shouldDeleteStoredCredential) await invoke('credential_delete', { bookmarkId: connection.id });
         else if (resolvedPassword) await invoke('credential_save', { bookmarkId: connection.id, password: storedCredential });
         await invoke('bookmark_save', { bookmark: connection });
         onSaved(connection);
         return;
       }
       setBusyMessage(t.connectingToServer);
-      await invoke('connection_connect', { request: { connectionId: connection.id, protocol, host: host.trim(), port, username: connection.username, password: protocol === 'sftp' && keyPath.trim() || (protocol === 'smb' && smbGuest) ? null : resolvedPassword || null, keyPath: keyPath.trim() || null, passphrase: usesSshKeyPassphrase ? resolvedPassword : null, expectedHostKey: hostKey ?? null, initialPath: connection.initialPath, s3Region: connection.s3Region ?? null, s3Endpoint: connection.s3Endpoint ?? null, s3SessionToken: s3SessionToken || null, s3ForcePathStyle: connection.s3ForcePathStyle ?? false, s3PreserveEmptyDirectories: connection.s3PreserveEmptyDirectories ?? false, smbShare: connection.smbShare ?? null, smbDomain: connection.smbDomain ?? null, smbGuest: connection.smbGuest ?? false } });
-      if (connection.keyPassphraseNotRequired || !shouldStoreCredential) await invoke('credential_delete', { bookmarkId: connection.id });
+      await invoke('connection_connect', { request: { connectionId: connection.id, protocol, host: connection.host, port, username: connection.username, password: protocol === 'googleDrive' || protocol === 'sftp' && keyPath.trim() || (protocol === 'smb' && smbGuest) ? null : resolvedPassword || null, keyPath: keyPath.trim() || null, passphrase: usesSshKeyPassphrase ? resolvedPassword : null, expectedHostKey: hostKey ?? null, initialPath: connection.initialPath, s3Region: connection.s3Region ?? null, s3Endpoint: connection.s3Endpoint ?? null, s3SessionToken: s3SessionToken || null, s3ForcePathStyle: connection.s3ForcePathStyle ?? false, s3PreserveEmptyDirectories: connection.s3PreserveEmptyDirectories ?? false, smbShare: connection.smbShare ?? null, smbDomain: connection.smbDomain ?? null, smbGuest: connection.smbGuest ?? false, googleClientId: protocol === 'googleDrive' ? googleClientId.trim() : null } });
+      if (shouldDeleteStoredCredential) await invoke('credential_delete', { bookmarkId: connection.id });
       else if (resolvedPassword) await invoke('credential_save', { bookmarkId: connection.id, password: storedCredential });
       onConnected(connection);
     } catch (reason) {
@@ -1784,13 +2150,14 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, t, phas
     <div className="sheet-title"><div><h2>{mode === 'edit' ? t.editBookmarkTitle : t.connectTitle}</h2><p>{mode === 'edit' ? t.editBookmark : t.connect}</p></div><button type="button" onClick={onClose}>×</button></div>
     <div className="bookmark-sheet-scroll">
       <label>{t.bookmarkName}<input {...technicalInputProps} required value={bookmarkName} onChange={(event) => setBookmarkName(event.target.value)} placeholder={t.bookmarkNameHint}/></label>
-      <label>{t.protocol}<select value={protocol} onChange={(event) => updateProtocol(event.target.value as Protocol)}><option value="sftp">SFTP</option><option value="ftp">FTP</option><option value="ftps">Explicit FTPS</option><option value="webdav">WebDAV (HTTPS)</option><option value="s3">Amazon S3 / S3-compatible</option><option value="smb">Samba / SMB 2/3</option></select></label>
-      <div className="form-grid"><label>{protocol === 's3' ? s3Text.bucket : t.host}<input {...technicalInputProps} required value={host} onChange={(event) => setHost(event.target.value)} placeholder={protocol === 's3' ? 'example-bucket' : 'example.com'}/></label>{protocol !== 's3' && <label>{t.port}<input required min={1} max={65535} step={1} type="number" value={port} onChange={(event) => setPort(Number(event.target.value))}/></label>}</div>
+      <label>{t.protocol}<select value={protocol} onChange={(event) => updateProtocol(event.target.value as Protocol)}><option value="sftp">SFTP</option><option value="ftp">FTP</option><option value="ftps">Explicit FTPS</option><option value="webdav">WebDAV (HTTPS)</option><option value="s3">Amazon S3 / S3-compatible</option><option value="smb">Samba / SMB 2/3</option><option value="googleDrive">Google Drive</option></select></label>
+      {protocol !== 'googleDrive' && <div className="form-grid"><label>{protocol === 's3' ? s3Text.bucket : t.host}<input {...technicalInputProps} required value={host} onChange={(event) => setHost(event.target.value)} placeholder={protocol === 's3' ? 'example-bucket' : 'example.com'}/></label>{protocol !== 's3' && <label>{t.port}<input required min={1} max={65535} step={1} type="number" value={port} onChange={(event) => setPort(Number(event.target.value))}/></label>}</div>}
+      {protocol === 'googleDrive' && <p className="protocol-security-hint google-drive-connect-hint"><Cloud size={17}/><span>{googleText.connectHint}</span></p>}
       {protocol === 'webdav' && <p className="protocol-security-hint">{phaseCopy.webdavHint}</p>}
       <label>{t.initialDirectory}<input {...technicalInputProps} required value={initialDirectory} onChange={(event) => setInitialDirectory(event.target.value)} placeholder={t.initialDirectoryHint}/></label>
       {protocol === 's3' && <><p className="protocol-security-hint">{s3Text.readOnly}</p><div className="form-grid"><label>{s3Text.region}<input {...technicalInputProps} required value={s3Region} onChange={(event) => setS3Region(event.target.value)} placeholder="ap-northeast-1"/></label><label>{s3Text.endpoint}<input {...technicalInputProps} type="url" value={s3Endpoint} onChange={(event) => setS3Endpoint(event.target.value)} placeholder="https://s3.example.com"/></label></div></>}
       {protocol === 'smb' && <><div className="form-grid"><label>{sambaText.share}<input {...technicalInputProps} required value={smbShare} onChange={(event) => setSmbShare(event.target.value)} placeholder={sambaText.shareHint}/></label><label>{sambaText.domain}<input {...technicalInputProps} value={smbDomain} onChange={(event) => setSmbDomain(event.target.value)} placeholder={sambaText.domainHint}/></label></div><label className="check-row"><input type="checkbox" checked={smbGuest} onChange={(event) => { setSmbGuest(event.target.checked); if (event.target.checked) setPassword(''); }}/><span>{sambaText.guest}</span></label><p className="protocol-security-hint">{sambaText.security}</p></>}
-      {!(protocol === 'smb' && smbGuest) && <label>{protocol === 's3' ? s3Text.accessKey : t.user}<input {...technicalInputProps} required value={username} onChange={(event) => setUsername(event.target.value)}/></label>}{!(protocol === 'sftp' && keyPath.trim()) && !(protocol === 'smb' && smbGuest) && <label>{protocol === 's3' ? s3Text.secretKey : t.password}<input {...technicalInputProps} type="password" value={password} onChange={(event) => setPassword(event.target.value)}/></label>}
+      {protocol !== 'googleDrive' && !(protocol === 'smb' && smbGuest) && <label>{protocol === 's3' ? s3Text.accessKey : t.user}<input {...technicalInputProps} required value={username} onChange={(event) => setUsername(event.target.value)}/></label>}{protocol !== 'googleDrive' && !(protocol === 'sftp' && keyPath.trim()) && !(protocol === 'smb' && smbGuest) && <label>{protocol === 's3' ? s3Text.secretKey : t.password}<input {...technicalInputProps} type="password" value={password} onChange={(event) => setPassword(event.target.value)}/></label>}
       {protocol === 's3' && <><label>{s3Text.sessionToken}<input type="password" value={s3SessionToken} onChange={(event) => setS3SessionToken(event.target.value)}/></label><label className="check-row"><input type="checkbox" checked={s3ForcePathStyle} onChange={(event) => setS3ForcePathStyle(event.target.checked)}/><span>{s3Text.pathStyle}</span></label><label className="check-row"><input type="checkbox" checked={s3PreserveEmptyDirectories} onChange={(event) => setS3PreserveEmptyDirectories(event.target.checked)}/><span>{s3Text.preserveEmpty}</span></label></>}
       {protocol === 'sftp' && <label>{t.key}<span className="ssh-key-picker"><input {...technicalInputProps} value={keyPath} onChange={(event) => setKeyPath(event.target.value)} placeholder="~/.ssh/id_ed25519"/><button type="button" onClick={() => void selectSshKey()}>{t.chooseKey}</button></span><small className="field-hint">{t.keyFormatHint}</small></label>}
       {protocol === 'sftp' && keyPath.trim() && <><label className="check-row"><input type="checkbox" checked={keyPassphraseNotRequired} onChange={(event) => { passphrasePromptOverride.current = false; setKeyPassphraseNotRequired(event.target.checked); if (event.target.checked) setPassword(''); }}/><span>{passphraseText.withoutPassphrase}</span></label><p className="protocol-security-hint ssh-passphrase-option-hint">{passphraseText.withoutPassphraseDetail}</p>{!keyPassphraseNotRequired && <><label>{t.keyPassphrase}<input type="password" value={password} onChange={(event) => setPassword(event.target.value)}/></label><label className="check-row"><input type="checkbox" checked={saveKeyPassphrase} onChange={(event) => setSaveKeyPassphrase(event.target.checked)}/><span>{passphraseText.saveInKeychain}</span></label><p className="protocol-security-hint ssh-passphrase-option-hint">{passphraseText.saveInKeychainDetail}</p></>}</>}
@@ -1828,20 +2195,71 @@ function SoftwareUpdateSheet({ state, language, onClose, onInstall, onRestart }:
 
 function PreferencesSheet({ value, language, t, softwareUpdate, onCheckUpdate, onShowUpdate, onClose, onSave }: { value: Preferences; language: Language; t: typeof copy[keyof typeof copy]; softwareUpdate: SoftwareUpdateState; onCheckUpdate: () => void; onShowUpdate: () => void; onClose: () => void; onSave: (preferences: Preferences) => void }) {
   const [draft, setDraft] = useState(value);
+  const [googleStatus, setGoogleStatus] = useState<GoogleAuthorizationStatus | null>(null);
+  const [googleBusy, setGoogleBusy] = useState(false);
+  const [googleError, setGoogleError] = useState('');
   const text = preferencesCopy[language];
   const updateText = softwareUpdateCopy[language];
+  const googleText = googleDriveCopy[language];
   const tabs = [
     { id: 'general' as const, label: text.general },
     { id: 'appearance' as const, label: text.appearance },
     { id: 'transfers' as const, label: text.transfers },
     { id: 'editor' as const, label: text.editorTab },
+    { id: 'googleDrive' as const, label: googleText.tab },
     { id: 'security' as const, label: text.security },
     { id: 'updates' as const, label: text.updates },
   ];
   const [activeTab, setActiveTab] = useState<(typeof tabs)[number]['id']>('general');
+  const normalizedGoogleClientId = draft.googleClientId.trim();
+  const validGoogleClientId = normalizedGoogleClientId.endsWith('.apps.googleusercontent.com');
+  useEffect(() => {
+    if (activeTab !== 'googleDrive') return;
+    let cancelled = false;
+    setGoogleError('');
+    void invoke<GoogleAuthorizationStatus>('google_drive_authorization_status', { clientId: normalizedGoogleClientId }).then((status) => {
+      if (!cancelled) setGoogleStatus(status);
+    }).catch((reason) => {
+      if (!cancelled) { setGoogleStatus(null); setGoogleError(invokeErrorMessage(reason)); }
+    });
+    return () => { cancelled = true; };
+    // The Keychain is read only when the user opens this tab. Editing the ID
+    // invalidates the visible match below without repeatedly querying Keychain.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
   async function selectEditor() {
     const selected = await chooseEditorApplication();
     if (selected) setDraft((current) => ({ ...current, editorPath: selected }));
+  }
+  async function openGoogleSetupPage(page: 'developers' | 'project' | 'drive-api' | 'auth' | 'clients') {
+    setGoogleError('');
+    try { await invoke('google_drive_open_setup_page', { page }); }
+    catch (reason) { setGoogleError(`${googleText.openFailed} ${invokeErrorMessage(reason)}`); }
+  }
+  async function authorizeGoogleDrive() {
+    if (!validGoogleClientId) { setGoogleError(googleText.invalidClientId); return; }
+    setGoogleBusy(true); setGoogleError('');
+    try { setGoogleStatus(await invoke<GoogleAuthorizationStatus>('google_drive_authorize', { clientId: normalizedGoogleClientId })); }
+    catch (reason) { setGoogleError(`${googleText.authFailed} ${invokeErrorMessage(reason)}`); }
+    finally { setGoogleBusy(false); }
+  }
+  async function importGoogleCredentials() {
+    const selected = await open({ multiple: false, directory: false, filters: [{ name: 'Google OAuth credentials', extensions: ['json'] }] });
+    if (!selected || Array.isArray(selected)) return;
+    setGoogleBusy(true); setGoogleError('');
+    try {
+      const clientId = await invoke<string>('google_drive_import_credentials', { path: selected });
+      setDraft((current) => ({ ...current, googleClientId: clientId }));
+      setGoogleStatus(await invoke<GoogleAuthorizationStatus>('google_drive_authorization_status', { clientId }));
+    } catch (reason) { setGoogleError(invokeErrorMessage(reason)); }
+    finally { setGoogleBusy(false); }
+  }
+  async function disconnectGoogleDrive() {
+    if (!window.confirm(googleText.revokeConfirm)) return;
+    setGoogleBusy(true); setGoogleError('');
+    try { await invoke('google_drive_disconnect'); setGoogleStatus((current) => ({ authorized: false, clientMatches: false, credentialsReady: current?.credentialsReady ?? false })); }
+    catch (reason) { setGoogleError(invokeErrorMessage(reason)); }
+    finally { setGoogleBusy(false); }
   }
   return <div className="modal-backdrop" role="presentation"><form className="connect-sheet preferences-sheet" onSubmit={(event) => { event.preventDefault(); onSave(draft); }}>
     <div className="sheet-title"><div><h2>{text.title}</h2><p>{text.detail}</p></div><button type="button" onClick={onClose}>×</button></div>
@@ -1852,17 +2270,34 @@ function PreferencesSheet({ value, language, t, softwareUpdate, onCheckUpdate, o
       <div className="preferences-sheet-scroll">
         {activeTab === 'general' && <section className="preferences-panel" id="preferences-panel-general" role="tabpanel"><h3>{text.general}</h3>
           <label>{text.language}<select value={draft.language} onChange={(event) => setDraft((current) => ({ ...current, language: event.target.value as Language }))}><option value="ja">日本語</option><option value="en">English</option><option value="zh-CN">简体中文</option></select></label>
-          <label>{text.defaultProtocol}<select value={draft.defaultProtocol} onChange={(event) => setDraft((current) => ({ ...current, defaultProtocol: event.target.value as Protocol }))}><option value="sftp">SFTP</option><option value="ftp">FTP</option><option value="ftps">Explicit FTPS</option><option value="webdav">WebDAV (HTTPS)</option><option value="s3">Amazon S3 / S3-compatible</option><option value="smb">Samba / SMB 2/3</option></select></label>
+          <label>{text.defaultProtocol}<select value={draft.defaultProtocol} onChange={(event) => setDraft((current) => ({ ...current, defaultProtocol: event.target.value as Protocol }))}><option value="sftp">SFTP</option><option value="ftp">FTP</option><option value="ftps">Explicit FTPS</option><option value="webdav">WebDAV (HTTPS)</option><option value="s3">Amazon S3 / S3-compatible</option><option value="smb">Samba / SMB 2/3</option><option value="googleDrive">Google Drive</option></select></label>
         </section>}
         {activeTab === 'appearance' && <section className="preferences-panel" id="preferences-panel-appearance" role="tabpanel"><h3>{text.appearance}</h3>
           <label>{text.theme}<select value={draft.theme} onChange={(event) => setDraft((current) => ({ ...current, theme: event.target.value as Preferences['theme'] }))}><option value="system">{text.system}</option><option value="light">{text.light}</option><option value="dark">{text.dark}</option></select></label>
-          <div className="file-name-size-setting"><div className="preference-setting-heading"><strong>{text.fileNameSize}</strong><output>{draft.fileNameFontSize}px</output></div><p className="preferences-field-detail">{text.fileNameSizeDetail}</p><input aria-label={text.fileNameSize} type="range" min="10" max="20" step="1" value={draft.fileNameFontSize} onChange={(event) => setDraft((current) => ({ ...current, fileNameFontSize: Number(event.target.value) }))}/><div className="file-name-size-preview" style={{ fontSize: `${draft.fileNameFontSize}px` }}><FileText size={18}/><span>{text.fileNamePreview}</span></div></div>
+          <label className="check-row"><input type="checkbox" checked={draft.showHiddenFiles} aria-describedby="show-hidden-files-detail" onChange={(event) => setDraft((current) => ({ ...current, showHiddenFiles: event.target.checked }))}/><span>{text.showHiddenFiles}</span></label>
+          <p className="preferences-field-detail" id="show-hidden-files-detail">{text.showHiddenFilesDetail}</p>
+          <label>{text.fileNameWeight}<select value={draft.fileNameFontWeight} onChange={(event) => setDraft((current) => ({ ...current, fileNameFontWeight: event.target.value as Preferences['fileNameFontWeight'] }))}><option value="normal">{text.normal}</option><option value="bold">{text.bold}</option></select></label>
+          <label>{text.fileRowDensity}<select value={draft.fileRowDensity} onChange={(event) => setDraft((current) => ({ ...current, fileRowDensity: event.target.value as Preferences['fileRowDensity'] }))}><option value="extraCompact">{text.extraCompact}</option><option value="compact">{text.compact}</option><option value="standard">{text.standard}</option><option value="comfortable">{text.comfortable}</option></select></label>
+          <div className="file-name-size-setting"><div className="preference-setting-heading"><strong>{text.fileNameSize}</strong><output>{draft.fileNameFontSize}px</output></div><p className="preferences-field-detail">{text.fileNameSizeDetail}</p><input aria-label={text.fileNameSize} type="range" min="10" max="20" step="1" value={draft.fileNameFontSize} onChange={(event) => setDraft((current) => ({ ...current, fileNameFontSize: Number(event.target.value) }))}/><div className="file-name-size-preview" style={{ fontSize: `${draft.fileNameFontSize}px`, fontWeight: draft.fileNameFontWeight === 'normal' ? 400 : 650 }}><FileText size={18}/><span>{text.fileNamePreview}</span></div></div>
         </section>}
         {activeTab === 'transfers' && <section className="preferences-panel" id="preferences-panel-transfers" role="tabpanel"><h3>{text.transfers}</h3>
           <label>{text.conflictPolicy}<select value={draft.conflictPolicy} onChange={(event) => setDraft((current) => ({ ...current, conflictPolicy: event.target.value as Preferences['conflictPolicy'] }))}><option value="ask">{text.ask}</option><option value="overwrite">{text.overwrite}</option><option value="skip">{text.skip}</option></select></label>
           <label className="check-row"><input type="checkbox" checked={draft.transferNotifications} onChange={(event) => setDraft((current) => ({ ...current, transferNotifications: event.target.checked }))}/><span>{text.notifications}</span></label>
         </section>}
         {activeTab === 'editor' && <section className="preferences-panel" id="preferences-panel-editor" role="tabpanel"><h3>{text.editor}</h3><p className="preferences-field-detail">{text.editorDetail}</p><div className="editor-picker"><input readOnly value={draft.editorPath} placeholder={text.noEditor}/><button type="button" onClick={() => void selectEditor()}>{text.chooseEditor}</button>{draft.editorPath && <button type="button" onClick={() => setDraft((current) => ({ ...current, editorPath: '' }))}>{text.clearEditor}</button>}</div></section>}
+        {activeTab === 'googleDrive' && <section className="preferences-panel google-drive-preferences" id="preferences-panel-googleDrive" role="tabpanel"><div className="google-drive-heading"><span className="google-drive-mark"><Cloud size={22}/></span><div><h3>{googleText.setupTitle}</h3><p className="preferences-field-detail">{googleText.setupDetail}</p></div></div>
+          <button className="google-developers-link" type="button" onClick={() => void openGoogleSetupPage('developers')}><Link2 size={15}/>{googleText.developers}</button>
+          <ol className="google-setup-steps">
+            <li><div><strong>{googleText.project}</strong><p>{googleText.stepProject}</p></div><button type="button" onClick={() => void openGoogleSetupPage('project')}><Link2 size={14}/></button></li>
+            <li><div><strong>{googleText.api}</strong><p>{googleText.stepApi}</p></div><button type="button" onClick={() => void openGoogleSetupPage('drive-api')}><Link2 size={14}/></button></li>
+            <li><div><strong>{googleText.consent}</strong><p>{googleText.stepConsent}</p></div><button type="button" onClick={() => void openGoogleSetupPage('auth')}><Link2 size={14}/></button></li>
+            <li><div><strong>{googleText.client}</strong><p>{googleText.stepClient}</p></div><button type="button" onClick={() => void openGoogleSetupPage('clients')}><Link2 size={14}/></button></li>
+          </ol>
+          <div className="google-oauth-card"><p>{googleText.stepPaste}</p><button type="button" disabled={googleBusy} onClick={() => void importGoogleCredentials()}><FileJson size={15}/>{googleText.importCredentials}</button><label>{googleText.clientId}<input {...technicalInputProps} value={draft.googleClientId} onChange={(event) => { setDraft((current) => ({ ...current, googleClientId: event.target.value })); setGoogleStatus((current) => current ? { ...current, clientMatches: false, credentialsReady: false } : null); }} placeholder={googleText.clientIdHint} aria-invalid={Boolean(normalizedGoogleClientId) && !validGoogleClientId}/></label><p className={`google-credentials-status ${googleStatus?.credentialsReady ? 'ready' : ''}`}>{googleStatus?.credentialsReady ? googleText.credentialsReady : googleText.credentialsMissing}</p><p className="google-scope-warning">{googleText.scopeWarning}</p>
+            <div className="google-auth-row"><span className={`google-auth-status ${googleStatus?.authorized && googleStatus.clientMatches ? 'connected' : ''}`}><span/>{googleStatus?.authorized ? (googleStatus.clientMatches ? `${googleText.connected}${googleStatus.email ? ` · ${googleStatus.email}` : ''}` : googleText.mismatch) : googleText.notConnected}</span><div>{googleStatus?.authorized && googleStatus.clientMatches && <button type="button" disabled={googleBusy} onClick={() => void disconnectGoogleDrive()}>{googleText.disconnect}</button>}<button type="button" className="primary" disabled={googleBusy || !validGoogleClientId || !googleStatus?.credentialsReady} onClick={() => void authorizeGoogleDrive()}>{googleBusy ? <><LoaderCircle className="spinning" size={14}/>{googleText.authorizing}</> : googleText.authorize}</button></div></div>
+          </div>
+          {googleError && <p className="form-error" role="alert">{googleError}</p>}
+        </section>}
         {activeTab === 'security' && <section className="preferences-panel" id="preferences-panel-security" role="tabpanel"><h3>{text.security}</h3><label className="check-row"><input type="checkbox" checked={draft.confirmDelete} onChange={(event) => setDraft((current) => ({ ...current, confirmDelete: event.target.checked }))}/><span>{text.confirmDelete}</span></label></section>}
         {activeTab === 'updates' && <section className="preferences-panel" id="preferences-panel-updates" role="tabpanel"><h3>{updateText.title}</h3><p className="preferences-field-detail">{updateText.detail}</p>
           <div className="software-update-summary"><span>{updateText.currentVersion}</span><strong>{softwareUpdate.currentVersion || '—'}</strong></div>

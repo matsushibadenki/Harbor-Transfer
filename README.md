@@ -14,7 +14,8 @@ Harbor Transfer is a friendly desktop file-transfer client built with **Tauri 2*
 
 ## Features
 
-- Connect to remote servers using **SFTP**, **FTP**, **Explicit FTPS**, or **HTTPS WebDAV**.
+- Connect using **SFTP**, **FTP**, **Explicit FTPS**, **HTTPS WebDAV**, **Amazon S3 / S3-compatible storage**, **Samba / SMB 2/3**, or **Google Drive**.
+- Configure Google Drive with a Desktop OAuth Client ID from your own Google Cloud project; OAuth tokens stay in the macOS Keychain.
 - Authenticate with a password or an SSH private key.
 - Verify SSH host-key fingerprints on first connection and reject unexpected changes.
 - Browse remote files in list, icon, or Finder-style column views.
@@ -42,6 +43,7 @@ Harbor Transfer is a friendly desktop file-transfer client built with **Tauri 2*
 - SSH private-key contents are not exposed through the user interface.
 - FTPS certificate verification remains enabled by default.
 - WebDAV always uses HTTPS with certificate verification; its password follows the same macOS Keychain-only storage policy.
+- Google OAuth uses Authorization Code with PKCE and a loopback callback. Access and refresh tokens are stored only in the macOS Keychain.
 - Remote paths are handled as structured application data and are not executed as shell commands.
 
 ## Technology
@@ -54,6 +56,7 @@ Harbor Transfer is a friendly desktop file-transfer client built with **Tauri 2*
 - `russh` / `russh-sftp` for SFTP
 - `suppaftp` for FTP and FTPS
 - `reqwest`, Rustls, and `quick-xml` for WebDAV
+- Google Drive REST API with OAuth 2.0 PKCE
 
 ## Development
 
@@ -92,7 +95,7 @@ pnpm tauri build
 
 ## Project Status
 
-Bookmark management, remote browsing, file operations, transfer controls, SFTP/FTP/FTPS/WebDAV support, safe one-way synchronization, protocol CI, accessibility improvements, and macOS distribution preparation are implemented. S3 is the next planned protocol; automatic updates remain disabled until a signed production feed is available.
+Bookmark management, remote browsing, file operations, transfer controls, SFTP/FTP/FTPS/WebDAV/S3/SMB support, Google Drive My Drive access and Google Workspace document export, safe one-way synchronization, protocol CI, accessibility improvements, signed software updates, and macOS distribution preparation are implemented. Shared drives, configurable Google-native export formats, and resilient Google API rate-limit handling remain planned.
 
 See [the roadmap](docs/roadmap.md), [quality checklist](docs/quality-and-release.md), [macOS release guide](docs/macos-release.md), and [functional design](docs/functional-design.md) for more detail.
 

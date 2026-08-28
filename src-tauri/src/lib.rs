@@ -2,9 +2,11 @@ mod bookmarks;
 mod commands;
 mod diagnostics;
 mod ftp_client;
+mod google_drive;
 mod remote_fs;
 mod s3_client;
 mod samba_client;
+mod secret_store;
 mod sftp_client;
 mod ssh;
 mod sync;
@@ -37,8 +39,14 @@ pub fn run() {
             commands::connection_disconnect,
             commands::connection_list,
             commands::sftp_probe_host_key,
+            commands::google_drive_authorize,
+            commands::google_drive_authorization_status,
+            commands::google_drive_import_credentials,
+            commands::google_drive_disconnect,
+            commands::google_drive_open_setup_page,
             commands::bookmarks_list,
             commands::bookmark_save,
+            commands::bookmarks_reorder,
             commands::bookmark_delete,
             commands::connection_history_list,
             commands::connection_history_record,

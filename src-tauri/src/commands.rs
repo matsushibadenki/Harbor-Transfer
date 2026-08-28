@@ -1,8 +1,10 @@
 use crate::bookmarks::{Bookmark, BookmarkStore, ConnectionHistory, SyncHistory, TransferHistory};
 use crate::ftp_client::{FtpClient, FtpConfig};
+use crate::google_drive::{self, GoogleAuthorizationStatus, GoogleDriveClient};
 use crate::remote_fs::RemoteFileSystem;
 use crate::s3_client::{S3Client, S3Config};
 use crate::samba_client::{SambaClient, SambaConfig};
+use crate::secret_store::{self, SecretLookup};
 use crate::sftp_client::{FileEntry, SftpAuthMethod, SftpConfig, StandaloneSftpClient};
 use crate::ssh;
 use crate::sync::{
@@ -27,6 +29,7 @@ static REMOTE_COPY_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub struct AppState {
     connections: Mutex<HashMap<String, RemoteConnection>>,
+    credential_cache: Mutex<HashMap<String, Option<String>>>,
     bookmarks: BookmarkStore,
     transfer_controls: Mutex<HashMap<String, Arc<TransferControl>>>,
     edit_cache_directory: PathBuf,
@@ -47,6 +50,7 @@ impl AppState {
             .map_err(|error| error.to_string())?;
         Ok(Self {
             connections: Mutex::new(HashMap::new()),
+            credential_cache: Mutex::new(HashMap::new()),
             bookmarks: BookmarkStore::new(&data_directory)?,
             transfer_controls: Mutex::new(HashMap::new()),
             edit_cache_directory,
@@ -103,6 +107,7 @@ enum RemoteConnection {
     WebDav(WebDavClient),
     S3(S3Client),
     Samba(Box<SambaClient>),
+    GoogleDrive(GoogleDriveClient),
 }
 
 impl RemoteConnection {
@@ -113,6 +118,7 @@ impl RemoteConnection {
             Self::WebDav(client) => client,
             Self::S3(client) => client,
             Self::Samba(client) => client.as_mut(),
+            Self::GoogleDrive(client) => client,
         }
     }
 
@@ -123,6 +129,7 @@ impl RemoteConnection {
             Self::WebDav(_) => Protocol::Webdav,
             Self::S3(_) => Protocol::S3,
             Self::Samba(_) => Protocol::Smb,
+            Self::GoogleDrive(_) => Protocol::GoogleDrive,
         }
     }
 }
@@ -152,6 +159,7 @@ pub struct ConnectRequest {
     pub smb_domain: Option<String>,
     #[serde(default)]
     pub smb_guest: bool,
+    pub google_client_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy)]
@@ -163,6 +171,8 @@ pub enum Protocol {
     Webdav,
     S3,
     Smb,
+    #[serde(rename = "googleDrive")]
+    GoogleDrive,
 }
 
 #[derive(Debug, Serialize)]
@@ -273,6 +283,7 @@ pub struct DragExportPrepareRequest {
     pub connection_id: String,
     pub remote_path: String,
     pub is_directory: bool,
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -287,7 +298,16 @@ pub struct DragExportPrepareResult {
 
 enum RemoteExportEntry {
     Directory(PathBuf),
-    File(PathBuf),
+    File { remote_path: String, relative: PathBuf },
+}
+
+fn safe_export_name(name: &str) -> String {
+    let value = name.replace('/', "／").replace(':', "：");
+    if value.is_empty() || value == "." || value == ".." {
+        "Untitled".to_string()
+    } else {
+        value
+    }
 }
 
 async fn collect_remote_export_entries(
@@ -298,24 +318,31 @@ async fn collect_remote_export_entries(
     let mut directories = vec![(root.to_string(), PathBuf::new())];
     while let Some((remote_directory, relative_directory)) = directories.pop() {
         let entries = file_system.list_dir(&remote_directory).await.map_err(|error| error.to_string())?;
+        let mut local_name_counts = HashMap::<String, usize>::new();
         for entry in entries {
-            let relative = relative_directory.join(&entry.name);
+            let base_local_name = safe_export_name(entry.download_name.as_deref().unwrap_or(&entry.name));
+            let count =
+                local_name_counts.entry(base_local_name.clone()).and_modify(|value| *value += 1).or_insert(1);
+            let local_name =
+                if *count == 1 { base_local_name } else { format!("{base_local_name} ({count})") };
+            let relative = relative_directory.join(local_name);
             let relative_text = relative.to_string_lossy();
             safe_relative_path(&relative_text)?;
+            let remote_component = entry.path_component.as_deref().unwrap_or(&entry.name);
+            let remote_child = remote_join(&remote_directory, Path::new(remote_component));
             match entry.file_type {
                 crate::sftp_client::FileEntryType::Directory => {
                     if result.len() >= 100_000 {
                         return Err("The folder contains too many items to drag safely.".to_string());
                     }
-                    let child = remote_join(root, &relative);
                     result.push(RemoteExportEntry::Directory(relative.clone()));
-                    directories.push((child, relative));
+                    directories.push((remote_child, relative));
                 }
                 crate::sftp_client::FileEntryType::File => {
                     if result.len() >= 100_000 {
                         return Err("The folder contains too many items to drag safely.".to_string());
                     }
-                    result.push(RemoteExportEntry::File(relative));
+                    result.push(RemoteExportEntry::File { remote_path: remote_child, relative });
                 }
                 crate::sftp_client::FileEntryType::Symlink => {
                     return Err(format!(
@@ -337,12 +364,20 @@ pub async fn drag_export_prepare(
     if request.connection_id.trim().is_empty() || request.remote_path.trim().is_empty() {
         return Err("Invalid drag export request.".to_string());
     }
-    let name = Path::new(&request.remote_path)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .ok_or("The remote file name is invalid.")?
-        .to_string();
+    let name = if let Some(display_name) = request.display_name.as_deref() {
+        let value = display_name.trim();
+        if value.is_empty() || value == "." || value == ".." || value.contains('/') || value.contains('\\') {
+            return Err("The remote file name is invalid.".to_string());
+        }
+        value.to_string()
+    } else {
+        Path::new(&request.remote_path)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .ok_or("The remote file name is invalid.")?
+            .to_string()
+    };
     let sequence = DRAG_EXPORT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let timestamp =
         SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_millis();
@@ -367,7 +402,7 @@ pub async fn drag_export_prepare(
                                     std::fs::create_dir_all(local_item.join(relative))
                                         .map_err(|error| error.to_string())
                                 }
-                                RemoteExportEntry::File(relative) => {
+                                RemoteExportEntry::File { remote_path, relative } => {
                                     let local_file = local_item.join(&relative);
                                     let parent_result = local_file
                                         .parent()
@@ -377,10 +412,7 @@ pub async fn drag_export_prepare(
                                         });
                                     match parent_result {
                                         Ok(()) => file_system
-                                            .download_file(
-                                                &remote_join(&request.remote_path, &relative),
-                                                &local_file.to_string_lossy(),
-                                            )
+                                            .download_file(&remote_path, &local_file.to_string_lossy())
                                             .await
                                             .map(|_| ())
                                             .map_err(|error| error.to_string()),
@@ -658,33 +690,69 @@ pub async fn local_path_info(path: String) -> Result<LocalPathInfo, String> {
     })
 }
 
-fn credential_entry(bookmark_id: &str) -> Result<keyring::Entry, String> {
+fn legacy_credential_entry(bookmark_id: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new("Harbor Transfer", bookmark_id).map_err(|error| error.to_string())
 }
 
-#[tauri::command]
-pub async fn credential_load(bookmark_id: String) -> Result<Option<String>, String> {
-    match credential_entry(&bookmark_id)?.get_password() {
-        Ok(password) => Ok(Some(password)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(error) => Err(error.to_string()),
-    }
+fn credential_vault_key(bookmark_id: &str) -> String {
+    format!("bookmark:{bookmark_id}")
 }
 
 #[tauri::command]
-pub async fn credential_save(bookmark_id: String, password: String) -> Result<(), String> {
+pub async fn credential_load(
+    bookmark_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<String>, String> {
+    let mut cache = state.credential_cache.lock().await;
+    if let Some(password) = cache.get(&bookmark_id) {
+        return Ok(password.clone());
+    }
+    let vault_key = credential_vault_key(&bookmark_id);
+    let password = match secret_store::lookup(&vault_key).map_err(|error| error.to_string())? {
+        SecretLookup::Value(password) => Some(password),
+        SecretLookup::Removed => None,
+        SecretLookup::Missing => match legacy_credential_entry(&bookmark_id)?.get_password() {
+            Ok(password) => {
+                if let Err(error) = secret_store::store(&vault_key, &password) {
+                    tracing::warn!("Could not migrate a legacy credential into the Keychain vault: {error}");
+                }
+                Some(password)
+            }
+            Err(keyring::Error::NoEntry) => None,
+            Err(error) => return Err(error.to_string()),
+        },
+    };
+    cache.insert(bookmark_id, password.clone());
+    Ok(password)
+}
+
+#[tauri::command]
+pub async fn credential_save(
+    bookmark_id: String,
+    password: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
     if password.is_empty() {
         return Ok(());
     }
-    credential_entry(&bookmark_id)?.set_password(&password).map_err(|error| error.to_string())
+    let mut cache = state.credential_cache.lock().await;
+    if cache.get(&bookmark_id).and_then(Option::as_deref) == Some(password.as_str()) {
+        return Ok(());
+    }
+    secret_store::store(&credential_vault_key(&bookmark_id), &password).map_err(|error| error.to_string())?;
+    cache.insert(bookmark_id, Some(password));
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn credential_delete(bookmark_id: String) -> Result<(), String> {
-    match credential_entry(&bookmark_id)?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(error.to_string()),
+pub async fn credential_delete(bookmark_id: String, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let mut cache = state.credential_cache.lock().await;
+    if cache.get(&bookmark_id) == Some(&None) {
+        return Ok(());
     }
+    secret_store::remove(&credential_vault_key(&bookmark_id)).map_err(|error| error.to_string())?;
+    cache.insert(bookmark_id, None);
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1027,6 +1095,14 @@ pub async fn bookmark_save(bookmark: Bookmark, state: State<'_, Arc<AppState>>) 
 }
 
 #[tauri::command]
+pub async fn bookmarks_reorder(
+    bookmark_ids: Vec<String>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    state.bookmarks.reorder(&bookmark_ids)
+}
+
+#[tauri::command]
 pub async fn bookmark_delete(id: String, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.bookmarks.delete(&id)
 }
@@ -1170,6 +1246,14 @@ pub async fn connection_connect(
             .await
             .map_err(|error| error.to_string())?,
         )),
+        Protocol::GoogleDrive => RemoteConnection::GoogleDrive(
+            GoogleDriveClient::connect(
+                request.google_client_id.as_deref().ok_or("A Google OAuth Client ID is required.")?,
+                request.initial_path.as_deref().unwrap_or("/"),
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+        ),
     };
 
     state.connections.lock().await.insert(request.connection_id.clone(), connection);
@@ -1179,6 +1263,33 @@ pub async fn connection_connect(
 #[tauri::command]
 pub async fn sftp_probe_host_key(host: String, port: u16) -> Result<String, String> {
     ssh::probe_host_key(&host, port).await
+}
+
+#[tauri::command]
+pub async fn google_drive_authorize(client_id: String) -> Result<GoogleAuthorizationStatus, String> {
+    google_drive::authorize(client_id).await.map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn google_drive_authorization_status(
+    client_id: String,
+) -> Result<GoogleAuthorizationStatus, String> {
+    google_drive::authorization_status(&client_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn google_drive_import_credentials(path: String) -> Result<String, String> {
+    google_drive::import_client_credentials(&path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn google_drive_disconnect() -> Result<(), String> {
+    google_drive::disconnect_authorization().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn google_drive_open_setup_page(page: String) -> Result<(), String> {
+    google_drive::open_setup_page(&page).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1802,6 +1913,9 @@ pub async fn transfer_upload(
                 })
                 .await
         }
+        RemoteConnection::GoogleDrive(client) => {
+            client.upload_file(&request.local_path, &request.remote_path).await
+        }
     };
     drop(connections);
     state.transfer_controls.lock().await.remove(&transfer_id);
@@ -1911,6 +2025,9 @@ pub async fn transfer_download(
                     }
                 })
                 .await
+        }
+        RemoteConnection::GoogleDrive(client) => {
+            client.download_file(&request.remote_path, &request.local_path).await
         }
     };
     drop(connections);

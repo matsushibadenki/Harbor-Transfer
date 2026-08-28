@@ -91,6 +91,8 @@ impl SambaClient {
             .filter(|entry| entry.name != "." && entry.name != "..")
             .map(|entry| FileEntry {
                 name: entry.name,
+                path_component: None,
+                download_name: None,
                 size: if entry.is_directory { 0 } else { entry.size },
                 modified: entry
                     .modified

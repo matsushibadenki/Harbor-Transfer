@@ -1,4 +1,5 @@
 use crate::ftp_client::FtpClient;
+use crate::google_drive::GoogleDriveClient;
 use crate::s3_client::S3Client;
 use crate::samba_client::SambaClient;
 use crate::sftp_client::{FileEntry, StandaloneSftpClient};
@@ -220,5 +221,43 @@ impl RemoteFileSystem for SambaClient {
     }
     async fn disconnect(&mut self) -> Result<()> {
         SambaClient::disconnect(self).await
+    }
+}
+
+#[async_trait]
+impl RemoteFileSystem for GoogleDriveClient {
+    async fn list_dir(&mut self, path: &str) -> Result<Vec<FileEntry>> {
+        GoogleDriveClient::list_dir(self, path).await
+    }
+    async fn upload_file(&mut self, local_path: &str, remote_path: &str) -> Result<u64> {
+        GoogleDriveClient::upload_file(self, local_path, remote_path).await
+    }
+    async fn download_file(&mut self, remote_path: &str, local_path: &str) -> Result<u64> {
+        GoogleDriveClient::download_file(self, remote_path, local_path).await
+    }
+    async fn create_dir(&mut self, path: &str) -> Result<()> {
+        GoogleDriveClient::create_dir(self, path).await
+    }
+    async fn rename(&mut self, old_path: &str, new_path: &str) -> Result<()> {
+        GoogleDriveClient::rename(self, old_path, new_path).await
+    }
+    async fn set_metadata(
+        &mut self,
+        _path: &str,
+        _permissions: Option<u32>,
+        _modified: Option<u32>,
+        _owner_id: Option<u32>,
+        _group_id: Option<u32>,
+    ) -> Result<()> {
+        anyhow::bail!("Google Drive does not expose portable POSIX permissions or ownership.")
+    }
+    async fn delete_file(&mut self, path: &str) -> Result<()> {
+        GoogleDriveClient::delete(self, path).await
+    }
+    async fn delete_dir(&mut self, path: &str) -> Result<()> {
+        GoogleDriveClient::delete(self, path).await
+    }
+    async fn disconnect(&mut self) -> Result<()> {
+        GoogleDriveClient::disconnect(self).await
     }
 }

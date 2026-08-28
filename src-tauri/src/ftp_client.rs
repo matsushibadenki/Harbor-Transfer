@@ -503,6 +503,8 @@ fn parse_ftp_list_line(line: &str) -> Option<FileEntry> {
 
     Some(FileEntry {
         name,
+        path_component: None,
+        download_name: None,
         size,
         modified,
         permissions: Some(perms_str.to_string()),

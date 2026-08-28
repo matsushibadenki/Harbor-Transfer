@@ -116,6 +116,8 @@ impl S3Client {
                 }
                 entries.push(FileEntry {
                     name: name.to_string(),
+                    path_component: None,
+                    download_name: None,
                     size: 0,
                     modified: None,
                     permissions: None,
@@ -137,6 +139,8 @@ impl S3Client {
                 }
                 entries.push(FileEntry {
                     name: name.to_string(),
+                    path_component: None,
+                    download_name: None,
                     size: object.size().unwrap_or_default().max(0) as u64,
                     modified: object.last_modified().map(|value| value.secs().to_string()),
                     permissions: None,

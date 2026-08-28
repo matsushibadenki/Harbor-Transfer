@@ -93,6 +93,13 @@ pub enum SftpAuthMethod {
 #[derive(Debug, Clone, Serialize)]
 pub struct FileEntry {
     pub name: String,
+    /// Protocol-specific stable path component. Google Drive uses this to
+    /// distinguish duplicate names by file ID while preserving the visible name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_component: Option<String>,
+    /// Suggested local name when a remote-native document must be exported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_name: Option<String>,
     pub size: u64,
     pub modified: Option<String>,
     pub permissions: Option<String>,
@@ -138,6 +145,8 @@ pub(crate) async fn list_sftp_dir(sftp: &SftpSession, path: &str) -> Result<Vec<
 
         result.push(RemoteFileEntry {
             name,
+            path_component: None,
+            download_name: None,
             size: attrs.size.unwrap_or(0),
             modified: attrs.mtime.map(|t| chrono_from_unix_timestamp(t as u64)),
             permissions: attrs.permissions.map(format_permissions),
@@ -590,6 +599,8 @@ mod tests {
         // Verify that FileEntryType variants serialize correctly
         let entry = RemoteFileEntry {
             name: "test.txt".to_string(),
+            path_component: None,
+            download_name: None,
             size: 1024,
             modified: Some("2024-01-01 00:00:00".to_string()),
             permissions: Some("rw-r--r--".to_string()),
@@ -607,6 +618,8 @@ mod tests {
     fn test_directory_entry_serialization() {
         let entry = RemoteFileEntry {
             name: "mydir".to_string(),
+            path_component: None,
+            download_name: None,
             size: 4096,
             modified: None,
             permissions: Some("rwxr-xr-x".to_string()),
@@ -623,6 +636,8 @@ mod tests {
     fn test_symlink_entry_serialization() {
         let entry = RemoteFileEntry {
             name: "link".to_string(),
+            path_component: None,
+            download_name: None,
             size: 0,
             modified: None,
             permissions: None,

@@ -1,6 +1,6 @@
 [package]
 name = "harbor-transfer"
-version = "0.2.3"
+version = "0.2.4"
 description = "A secure file transfer client"
 edition = "2021"
 
@@ -17,7 +17,10 @@ keyring = { version = "3", features = ["apple-native"] }
 futures-util = "0.3"
 percent-encoding = "2"
 quick-xml = "0.38"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+base64 = "0.22"
+rand = "0.8"
+sha2 = "0.10"
 async-trait = "0.1"
 russh = { version = "0.44", features = ["openssl", "vendored-openssl"] }
 # RustCrypto's key parser adds native PuTTY PPK v2/v3 support while the

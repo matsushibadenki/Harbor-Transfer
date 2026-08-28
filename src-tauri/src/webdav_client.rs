@@ -238,6 +238,8 @@ fn parse_multistatus(xml: &str, requested_path: &str) -> Result<Vec<FileEntry>> 
         };
         entries.push(FileEntry {
             name: name.to_string(),
+            path_component: None,
+            download_name: None,
             size: response.size,
             modified: response.modified,
             permissions: None,
