@@ -194,3 +194,15 @@
 - [Next] Googleネイティブ文書のエクスポート形式選択と、再アップロード時に別ファイルになる制約の詳細UIを追加
 - [Later] 共有ドライブ権限、ショートカット、容量制限、変更競合を含む実アカウント統合テストを追加
 - [Later] 一方向同期へ統合し、自動削除を行わず、実行前プレビューと競合保護を維持
+
+## Phase 10 — Google Cloud FTP [Done]
+
+**完了条件:** Cloud StorageをバックエンドとするGoogle Cloud FTPへ、安全なSFTP接続として接続し、サービス固有の制約を誤操作なく扱える。
+
+- [Done] `cloudFtp`を通常SFTPと区別できる接続種別として、新規接続、ブックマーク、履歴、書き出し／読み込み、既定プロトコルへ追加
+- [Done] 既存SFTP転送エンジン、ホスト鍵検証、SSH秘密鍵、Keychainパスフレーズ処理を再利用
+- [Done] Cloud FTPでSSH公開鍵認証を必須にし、秘密鍵未選択とパスワード認証をUI／Rustの両方で拒否
+- [Done] 一覧、アップロード、ダウンロード、フォルダ操作、外部エディタ、Finderドラッグ、転送キュー、一方向同期へ統合
+- [Done] Cloud Storage IAMで管理されるパーミッション、所有者、グループ、更新日時の変更をUIで無効化し、Rust側でも拒否
+- [Done] 日本語、英語、简体中文でCloud FTPの認証方式と制約を案内
+- [Later] ユーザー所有のGoogle Cloud環境を使うopt-in実接続テストと、Hierarchical Namespace有効／無効バケットのディレクトリrename検証

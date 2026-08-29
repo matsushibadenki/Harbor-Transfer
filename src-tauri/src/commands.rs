@@ -102,7 +102,7 @@ impl TransferControl {
 }
 
 enum RemoteConnection {
-    Sftp(StandaloneSftpClient),
+    Sftp { client: StandaloneSftpClient, protocol: Protocol },
     Ftp { client: FtpClient, protocol: Protocol },
     WebDav(WebDavClient),
     S3(S3Client),
@@ -113,7 +113,7 @@ enum RemoteConnection {
 impl RemoteConnection {
     fn file_system(&mut self) -> &mut dyn RemoteFileSystem {
         match self {
-            Self::Sftp(client) => client,
+            Self::Sftp { client, .. } => client,
             Self::Ftp { client, .. } => client,
             Self::WebDav(client) => client,
             Self::S3(client) => client,
@@ -124,7 +124,7 @@ impl RemoteConnection {
 
     fn protocol(&self) -> Protocol {
         match self {
-            Self::Sftp(_) => Protocol::Sftp,
+            Self::Sftp { protocol, .. } => *protocol,
             Self::Ftp { protocol, .. } => *protocol,
             Self::WebDav(_) => Protocol::Webdav,
             Self::S3(_) => Protocol::S3,
@@ -162,10 +162,12 @@ pub struct ConnectRequest {
     pub google_client_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, Copy)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
     Sftp,
+    #[serde(rename = "cloudFtp")]
+    CloudFtp,
     Ftp,
     Ftps,
     Webdav,
@@ -1174,15 +1176,18 @@ pub async fn connection_connect(
 ) -> Result<ConnectionSummary, String> {
     let protocol = request.protocol;
     let connection = match protocol {
-        Protocol::Sftp => {
+        Protocol::Sftp | Protocol::CloudFtp => {
             let auth_method = match request.key_path.filter(|value| !value.trim().is_empty()) {
                 Some(key_path) => SftpAuthMethod::PublicKey { key_path, passphrase: request.passphrase },
+                None if matches!(protocol, Protocol::CloudFtp) => {
+                    return Err("Google Cloud FTP requires SSH public-key authentication. Select the private key paired with the public key registered for this Cloud FTP user.".to_string());
+                }
                 None => SftpAuthMethod::Password {
                     password: request.password.ok_or("A password or SSH key is required.")?,
                 },
             };
-            RemoteConnection::Sftp(
-                StandaloneSftpClient::connect(&SftpConfig {
+            RemoteConnection::Sftp {
+                client: StandaloneSftpClient::connect(&SftpConfig {
                     host: request.host,
                     port: request.port,
                     username: request.username,
@@ -1191,7 +1196,8 @@ pub async fn connection_connect(
                 })
                 .await
                 .map_err(|error| error.to_string())?,
-            )
+                protocol,
+            }
         }
         Protocol::Ftp | Protocol::Ftps => RemoteConnection::Ftp {
             client: FtpClient::connect(&FtpConfig {
@@ -1760,9 +1766,11 @@ pub async fn remote_set_metadata(
         })
         .transpose()?;
     let mut connections = state.connections.lock().await;
-    connections
-        .get_mut(&request.connection_id)
-        .ok_or("Connection not found.")?
+    let connection = connections.get_mut(&request.connection_id).ok_or("Connection not found.")?;
+    if matches!(connection.protocol(), Protocol::CloudFtp) {
+        return Err("Google Cloud FTP does not support changing POSIX permissions, owner, group, or modification time. Access is controlled by Cloud Storage IAM.".to_string());
+    }
+    connection
         .file_system()
         .set_metadata(&request.path, request.permissions, modified, request.owner_id, request.group_id)
         .await
@@ -1832,7 +1840,7 @@ pub async fn transfer_upload(
     state.transfer_controls.lock().await.insert(transfer_id.clone(), control.clone());
     let mut connections = state.connections.lock().await;
     let result = match connections.get_mut(&request.connection_id).ok_or("Connection not found.")? {
-        RemoteConnection::Sftp(client) => {
+        RemoteConnection::Sftp { client, .. } => {
             let event_app = app.clone();
             let event_id = transfer_id.clone();
             client
@@ -1945,7 +1953,7 @@ pub async fn transfer_download(
     state.transfer_controls.lock().await.insert(transfer_id.clone(), control.clone());
     let mut connections = state.connections.lock().await;
     let result = match connections.get_mut(&request.connection_id).ok_or("Connection not found.")? {
-        RemoteConnection::Sftp(client) => {
+        RemoteConnection::Sftp { client, .. } => {
             let event_app = app.clone();
             let event_id = transfer_id.clone();
             client
@@ -2139,7 +2147,7 @@ pub async fn transfer_upload_directory(
 mod tests {
     use super::{
         content_hash, parse_remote_modified, reject_symlink_ancestors, remote_child_path,
-        remote_parent_and_name, remote_replace_target, safe_relative_path, TransferControl,
+        remote_parent_and_name, remote_replace_target, safe_relative_path, Protocol, TransferControl,
     };
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
@@ -2177,6 +2185,13 @@ mod tests {
         assert_eq!(parse_remote_modified("Sat, 25 Apr 2026 10:00:00 GMT"), Some(expected));
         assert_eq!(parse_remote_modified(&expected.to_string()), Some(expected));
         assert_eq!(parse_remote_modified("unknown"), None);
+    }
+
+    #[test]
+    fn cloud_ftp_protocol_uses_a_stable_camel_case_wire_value() {
+        let protocol: Protocol = serde_json::from_str("\"cloudFtp\"").expect("deserialize Cloud FTP");
+        assert_eq!(protocol, Protocol::CloudFtp);
+        assert_eq!(serde_json::to_string(&protocol).unwrap(), "\"cloudFtp\"");
     }
 
     #[test]
