@@ -39,6 +39,8 @@
 - [Done] Samba（SMB 2/3）を既存の閲覧・ファイル操作・転送・同期機能へ統合し、Phase 8を完了
 - [Done] ユーザー所有のGCPプロジェクトとOAuth Client IDを使うGoogle Drive認証、Keychain保存、My Drive基本操作を統合
 - [Next] Google Driveの共有ドライブ、ネイティブGoogle文書の書き出し、レート制限への再試行を実装
+- [Next] アプリ再起動や通信切断後も安全に継続できる転送再開、永続キュー、チェックサム検証を実装
+- [Later] デュアルペイン、サーバー間転送、高度なSSH認証、再帰検索、Quick Look、追加クラウド、自動化を段階的に実装
 
 ## Phase 0 — プロジェクト基盤 [Done]
 
@@ -206,3 +208,111 @@
 - [Done] Cloud Storage IAMで管理されるパーミッション、所有者、グループ、更新日時の変更をUIで無効化し、Rust側でも拒否
 - [Done] 日本語、英語、简体中文でCloud FTPの認証方式と制約を案内
 - [Later] ユーザー所有のGoogle Cloud環境を使うopt-in実接続テストと、Hierarchical Namespace有効／無効バケットのディレクトリrename検証
+
+## 競合比較を踏まえた次期方針
+
+Cyberduck、Transmit、ForkLift、FileZilla Pro、WinSCPとの比較では、Harbor TransferはSFTP、FTP、Explicit FTPS、HTTPS WebDAV、S3、SMB、Google Drive、Google Cloud FTPという接続方式と、安全な片方向同期、macOS Keychain、Finderドラッグ、外部エディタ連携をすでに備えている。一方、成熟製品との差はプロトコル数よりも、通信切断からの実転送再開、デュアルペイン、チェックサム検証、高度なSSH設定、検索・プレビュー、自動化に集中している。
+
+実装順は `Phase 9完了 → Phase 11 Reliable Transfers → Phase 12 Dual-Pane Workspace → Phase 13 Search, Preview and Batch Tools → Phase 14 Advanced SSH and Authentication → Phase 15 Cloud Services → Phase 16 Automation and Security` とする。新しい接続方式を増やす前に、現在の転送エンジンを長時間・大容量運用に耐える状態へ引き上げる。
+
+参考:
+
+- [Cyberduck File Transfers](https://docs.cyberduck.io/cyberduck/transfer/)
+- [Cyberduck Browser](https://docs.cyberduck.io/cyberduck/browser/)
+- [Transmit](https://www.panic.com/transmit/)
+- [ForkLift Manual](https://binarynights.com/manual)
+- [WinSCP Synchronize](https://winscp.net/eng/docs/ui_synchronize)
+- [FileZilla Pro Protocols](https://filezillapro.com/docs/v3/basic-usage-instructions/filezilla-pro-supported-protocols/)
+
+## Phase 11 — Reliable Transfers [Next]
+
+**完了条件:** 通信切断やアプリ再起動が発生しても転送状態を失わず、対応プロトコルでは転送済み範囲から安全に再開し、転送結果を検証できる。
+
+- [Next] 実行中・待機中・失敗中の転送ジョブ、競合方針、再試行情報をSQLiteへ保存し、アプリ再起動後に復元
+- [Next] FTP、SFTP、WebDAVのrange／append対応を能力判定し、中断位置からアップロード・ダウンロードを再開
+- [Next] S3 multipart upload IDと完了済みpartを安全に保持し、再起動後の継続または明示的abortを実装
+- [Next] Google Drive resumable upload sessionを復元し、期限切れsessionは新規sessionへ安全に切り替え
+- [Next] 一時名称へアップロードし、サイズ・チェックサム確認後にrenameするAtomic Uploadを対応可能なプロトコルへ実装
+- [Next] SHA-256を既定とする転送後検証を追加し、サーバー側checksum拡張、S3 checksum metadata、ローカル計算を能力に応じて使い分け
+- [Next] 一時的な通信障害、レート制限、サーバー切断に対する上限付き指数バックオフと自動再接続を実装
+- [Next] アプリ全体およびブックマーク単位で同時転送数、帯域上限、再試行回数を設定可能にする
+- [Next] 失敗理由、再接続、再開位置、検証結果を含む秘密情報除外済み転送ログを表示・書き出し可能にする
+- [Next] 大容量、通信切断、アプリ強制終了、容量不足、部分ファイル、checksum不一致を統合テストへ追加
+
+## Phase 12 — Dual-Pane Workspace [Later]
+
+**完了条件:** 左右のペインをローカルまたは任意の接続先として開き、比較しながら安全に転送できる。
+
+- [Later] 左右それぞれをローカル、現在のリモート、別のブックマーク接続へ切り替えられるデュアルペインを実装
+- [Later] ローカル↔リモート、ローカル↔ローカル、リモート↔リモートのドラッグ、コピー、移動を共通操作へ統合
+- [Later] 異なる接続先間の転送を一時キャッシュ経由で行い、将来は対応プロトコルでserver-side copyへ最適化
+- [Later] 左右の同名フォルダをサイズ、更新日時、checksumで比較し、差分だけを選択して転送可能にする
+- [Later] 共通の相対パスを維持する連動ナビゲーションを追加
+- [Later] 複数タブ、タブ名、接続状態、パス、表示方式、列幅をワークスペースとして復元
+- [Later] ローカルとリモートのよく使う場所を登録するPlacesバーを追加
+- [Later] 狭いウインドウでは単一ペインへ切り替え、既存レイアウトの最低幅と操作性を維持
+
+## Phase 13 — Search, Preview and Batch Tools [Later]
+
+**完了条件:** 大きな階層から目的の項目を見つけ、内容を安全に確認し、複数項目を一括処理できる。
+
+- [Later] キャンセル、進捗、件数上限、シンボリックリンク非追跡を備えた再帰ファイル名検索を実装
+- [Later] Google Drive、S3など検索APIを持つ接続先ではserver-side searchを利用し、その他は制限付き再帰走査へフォールバック
+- [Later] Spaceキーで一時キャッシュをmacOS Quick Lookへ渡し、プレビュー終了後に安全に削除
+- [Later] 画像、PDF、動画などのサムネイルを低優先度で遅延生成し、メモリ・ディスク上限付きキャッシュへ保存
+- [Later] 置換、連番、接頭辞・接尾辞、大文字・小文字変換を備えたプレビュー付き一括名称変更を実装
+- [Later] 新規空ファイル、対応サーバーでのシンボリックリンク作成、フォルダ容量計算を追加
+- [Later] ZIP／TARの圧縮アップロード、ダウンロード後展開、対応サーバーでのリモートアーカイブ操作を検討
+- [Later] ローカルとリモートのテキストファイルを選択した比較ツールで開けるようにする
+- [Later] クラウド事業者が提供するファイルバージョンの一覧、プレビュー、復元を共通UIへ統合
+- [Later] S3署名付きURL、Google Driveなどの共有リンクを、有効期限と公開範囲を明示して作成
+
+## Phase 14 — Advanced SSH and Authentication [Later]
+
+**完了条件:** 踏み台、SSH Agent、多要素認証、企業ネットワークを含む高度な接続環境で、安全境界を維持して接続できる。
+
+- [Later] `~/.ssh/config`からHost、HostName、User、Port、IdentityFileを読み込み、エイリアスを接続候補として利用
+- [Later] macOSのSSH Agentを使う認証を追加し、秘密鍵素材をアプリへ取り込まない
+- [Later] ProxyJumpによる踏み台接続を実装し、任意シェルを実行するProxyCommandは別途安全性を評価
+- [Later] SOCKS5／HTTP CONNECTプロキシを接続先単位で設定可能にする
+- [Later] SFTPのkeyboard-interactive、OTP／2FA認証を対話ダイアログへ統合
+- [Later] FIDO2、YubiKey、PKCS#11、Secure Enclave鍵の対応可能性を調査
+- [Later] FTPS／WebDAVのクライアント証明書認証と、証明書詳細表示を追加
+- [Later] Implicit FTPSを独立した接続方式として追加
+- [Later] SMBのKerberos、DFS、Bonjour検出を追加
+- [Later] 接続テスト結果と秘密情報を除外したプロトコルトランスクリプトを表示・保存可能にする
+
+## Phase 15 — Cloud Services [Later]
+
+**完了条件:** 利用頻度の高いクラウドストレージを、各事業者のOAuth・権限・バージョン・共有モデルに合わせて安全に利用できる。
+
+- [Later] Microsoft OneDrive、OneDrive for Business、SharePointを最優先の追加クラウドとして実装
+- [Later] DropboxをOAuth、共有フォルダ、バージョン、共有リンク対応で実装
+- [Later] Google Cloud StorageネイティブAPIを、Cloud FTPやGoogle Driveとは別の接続方式として実装
+- [Later] Backblaze B2をapplication keyのbucket制限とversion対応で実装
+- [Later] BoxをOAuth、企業フォルダ、version対応で実装
+- [Later] Azure Blob Storage／Azure Filesをaccount key、SAS、有効期限表示に対応して実装
+- [Later] OpenStack Swiftをtenant、region、Keystone認証に対応して実装
+- [Later] Cloudflare R2などS3互換サービスは専用アダプタを増やさず、接続プロファイルで既定endpointと説明を提供
+- [Later] 各OAuth接続は利用者所有Client IDを基本方針とし、tokenをKeychain以外へ保存しない
+
+## Phase 16 — Automation and Security [Later]
+
+**完了条件:** GUIと同じ安全なRustコアを、定期処理・スクリプト・暗号化ストレージから再利用できる。
+
+- [Later] GUIと同じ接続、転送、同期、検証ロジックを呼び出すHeadless CLIを追加
+- [Later] macOS launchdまたはアプリ内スケジューラから、保存済み同期計画を定期実行
+- [Later] ローカルフォルダの変更を監視し、debounce、競合確認、停止を備えた自動アップロードを実装
+- [Later] ファイルをドロップするだけで指定ブックマークへアップロードするDroplet／監視フォルダを追加
+- [Later] macOSショートカット／URL Schemeから、ブックマーク接続、アップロード、同期プレビューを起動可能にする
+- [Later] 自動処理の終了コード、構造化ログ、macOS通知を追加し、秘密情報を標準出力へ含めない
+- [Later] Cryptomator互換vaultの作成、ロック解除、名前・内容暗号化、Keychainパスフレーズ保存を実装
+- [Later] ブックマークと非機密設定を利用者所有ストレージへエンドツーエンド暗号化して同期する方式を設計
+- [Later] S3 Object Lock、versioning、Google Drive trashなど復元可能な削除機構を操作前に表示
+
+## 長期保留項目
+
+- [Later] 削除を含む完全自動の双方向同期は、versioning、recycle bin、競合履歴、復元手段が揃うまで実装しない
+- [Later] Finderへリモートをディスクとしてマウントする機能は、File Provider、オフラインキャッシュ、変更競合、容量管理を含む独立プロジェクト規模として再評価
+- [Later] アプリ内SSHターミナルはファイル転送製品の責務を広げるため、転送・同期・接続診断が成熟するまで実装しない
+- [Later] 新しいプロトコルの追加だけを優先せず、既存プロトコルの再開、検証、エラー回復、統合テストを先に完成させる
