@@ -17,16 +17,21 @@ import {
 
 type Protocol = 'sftp' | 'cloudFtp' | 'ftp' | 'ftps' | 'webdav' | 's3' | 'smb' | 'googleDrive';
 type FileEntry = { name: string; path_component?: string; download_name?: string; size: number; modified?: string; permissions?: string; owner?: string; group?: string; file_type: 'File' | 'Directory' | 'Symlink' };
-type Connection = { id: string; name: string; protocol: Protocol; host: string; port: number; username: string; initialPath: string; keyPath?: string; keyPassphraseNotRequired?: boolean; hostKey?: string; localDirectory?: string; tags: string; s3Region?: string; s3Endpoint?: string; s3ForcePathStyle?: boolean; s3PreserveEmptyDirectories?: boolean; smbShare?: string; smbDomain?: string; smbGuest?: boolean };
+type GoogleDriveLocationKind = 'myDrive' | 'sharedWithMe' | 'sharedDrive';
+type GoogleDriveLocation = { kind: GoogleDriveLocationKind; id?: string; name: string };
+type Connection = { id: string; name: string; protocol: Protocol; host: string; port: number; username: string; initialPath: string; keyPath?: string; keyPassphraseNotRequired?: boolean; hostKey?: string; localDirectory?: string; tags: string; s3Region?: string; s3Endpoint?: string; s3ForcePathStyle?: boolean; s3PreserveEmptyDirectories?: boolean; smbShare?: string; smbDomain?: string; smbGuest?: boolean; googleDriveLocationKind?: GoogleDriveLocationKind; googleDriveLocationId?: string; transferMaxConcurrent?: number; transferBandwidthLimitKbps?: number; transferRetryCount?: number };
 type ConnectionHistory = { bookmarkId: string; name: string; protocol: Protocol; host: string; port: number; username: string; connectedAt: string };
-type Transfer = { id: string; name: string; direction: 'Upload' | 'Download'; status: 'Running' | 'Completed' | 'Failed' | 'Cancelled'; detail: string; localPath?: string; remotePath?: string; connectionId?: string; transferredBytes?: number; totalBytes?: number; speed?: number; etaSeconds?: number };
+type Transfer = { id: string; name: string; direction: 'Upload' | 'Download'; status: 'Running' | 'Completed' | 'Failed' | 'Cancelled'; detail: string; activity?: 'queued' | 'running' | 'reconnecting'; localPath?: string; remotePath?: string; connectionId?: string; transferredBytes?: number; totalBytes?: number; speed?: number; etaSeconds?: number; retryCount?: number; conflictPolicy?: string; isDirectory?: boolean };
 type SshKey = { name: string; path: string; publicKeyPath?: string; pairedKeyPath?: string; keyType: 'private' | 'public'; kind: string };
 type DirectoryProgress = { transferId: string; completedFiles: number; totalFiles: number; currentPath: string; status: string };
 type FileProgress = { transferId: string; transferredBytes: number; totalBytes: number; elapsedMs: number; status: string };
+type TransferOutcome = { bytes: number; verification: 'sha256' | 'size' };
 type LocalPathInfo = { name: string; isDirectory: boolean };
 type TransferHistory = { id: string; name: string; direction: 'Upload' | 'Download'; status: 'Completed' | 'Failed' | 'Cancelled'; detail: string; bytes: number; completedAt: string };
+type TransferJob = { id: string; connectionId: string; name: string; direction: 'Upload' | 'Download'; localPath: string; remotePath: string; status: 'Failed'; detail: string; transferredBytes: number; totalBytes: number; retryCount: number; conflictPolicy: string; isDirectory: boolean; updatedAt: string };
 type Language = 'ja' | 'en' | 'zh-CN';
-type Preferences = { language: Language; theme: 'system' | 'light' | 'dark'; fileNameFontSize: number; fileNameFontWeight: 'normal' | 'bold'; fileRowDensity: 'extraCompact' | 'compact' | 'standard' | 'comfortable'; showHiddenFiles: boolean; googleClientId: string; defaultProtocol: Protocol; conflictPolicy: 'ask' | 'overwrite' | 'skip'; confirmDelete: boolean; transferNotifications: boolean; editorPath: string; autoCheckUpdates: boolean };
+type Preferences = { language: Language; theme: 'system' | 'light' | 'dark'; fileNameFontSize: number; fileNameFontWeight: 'normal' | 'bold'; fileRowDensity: 'extraCompact' | 'compact' | 'standard' | 'comfortable'; showHiddenFiles: boolean; googleClientId: string; googleDocsExport: 'docx' | 'pdf' | 'odt' | 'txt'; googleSheetsExport: 'xlsx' | 'pdf' | 'csv'; googleSlidesExport: 'pptx' | 'pdf'; googleDrawingsExport: 'pdf' | 'png' | 'svg'; defaultProtocol: Protocol; conflictPolicy: 'ask' | 'overwrite' | 'skip'; maxConcurrentTransfers: number; bandwidthLimitKbps: number; automaticRetryCount: number; confirmDelete: boolean; transferNotifications: boolean; editorPath: string; autoCheckUpdates: boolean };
+type GoogleExportPreferences = Pick<Preferences, 'googleDocsExport' | 'googleSheetsExport' | 'googleSlidesExport' | 'googleDrawingsExport'>;
 type GoogleAuthorizationStatus = { authorized: boolean; email?: string; clientMatches: boolean; credentialsReady: boolean };
 type SoftwareUpdatePhase = 'idle' | 'checking' | 'current' | 'available' | 'downloading' | 'ready' | 'error';
 type SoftwareUpdateState = { phase: SoftwareUpdatePhase; currentVersion: string; version?: string; body?: string; downloadedBytes: number; totalBytes?: number; error?: string };
@@ -67,13 +72,23 @@ type DropConflictPrompt = {
   resolve: (choice: DropConflictChoice) => void;
 };
 
-const defaultPreferences: Preferences = { language: 'ja', theme: 'system', fileNameFontSize: 13, fileNameFontWeight: 'normal', fileRowDensity: 'standard', showHiddenFiles: true, googleClientId: '', defaultProtocol: 'sftp', conflictPolicy: 'ask', confirmDelete: true, transferNotifications: true, editorPath: '', autoCheckUpdates: true };
+const defaultPreferences: Preferences = { language: 'ja', theme: 'system', fileNameFontSize: 13, fileNameFontWeight: 'normal', fileRowDensity: 'standard', showHiddenFiles: true, googleClientId: '', googleDocsExport: 'docx', googleSheetsExport: 'xlsx', googleSlidesExport: 'pptx', googleDrawingsExport: 'pdf', defaultProtocol: 'sftp', conflictPolicy: 'ask', maxConcurrentTransfers: 3, bandwidthLimitKbps: 0, automaticRetryCount: 3, confirmDelete: true, transferNotifications: true, editorPath: '', autoCheckUpdates: true };
 function loadPreferences(): Preferences {
   try {
     const saved = { ...defaultPreferences, ...JSON.parse(localStorage.getItem('harbor-transfer.preferences') ?? '{}') };
     const fileRowDensity = saved.fileRowDensity === 'extraCompact' || saved.fileRowDensity === 'compact' || saved.fileRowDensity === 'comfortable' ? saved.fileRowDensity : 'standard';
-    return { ...saved, fileNameFontSize: Math.min(20, Math.max(10, Number(saved.fileNameFontSize) || defaultPreferences.fileNameFontSize)), fileNameFontWeight: saved.fileNameFontWeight === 'bold' ? 'bold' : 'normal', fileRowDensity, showHiddenFiles: typeof saved.showHiddenFiles === 'boolean' ? saved.showHiddenFiles : defaultPreferences.showHiddenFiles, googleClientId: typeof saved.googleClientId === 'string' ? saved.googleClientId.trim().slice(0, 512) : '' };
+    return { ...saved, fileNameFontSize: Math.min(20, Math.max(10, Number(saved.fileNameFontSize) || defaultPreferences.fileNameFontSize)), fileNameFontWeight: saved.fileNameFontWeight === 'bold' ? 'bold' : 'normal', fileRowDensity, showHiddenFiles: typeof saved.showHiddenFiles === 'boolean' ? saved.showHiddenFiles : defaultPreferences.showHiddenFiles, googleClientId: typeof saved.googleClientId === 'string' ? saved.googleClientId.trim().slice(0, 512) : '', googleDocsExport: ['docx', 'pdf', 'odt', 'txt'].includes(saved.googleDocsExport) ? saved.googleDocsExport : 'docx', googleSheetsExport: ['xlsx', 'pdf', 'csv'].includes(saved.googleSheetsExport) ? saved.googleSheetsExport : 'xlsx', googleSlidesExport: ['pptx', 'pdf'].includes(saved.googleSlidesExport) ? saved.googleSlidesExport : 'pptx', googleDrawingsExport: ['pdf', 'png', 'svg'].includes(saved.googleDrawingsExport) ? saved.googleDrawingsExport : 'pdf', maxConcurrentTransfers: Math.min(16, Math.max(1, Math.round(Number(saved.maxConcurrentTransfers) || 3))), bandwidthLimitKbps: Math.min(10_485_760, Math.max(0, Math.round(Number(saved.bandwidthLimitKbps) || 0))), automaticRetryCount: saved.automaticRetryCount === undefined ? defaultPreferences.automaticRetryCount : Math.min(10, Math.max(0, Math.round(Number(saved.automaticRetryCount) || 0))) } as Preferences;
   } catch { return defaultPreferences; }
+}
+
+function transferLimits(preferences: Preferences, connection: Connection) {
+  return {
+    globalMaxConcurrentTransfers: preferences.maxConcurrentTransfers,
+    connectionMaxConcurrentTransfers: connection.transferMaxConcurrent ?? null,
+    globalBandwidthLimitBps: Math.round(preferences.bandwidthLimitKbps * 1024),
+    connectionBandwidthLimitBps: connection.transferBandwidthLimitKbps === undefined ? null : Math.round(connection.transferBandwidthLimitKbps * 1024),
+    automaticRetryCount: connection.transferRetryCount ?? preferences.automaticRetryCount,
+  };
 }
 async function chooseEditorApplication(): Promise<string | null> {
   const selected = await open({ defaultPath: '/Applications', multiple: false, directory: false, filters: [{ name: 'macOS Applications', extensions: ['app'] }] });
@@ -147,19 +162,19 @@ const googleDriveCopy = {
     tab: 'Google Drive', setupTitle: 'Google Cloudの準備', setupDetail: 'Harbor Transfer側では共通のGCPプロジェクトを使用しません。ご自身のGoogle Cloudプロジェクトでデスクトップアプリ用OAuth Client IDを作成してください。',
     developers: 'Google Developersを開く', project: '1. プロジェクトを作成', api: '2. Google Drive APIを有効化', consent: '3. Google Auth Platformを設定', client: '4. OAuth Client IDを作成',
     stepProject: 'Google Cloud Consoleで新しいプロジェクトを作成します。', stepApi: 'APIライブラリからGoogle Drive APIを有効にします。', stepConsent: 'Google Auth Platformでアプリ名、サポートメール、対象ユーザーを設定し、スコープにGoogle Drive APIを追加します。Externalのテスト運用では自分のGoogleアカウントをテストユーザーに追加してください。', stepClient: 'Clientsから「デスクトップアプリ」を選んでOAuth Client IDを作成します。Webアプリではありません。', stepPaste: 'Google CloudからDesktop Clientのcredentials.jsonを読み込み、Googleアカウントを認証します。Client SecretはKeychainだけに保存します。',
-    clientId: 'OAuth Client ID', clientIdHint: '123456789-xxxxx.apps.googleusercontent.com', importCredentials: 'credentials.jsonを読み込む', credentialsReady: 'Client SecretはKeychainに保存されています', credentialsMissing: 'Desktop Clientのcredentials.jsonを読み込んでください。', scopeWarning: 'ファイル一覧・転送・同期にはGoogle Drive全体へのアクセス権を使用します。認証画面でアクセス内容を確認してください。', authorize: 'Googleアカウントを認証', authorizing: 'ブラウザでGoogle認証を完了してください…', disconnect: '認証を解除', connected: '認証済み', notConnected: '未認証', mismatch: '保存済み認証は別のClient ID用です。現在のClient IDで再認証してください。', invalidClientId: 'デスクトップアプリ用OAuth Client IDを入力してください。', connectHint: '先に環境設定のGoogle Driveでcredentials.jsonを読み込み、Googleアカウントを認証してください。', revokeConfirm: 'Keychainに保存したGoogle Drive認証情報を削除しますか？', authFailed: 'Google認証に失敗しました。', openFailed: 'Googleの設定ページを開けませんでした。', nativeExportUnsupported: 'Googleドキュメント形式の書き出しは今後の実装で対応します。'
+    clientId: 'OAuth Client ID', clientIdHint: '123456789-xxxxx.apps.googleusercontent.com', importCredentials: 'credentials.jsonを読み込む', credentialsReady: 'Client SecretはKeychainに保存されています', credentialsMissing: 'Desktop Clientのcredentials.jsonを読み込んでください。', scopeWarning: 'ファイル一覧・転送・同期にはGoogle Drive全体へのアクセス権を使用します。認証画面でアクセス内容を確認してください。', authorize: 'Googleアカウントを認証', authorizing: 'ブラウザでGoogle認証を完了してください…', disconnect: '認証を解除', connected: '認証済み', notConnected: '未認証', mismatch: '保存済み認証は別のClient ID用です。現在のClient IDで再認証してください。', invalidClientId: 'デスクトップアプリ用OAuth Client IDを入力してください。', connectHint: '先に環境設定のGoogle Driveでcredentials.jsonを読み込み、Googleアカウントを認証してください。', location: '接続先', myDrive: 'マイドライブ', sharedWithMe: '共有アイテム', loadingLocations: '共有ドライブを読み込んでいます…', locationLoadFailed: '共有ドライブの一覧を取得できませんでした。', exportTitle: 'Google形式の書き出し', exportDetail: 'ダウンロード時の形式を選択します。書き出したファイルを再アップロードしても、元のGoogle形式には戻らず別ファイルになります。CSVは先頭のシートだけを書き出します。', documents: 'Google Docs', spreadsheets: 'Google Sheets', presentations: 'Google Slides', drawings: 'Google Drawings', revokeConfirm: 'Keychainに保存したGoogle Drive認証情報を削除しますか？', authFailed: 'Google認証に失敗しました。', openFailed: 'Googleの設定ページを開けませんでした。', nativeExportUnsupported: 'このGoogle形式は選択した書き出し方式に対応していません。'
   },
   en: {
     tab: 'Google Drive', setupTitle: 'Prepare Google Cloud', setupDetail: 'Harbor Transfer does not use a shared GCP project. Create a Desktop OAuth Client ID in your own Google Cloud project.',
     developers: 'Open Google Developers', project: '1. Create a project', api: '2. Enable Google Drive API', consent: '3. Configure Google Auth Platform', client: '4. Create an OAuth Client ID',
     stepProject: 'Create a new project in Google Cloud Console.', stepApi: 'Enable Google Drive API from the API Library.', stepConsent: 'Configure the app name, support email, audience, and Google Drive scope in Google Auth Platform. For External testing, add your Google Account as a test user.', stepClient: 'In Clients, create an OAuth Client ID with application type “Desktop app,” not Web application.', stepPaste: 'Import the Desktop Client credentials.json from Google Cloud, then authorize your Google Account. The Client Secret is stored only in Keychain.',
-    clientId: 'OAuth Client ID', clientIdHint: '123456789-xxxxx.apps.googleusercontent.com', importCredentials: 'Import credentials.json', credentialsReady: 'Client Secret is stored in Keychain', credentialsMissing: 'Import the Desktop Client credentials.json.', scopeWarning: 'Browsing, transfers, and sync require access to your entire Google Drive. Review the requested access on Google’s consent screen.', authorize: 'Authorize Google Account', authorizing: 'Complete Google authorization in your browser…', disconnect: 'Remove authorization', connected: 'Authorized', notConnected: 'Not authorized', mismatch: 'The saved authorization belongs to another Client ID. Authorize the current Client ID again.', invalidClientId: 'Enter a Desktop OAuth Client ID.', connectHint: 'Import credentials.json and authorize Google Drive in Preferences before connecting.', revokeConfirm: 'Remove the Google Drive authorization stored in Keychain?', authFailed: 'Google authorization failed.', openFailed: 'Could not open the Google setup page.', nativeExportUnsupported: 'Exporting native Google document formats will be added separately.'
+    clientId: 'OAuth Client ID', clientIdHint: '123456789-xxxxx.apps.googleusercontent.com', importCredentials: 'Import credentials.json', credentialsReady: 'Client Secret is stored in Keychain', credentialsMissing: 'Import the Desktop Client credentials.json.', scopeWarning: 'Browsing, transfers, and sync require access to your entire Google Drive. Review the requested access on Google’s consent screen.', authorize: 'Authorize Google Account', authorizing: 'Complete Google authorization in your browser…', disconnect: 'Remove authorization', connected: 'Authorized', notConnected: 'Not authorized', mismatch: 'The saved authorization belongs to another Client ID. Authorize the current Client ID again.', invalidClientId: 'Enter a Desktop OAuth Client ID.', connectHint: 'Import credentials.json and authorize Google Drive in Preferences before connecting.', location: 'Location', myDrive: 'My Drive', sharedWithMe: 'Shared with me', loadingLocations: 'Loading shared drives…', locationLoadFailed: 'Could not load shared drives.', exportTitle: 'Google format exports', exportDetail: 'Choose download formats. Re-uploading an exported file creates a separate file and does not restore the original Google format. CSV exports only the first sheet.', documents: 'Google Docs', spreadsheets: 'Google Sheets', presentations: 'Google Slides', drawings: 'Google Drawings', revokeConfirm: 'Remove the Google Drive authorization stored in Keychain?', authFailed: 'Google authorization failed.', openFailed: 'Could not open the Google setup page.', nativeExportUnsupported: 'This Google item cannot use the selected export format.'
   },
   'zh-CN': {
     tab: 'Google 云端硬盘', setupTitle: '准备 Google Cloud', setupDetail: 'Harbor Transfer 不使用共享的GCP项目。请在您自己的Google Cloud项目中创建桌面应用OAuth客户端ID。',
     developers: '打开 Google Developers', project: '1. 创建项目', api: '2. 启用 Google Drive API', consent: '3. 配置 Google Auth Platform', client: '4. 创建 OAuth 客户端ID',
     stepProject: '在Google Cloud Console中创建新项目。', stepApi: '从API库启用Google Drive API。', stepConsent: '在Google Auth Platform中设置应用名称、支持邮箱、目标用户和Google Drive权限范围。使用外部测试时，请将自己的Google账号添加为测试用户。', stepClient: '在客户端页面创建应用类型为“桌面应用”的OAuth客户端ID，不要选择Web应用。', stepPaste: '从Google Cloud导入桌面客户端credentials.json，然后授权Google账号。Client Secret仅存储在钥匙串中。',
-    clientId: 'OAuth 客户端ID', clientIdHint: '123456789-xxxxx.apps.googleusercontent.com', importCredentials: '导入 credentials.json', credentialsReady: 'Client Secret已存储在钥匙串中', credentialsMissing: '请导入桌面客户端credentials.json。', scopeWarning: '浏览、传输和同步需要访问整个Google云端硬盘。请在Google授权页面确认访问权限。', authorize: '授权 Google 账号', authorizing: '请在浏览器中完成Google授权…', disconnect: '移除授权', connected: '已授权', notConnected: '未授权', mismatch: '保存的授权属于另一个客户端ID。请使用当前客户端ID重新授权。', invalidClientId: '请输入桌面应用OAuth客户端ID。', connectHint: '请先在偏好设置中导入credentials.json并完成Google授权。', revokeConfirm: '要删除存储在钥匙串中的Google云端硬盘授权信息吗？', authFailed: 'Google授权失败。', openFailed: '无法打开Google设置页面。', nativeExportUnsupported: '原生Google文档格式的导出将在后续实现。'
+    clientId: 'OAuth 客户端ID', clientIdHint: '123456789-xxxxx.apps.googleusercontent.com', importCredentials: '导入 credentials.json', credentialsReady: 'Client Secret已存储在钥匙串中', credentialsMissing: '请导入桌面客户端credentials.json。', scopeWarning: '浏览、传输和同步需要访问整个Google云端硬盘。请在Google授权页面确认访问权限。', authorize: '授权 Google 账号', authorizing: '请在浏览器中完成Google授权…', disconnect: '移除授权', connected: '已授权', notConnected: '未授权', mismatch: '保存的授权属于另一个客户端ID。请使用当前客户端ID重新授权。', invalidClientId: '请输入桌面应用OAuth客户端ID。', connectHint: '请先在偏好设置中导入credentials.json并完成Google授权。', location: '连接位置', myDrive: '我的云端硬盘', sharedWithMe: '与我共享', loadingLocations: '正在加载共享云端硬盘…', locationLoadFailed: '无法加载共享云端硬盘。', exportTitle: 'Google格式导出', exportDetail: '选择下载格式。重新上传导出的文件不会恢复为原始Google格式，而会成为单独文件。CSV只导出第一个工作表。', documents: 'Google文档', spreadsheets: 'Google表格', presentations: 'Google幻灯片', drawings: 'Google绘图', revokeConfirm: '要删除存储在钥匙串中的Google云端硬盘授权信息吗？', authFailed: 'Google授权失败。', openFailed: '无法打开Google设置页面。', nativeExportUnsupported: '此Google项目不支持所选导出格式。'
   },
 } as const;
 
@@ -202,6 +217,12 @@ const preferencesCopy = {
   'zh-CN': { title: '偏好设置', detail: '这些设置适用于所有连接。', general: '通用', appearance: '外观', theme: '颜色主题', system: '跟随系统', light: '浅色', dark: '深色', showHiddenFiles: '显示隐藏文件', showHiddenFilesDetail: '显示名称以“.”开头的文件和文件夹。', fileNameWeight: '文件名字重', normal: '常规', bold: '粗体', fileRowDensity: '文件显示行距', extraCompact: '最紧凑', compact: '紧凑', standard: '标准', comfortable: '宽松', fileNameSize: '文件名文字大小', fileNameSizeDetail: '应用于列表、图标和分栏视图中的文件名。', fileNamePreview: '文件名显示示例.txt', transfers: '传输', security: '安全性', updates: '软件更新', editorTab: '编辑器', editor: '远程文件编辑器', editorDetail: '此应用用于打开缓存副本。保存后会自动覆盖同一路径下的远程文件。', chooseEditor: '选择编辑器', clearEditor: '清除', noEditor: '未选择', language: '显示语言', defaultProtocol: '新连接的默认协议', conflictPolicy: '同名文件的默认操作', ask: '每次询问', overwrite: '覆盖', skip: '跳过', confirmDelete: '删除前确认', notifications: '在应用内显示传输结果通知', save: '保存' },
 } as const;
 
+const transferSettingsCopy = {
+  ja: { title: '転送制御', globalDetail: 'すべての接続で共有する上限です。帯域を0にすると無制限になります。', bookmarkDetail: '空欄の場合は環境設定の共通値を使用します。0回は自動再試行を無効にし、帯域の0 KB/sは無制限です。', concurrent: '同時転送数', bandwidth: '帯域上限（KB/s）', retries: '自動再試行回数', inherit: '共通設定を使用' },
+  en: { title: 'Transfer Control', globalDetail: 'These limits are shared by all connections. Set bandwidth to 0 for unlimited.', bookmarkDetail: 'Leave a field blank to inherit Preferences. Zero retries disables automatic retry; 0 KB/s means unlimited.', concurrent: 'Concurrent transfers', bandwidth: 'Bandwidth limit (KB/s)', retries: 'Automatic retry attempts', inherit: 'Use global setting' },
+  'zh-CN': { title: '传输控制', globalDetail: '这些上限由所有连接共享。带宽设为0表示不限速。', bookmarkDetail: '留空时使用偏好设置中的全局值。重试次数为0时禁用自动重试；带宽0 KB/s表示不限速。', concurrent: '并发传输数', bandwidth: '带宽上限（KB/s）', retries: '自动重试次数', inherit: '使用全局设置' },
+} as const;
+
 const softwareUpdateCopy = {
   ja: { title: 'ソフトウェアアップデート', detail: '署名を検証したHarbor Transferの正式リリースだけをインストールします。', automatic: '起動時にアップデートを自動確認する', currentVersion: '現在のバージョン', check: 'アップデートを確認', checking: '確認しています…', current: '最新バージョンです', available: 'バージョン {{version}}を利用できます', details: '詳細を表示', download: 'ダウンロードしてインストール', downloading: 'ダウンロード中', ready: 'インストールが完了しました。再起動して適用してください。', restart: '再起動して更新', later: '後で', failed: 'アップデートを確認できませんでした', releaseNotes: 'リリースノート' },
   en: { title: 'Software Update', detail: 'Only official Harbor Transfer releases with a valid update signature are installed.', automatic: 'Automatically check for updates at launch', currentVersion: 'Current version', check: 'Check for Updates', checking: 'Checking…', current: 'Harbor Transfer is up to date', available: 'Version {{version}} is available', details: 'Show Details', download: 'Download and Install', downloading: 'Downloading', ready: 'Installation is complete. Restart to apply the update.', restart: 'Restart and Update', later: 'Later', failed: 'Unable to check for updates', releaseNotes: 'Release Notes' },
@@ -239,9 +260,9 @@ const bookmarkOrderCopy = {
 } as const;
 
 const queueCopy = {
-  ja: { collapse: '転送キューを折りたたむ', expand: '転送キューを展開', hideSidebar: 'サイドメニューを隠す', showSidebar: 'サイドメニューを表示', resizeSidebar: 'サイドメニューの幅を変更', clearConnectionHistory: '接続履歴を削除', clearTransferHistory: '完了・失敗した転送履歴を削除', confirmConnection: '接続履歴をすべて削除しますか？', confirmTransfer: '完了・失敗・取消済みの転送履歴をすべて削除しますか？' },
-  en: { collapse: 'Collapse transfer queue', expand: 'Expand transfer queue', hideSidebar: 'Hide sidebar', showSidebar: 'Show sidebar', resizeSidebar: 'Resize sidebar', clearConnectionHistory: 'Clear connection history', clearTransferHistory: 'Clear completed and failed transfers', confirmConnection: 'Clear all connection history?', confirmTransfer: 'Clear all completed, failed, and cancelled transfer history?' },
-  'zh-CN': { collapse: '折叠传输队列', expand: '展开传输队列', hideSidebar: '隐藏侧边栏', showSidebar: '显示侧边栏', resizeSidebar: '调整侧边栏宽度', clearConnectionHistory: '清除连接历史记录', clearTransferHistory: '清除已完成和失败的传输', confirmConnection: '清除所有连接历史记录吗？', confirmTransfer: '清除所有已完成、失败和取消的传输历史记录吗？' },
+  ja: { collapse: '転送キューを折りたたむ', expand: '転送キューを展開', hideSidebar: 'サイドメニューを隠す', showSidebar: 'サイドメニューを表示', resizeSidebar: 'サイドメニューの幅を変更', clearConnectionHistory: '接続履歴を削除', clearTransferHistory: '完了・失敗した転送履歴を削除', confirmConnection: '接続履歴をすべて削除しますか？', confirmTransfer: '完了・失敗・取消済みの転送履歴をすべて削除しますか？', interrupted: 'アプリの終了により転送が中断されました。接続後に再試行できます。', reconnectToRetry: '元の接続先へ接続すると再試行できます', queued: '転送開始を待っています…', reconnecting: '一時的な通信障害のため再接続しています…' },
+  en: { collapse: 'Collapse transfer queue', expand: 'Expand transfer queue', hideSidebar: 'Hide sidebar', showSidebar: 'Show sidebar', resizeSidebar: 'Resize sidebar width', clearConnectionHistory: 'Clear connection history', clearTransferHistory: 'Clear completed and failed transfers', confirmConnection: 'Clear all connection history?', confirmTransfer: 'Clear all completed, failed, and cancelled transfer history?', interrupted: 'The transfer was interrupted when the app closed. Reconnect to retry it.', reconnectToRetry: 'Reconnect to the original destination to retry', queued: 'Waiting to start transfer…', reconnecting: 'Temporary network failure. Reconnecting…' },
+  'zh-CN': { collapse: '折叠传输队列', expand: '展开传输队列', hideSidebar: '隐藏侧边栏', showSidebar: '显示侧边栏', resizeSidebar: '调整侧边栏宽度', clearConnectionHistory: '清除连接历史记录', clearTransferHistory: '清除已完成和失败的传输', confirmConnection: '清除所有连接历史记录吗？', confirmTransfer: '清除所有已完成、失败和取消的传输历史记录吗？', interrupted: '应用关闭时传输已中断。重新连接后可以重试。', reconnectToRetry: '连接到原始目标后即可重试', queued: '正在等待开始传输…', reconnecting: '发生临时网络故障，正在重新连接…' },
 } as const;
 
 const columnCopy = {
@@ -371,6 +392,11 @@ function parseBookmarkExport(raw: string): Connection[] | null {
       if (!(bookmark.keyPath === undefined || (typeof bookmark.keyPath === 'string' && bookmark.keyPath.length <= 4096)) || !(bookmark.hostKey === undefined || (typeof bookmark.hostKey === 'string' && bookmark.hostKey.length <= 4096)) || !(bookmark.localDirectory === undefined || (typeof bookmark.localDirectory === 'string' && bookmark.localDirectory.length <= 4096))) return null;
       if (!(bookmark.keyPassphraseNotRequired === undefined || typeof bookmark.keyPassphraseNotRequired === 'boolean')) return null;
       if (!(bookmark.smbShare === undefined || (typeof bookmark.smbShare === 'string' && bookmark.smbShare.length <= 255)) || !(bookmark.smbDomain === undefined || (typeof bookmark.smbDomain === 'string' && bookmark.smbDomain.length <= 255)) || !(bookmark.smbGuest === undefined || typeof bookmark.smbGuest === 'boolean')) return null;
+      if (!(bookmark.googleDriveLocationKind === undefined || bookmark.googleDriveLocationKind === 'myDrive' || bookmark.googleDriveLocationKind === 'sharedWithMe' || bookmark.googleDriveLocationKind === 'sharedDrive')) return null;
+      if (!(bookmark.googleDriveLocationId === undefined || (typeof bookmark.googleDriveLocationId === 'string' && bookmark.googleDriveLocationId.length <= 512))) return null;
+      if (!(bookmark.transferMaxConcurrent === undefined || (Number.isInteger(bookmark.transferMaxConcurrent) && (bookmark.transferMaxConcurrent as number) >= 1 && (bookmark.transferMaxConcurrent as number) <= 16))) return null;
+      if (!(bookmark.transferBandwidthLimitKbps === undefined || (Number.isInteger(bookmark.transferBandwidthLimitKbps) && (bookmark.transferBandwidthLimitKbps as number) >= 0 && (bookmark.transferBandwidthLimitKbps as number) <= 10_485_760))) return null;
+      if (!(bookmark.transferRetryCount === undefined || (Number.isInteger(bookmark.transferRetryCount) && (bookmark.transferRetryCount as number) >= 0 && (bookmark.transferRetryCount as number) <= 10))) return null;
       const id = (bookmark.id as string).trim();
       const host = (bookmark.host as string).trim();
       const username = (bookmark.username as string).trim();
@@ -395,6 +421,11 @@ function parseBookmarkExport(raw: string): Connection[] | null {
         smbShare: typeof bookmark.smbShare === 'string' ? bookmark.smbShare.trim() : undefined,
         smbDomain: typeof bookmark.smbDomain === 'string' ? bookmark.smbDomain.trim() : undefined,
         smbGuest: bookmark.smbGuest === true,
+        googleDriveLocationKind: bookmark.googleDriveLocationKind as GoogleDriveLocationKind | undefined,
+        googleDriveLocationId: typeof bookmark.googleDriveLocationId === 'string' ? bookmark.googleDriveLocationId : undefined,
+        transferMaxConcurrent: typeof bookmark.transferMaxConcurrent === 'number' ? bookmark.transferMaxConcurrent : undefined,
+        transferBandwidthLimitKbps: typeof bookmark.transferBandwidthLimitKbps === 'number' ? bookmark.transferBandwidthLimitKbps : undefined,
+        transferRetryCount: typeof bookmark.transferRetryCount === 'number' ? bookmark.transferRetryCount : undefined,
       });
     }
     return [...imported.values()];
@@ -596,11 +627,15 @@ export default function App() {
       invoke<Connection[]>('bookmarks_list'),
       invoke<ConnectionHistory[]>('connection_history_list'),
       invoke<TransferHistory[]>('transfer_history_list'),
+      invoke<TransferJob[]>('transfer_jobs_list'),
       invoke<SyncHistory[]>('sync_history_list'),
-    ]).then(([saved, recent, transferHistory, savedSyncHistory]) => {
+    ]).then(([saved, recent, transferHistory, transferJobs, savedSyncHistory]) => {
       setConnections(saved);
       setHistory(recent);
-      setTransfers(transferHistory.map((item) => ({ ...item, totalBytes: item.bytes, transferredBytes: item.bytes })));
+      const restored = new Map<string, Transfer>();
+      transferHistory.forEach((item) => restored.set(item.id, { ...item, totalBytes: item.bytes, transferredBytes: item.bytes }));
+      transferJobs.forEach((item) => restored.set(item.id, { ...item, detail: item.detail.includes('interrupted when Harbor Transfer closed') ? queueText.interrupted : item.detail }));
+      setTransfers([...restored.values()]);
       setSyncHistory(savedSyncHistory);
     }).catch((reason) => setError(String(reason)));
   }, []);
@@ -765,6 +800,7 @@ export default function App() {
         totalBytes: progress.totalBytes,
         speed,
         etaSeconds: speed > 0 ? remaining / speed : undefined,
+        activity: progress.status === 'reconnecting' ? 'reconnecting' : progress.status === 'queued' ? 'queued' : 'running',
       } : item));
     }).then((dispose) => { unlisten = dispose; });
     return () => unlisten?.();
@@ -1272,7 +1308,7 @@ export default function App() {
         const updated = saved.find((bookmark) => bookmark.id === current.id);
         if (!updated) return current;
         const targetChanged = connectionTargetChanged(current, updated);
-        return targetChanged ? null : { ...current, name: updated.name, initialPath: updated.initialPath, keyPath: updated.keyPath, keyPassphraseNotRequired: updated.keyPassphraseNotRequired, localDirectory: updated.localDirectory, tags: updated.tags };
+        return targetChanged ? null : { ...current, name: updated.name, initialPath: updated.initialPath, keyPath: updated.keyPath, keyPassphraseNotRequired: updated.keyPassphraseNotRequired, localDirectory: updated.localDirectory, tags: updated.tags, transferMaxConcurrent: updated.transferMaxConcurrent, transferBandwidthLimitKbps: updated.transferBandwidthLimitKbps, transferRetryCount: updated.transferRetryCount };
       });
       setNotice(t.bookmarksImported.replace('{{count}}', String(imported.length)));
     } catch (reason) { setError(String(reason)); }
@@ -1303,6 +1339,16 @@ export default function App() {
     }).catch((reason) => setError(String(reason)));
   }
 
+  function verifiedTransferDetail(detail: string, outcome: TransferOutcome) {
+    const labels = {
+      ja: { sha256: 'SHA-256検証済み', size: '転送サイズ検証済み' },
+      en: { sha256: 'SHA-256 verified', size: 'Transfer size verified' },
+      'zh-CN': { sha256: 'SHA-256 已验证', size: '传输大小已验证' },
+    } as const;
+    const verification = labels[language][outcome.verification];
+    return detail ? `${detail} · ${verification}` : verification;
+  }
+
   async function enqueueFile(localPath: string, name: string, resolvedName?: string): Promise<boolean> {
     if (!active) return false;
     const remoteName = resolvedName ?? resolveRemoteName(name);
@@ -1311,9 +1357,9 @@ export default function App() {
     const transfer: Transfer = { id: transferId, name: remoteName, direction: 'Upload', status: 'Running', detail: path, localPath, remotePath: joinPath(path, remoteName), connectionId: active.id, transferredBytes: 0 };
     setTransfers((current) => [transfer, ...current]);
     try {
-      const bytes = await invoke<number>('transfer_upload', { request: { transferId, connectionId: active.id, localPath, remotePath: transfer.remotePath } });
+      const outcome = await invoke<TransferOutcome>('transfer_upload', { request: { transferId, connectionId: active.id, localPath, remotePath: transfer.remotePath, name: transfer.name, conflictPolicy: preferences.conflictPolicy, ...transferLimits(preferences, active) } });
       setTransfers((current) => current.map((item) => item.id === transfer.id ? { ...item, status: 'Completed' } : item));
-      recordTransfer(transfer, 'Completed', transfer.detail, bytes);
+      recordTransfer(transfer, 'Completed', verifiedTransferDetail(transfer.detail, outcome), outcome.bytes);
       return true;
     } catch (reason) {
       const status = transferFailureStatus(reason);
@@ -1328,12 +1374,12 @@ export default function App() {
     const remoteName = resolvedName ?? resolveRemoteName(name);
     if (!remoteName) return false;
     const transferId = crypto.randomUUID();
-    const transfer: Transfer = { id: transferId, name: remoteName, direction: 'Upload', status: 'Running', detail: path };
+    const transfer: Transfer = { id: transferId, name: remoteName, direction: 'Upload', status: 'Running', detail: path, localPath: localDirectory, remotePath: joinPath(path, remoteName), connectionId: active.id, isDirectory: true, conflictPolicy: preferences.conflictPolicy };
     setDirectoryProgress({ transferId, completedFiles: 0, totalFiles: 0, currentPath: remoteName, status: 'preparing' });
     setDirectoryPaused(false);
     setTransfers((current) => [transfer, ...current]);
     try {
-      await invoke('transfer_upload_directory', { request: { transferId, connectionId: active.id, localDirectory, remoteDirectory: joinPath(path, remoteName) } });
+      await invoke('transfer_upload_directory', { request: { transferId, connectionId: active.id, localDirectory, remoteDirectory: transfer.remotePath, name: transfer.name, conflictPolicy: preferences.conflictPolicy, ...transferLimits(preferences, active) } });
       setTransfers((current) => current.map((item) => item.id === transfer.id ? { ...item, status: 'Completed' } : item));
       recordTransfer(transfer, 'Completed');
       void loadDirectory();
@@ -1484,17 +1530,26 @@ export default function App() {
     if (!window.confirm(queueText.confirmTransfer)) return;
     try {
       await invoke('transfer_history_clear');
+      await invoke('transfer_jobs_clear');
       setTransfers((current) => current.filter((item) => item.status === 'Running'));
     } catch (reason) { setError(String(reason)); }
   }
 
   async function retryTransfer(transfer: Transfer) {
     if (!transfer.connectionId || !transfer.localPath || !transfer.remotePath) return;
+    const transferConnection = connections.find((item) => item.id === transfer.connectionId);
+    if (!transferConnection) return;
     setTransfers((current) => current.map((item) => item.id === transfer.id ? { ...item, status: 'Running' } : item));
     try {
-      const bytes = await invoke<number>(transfer.direction === 'Upload' ? 'transfer_upload' : 'transfer_download', { request: { transferId: transfer.id, connectionId: transfer.connectionId, localPath: transfer.localPath, remotePath: transfer.remotePath } });
+      if (transfer.isDirectory) {
+        await invoke('transfer_upload_directory', { request: { transferId: transfer.id, connectionId: transfer.connectionId, localDirectory: transfer.localPath, remoteDirectory: transfer.remotePath, name: transfer.name, conflictPolicy: transfer.conflictPolicy ?? preferences.conflictPolicy, ...transferLimits(preferences, transferConnection) } });
+        setTransfers((current) => current.map((item) => item.id === transfer.id ? { ...item, status: 'Completed' } : item));
+        recordTransfer(transfer, 'Completed');
+        return;
+      }
+      const outcome = await invoke<TransferOutcome>(transfer.direction === 'Upload' ? 'transfer_upload' : 'transfer_download', { request: { transferId: transfer.id, connectionId: transfer.connectionId, localPath: transfer.localPath, remotePath: transfer.remotePath, name: transfer.name, conflictPolicy: transfer.conflictPolicy ?? preferences.conflictPolicy, resumeFrom: transfer.transferredBytes ?? 0, ...transferLimits(preferences, transferConnection) } });
       setTransfers((current) => current.map((item) => item.id === transfer.id ? { ...item, status: 'Completed' } : item));
-      recordTransfer(transfer, 'Completed', transfer.detail, bytes);
+      recordTransfer(transfer, 'Completed', verifiedTransferDetail(transfer.detail, outcome), outcome.bytes);
     } catch (reason) { const status = transferFailureStatus(reason); setTransfers((current) => current.map((item) => item.id === transfer.id ? { ...item, status, detail: String(reason) } : item)); recordTransfer(transfer, status, String(reason)); }
   }
 
@@ -1505,9 +1560,9 @@ export default function App() {
     const transfer: Transfer = { id: crypto.randomUUID(), name: entry.name, direction: 'Download', status: 'Running', detail: visibleRemotePath(basePath), localPath, remotePath: entryRemotePath(basePath, entry), connectionId: active.id, transferredBytes: 0, totalBytes: entry.size };
     setTransfers((current) => [transfer, ...current]);
     try {
-      const bytes = await invoke<number>('transfer_download', { request: { transferId: transfer.id, connectionId: active.id, localPath, remotePath: transfer.remotePath } });
+      const outcome = await invoke<TransferOutcome>('transfer_download', { request: { transferId: transfer.id, connectionId: active.id, localPath, remotePath: transfer.remotePath, name: transfer.name, conflictPolicy: preferences.conflictPolicy, ...transferLimits(preferences, active) } });
       setTransfers((current) => current.map((item) => item.id === transfer.id ? { ...item, status: 'Completed' } : item));
-      recordTransfer(transfer, 'Completed', transfer.detail, bytes);
+      recordTransfer(transfer, 'Completed', verifiedTransferDetail(transfer.detail, outcome), outcome.bytes);
     } catch (reason) { const status = transferFailureStatus(reason); setTransfers((current) => current.map((item) => item.id === transfer.id ? { ...item, status, detail: String(reason) } : item)); recordTransfer(transfer, status, String(reason)); }
   }
 
@@ -1893,16 +1948,16 @@ export default function App() {
     <section className={`transfer-panel ${transferPanelCollapsed ? 'collapsed' : ''}`}>
       <div className="transfer-heading"><span>{t.status}</span><small>{transfers.filter((item) => item.status === 'Running').length + remoteEdits.length + (dragPreparingPath ? 1 : 0)} active</small><span className="transfer-heading-spacer"/>{transfers.some((item) => item.status !== 'Running') && <button className="icon-button" aria-label={queueText.clearTransferHistory} title={queueText.clearTransferHistory} onClick={() => void clearTransferHistory()}><Trash2 size={15}/></button>}<button className="icon-button" aria-label={transferPanelCollapsed ? queueText.expand : queueText.collapse} title={transferPanelCollapsed ? queueText.expand : queueText.collapse} aria-expanded={!transferPanelCollapsed} onClick={toggleTransferPanel}>{transferPanelCollapsed ? <ChevronUp size={17}/> : <ChevronDown size={17}/>}</button></div>
       <div className="transfer-list">
-        {directoryProgress && directoryProgress.status !== 'completed' && <div className="directory-progress"><span>{directoryProgress.completedFiles} / {directoryProgress.totalFiles || '…'}</span><strong>{directoryProgress.currentPath}</strong><button onClick={() => void controlDirectoryTransfer(directoryPaused ? 'resume' : 'pause')}>{directoryPaused ? t.resume : t.pause}</button><button onClick={() => void controlDirectoryTransfer('cancel')}>{t.cancel}</button></div>}
+        {directoryProgress && directoryProgress.status !== 'completed' && <div className="directory-progress"><span>{directoryProgress.completedFiles} / {directoryProgress.totalFiles || '…'}</span><strong>{directoryProgress.status === 'reconnecting' ? queueText.reconnecting : directoryProgress.status === 'queued' ? queueText.queued : directoryProgress.currentPath}</strong><button onClick={() => void controlDirectoryTransfer(directoryPaused ? 'resume' : 'pause')}>{directoryPaused ? t.resume : t.pause}</button><button onClick={() => void controlDirectoryTransfer('cancel')}>{t.cancel}</button></div>}
         {dragPreparingPath && <div className="drag-export-progress"><LoaderCircle className="spinning" size={15}/><strong>{dragPreparingPath.split('/').pop()}</strong><span>{dragText.preparing}</span></div>}
         {remoteEdits.map((edit) => <div className={`remote-edit-row ${edit.status}`} key={edit.editId}><Pencil size={15}/><strong>{edit.name}</strong><span>{edit.status === 'waiting' ? editText.waiting : edit.status === 'failed' ? edit.detail : editText.watching}</span><small title={edit.remotePath}>{edit.remotePath}</small><button className="icon-button" aria-label={editText.stop} title={editText.stop} onClick={() => void closeRemoteEdit(edit)}><Trash2 size={14}/></button></div>)}
         {transfers.length === 0 && remoteEdits.length === 0 && !dragPreparingPath ? <p className="muted">Transfers will appear here.</p> : transfers.slice(0, 8).map((transfer) => <div className="transfer-row" key={transfer.id}>
           <span className={`transfer-status ${transfer.status.toLowerCase()}`}/><strong>{transfer.name}</strong>
           <span>{transfer.totalBytes ? `${Math.round(((transfer.transferredBytes ?? 0) / transfer.totalBytes) * 100)}%` : transfer.direction}</span>
-          <span>{transfer.speed ? `${formatBytes(transfer.speed)}/s · ${p2.eta} ${formatDuration(transfer.etaSeconds)}` : transfer.detail}</span>
+          <span>{transfer.status === 'Running' && transfer.activity === 'queued' ? queueText.queued : transfer.status === 'Running' && transfer.activity === 'reconnecting' ? queueText.reconnecting : transfer.speed ? `${formatBytes(transfer.speed)}/s · ${p2.eta} ${formatDuration(transfer.etaSeconds)}` : transfer.detail}</span>
           <span className="transfer-actions">
             {transfer.status === 'Running' && <><button onClick={() => void controlTransfer(transfer, pausedTransfers.has(transfer.id) ? 'resume' : 'pause')}>{pausedTransfers.has(transfer.id) ? t.resume : t.pause}</button><button onClick={() => void controlTransfer(transfer, 'cancel')}>{t.cancel}</button></>}
-            {transfer.status === 'Failed' && transfer.localPath ? <button onClick={() => void retryTransfer(transfer)}>{t.retry}</button> : transfer.status !== 'Running' ? transfer.status : null}
+            {transfer.status === 'Failed' && transfer.localPath ? transfer.connectionId === active?.id ? <button onClick={() => void retryTransfer(transfer)}>{t.retry}</button> : <span title={queueText.reconnectToRetry}>{transfer.status}</span> : transfer.status !== 'Running' ? transfer.status : null}
           </span>
         </div>)}
       </div>
@@ -1949,12 +2004,12 @@ export default function App() {
       </div> : <div className="form-actions"><button type="button" onClick={() => settleDropConflict('cancel')}>{dropConflictText.cancel}</button><button type="button" className="primary" onClick={() => settleDropConflict('overwrite')}>{dropConflictText.overwrite}</button></div>}
       {dropConflict.incomingIsDirectory && dropConflict.existingIsDirectory && <div className="form-actions"><button type="button" onClick={() => settleDropConflict('cancel')}>{dropConflictText.cancel}</button></div>}
     </section></div>}
-    {showConnect && <ConnectSheet mode={connectSheetMode} bookmark={connectingBookmark} initialKeyPath={selectedKeyPath} defaultProtocol={preferences.defaultProtocol} googleClientId={preferences.googleClientId} t={t} phaseCopy={p1} passphraseText={sshPassphrasePromptCopy[language]} localCopy={bookmarkLocalText} s3Text={s3Copy[language]} sambaText={sambaCopy[language]} googleText={googleDriveCopy[language]} cloudFtpText={cloudFtpCopy[language]} onClose={() => setShowConnect(false)} onSaved={(connection) => {
+    {showConnect && <ConnectSheet mode={connectSheetMode} bookmark={connectingBookmark} initialKeyPath={selectedKeyPath} defaultProtocol={preferences.defaultProtocol} googleClientId={preferences.googleClientId} googleExportFormats={preferences} t={t} phaseCopy={p1} passphraseText={sshPassphrasePromptCopy[language]} localCopy={bookmarkLocalText} s3Text={s3Copy[language]} sambaText={sambaCopy[language]} googleText={googleDriveCopy[language]} cloudFtpText={cloudFtpCopy[language]} transferText={transferSettingsCopy[language]} onClose={() => setShowConnect(false)} onSaved={(connection) => {
       setConnections((current) => upsertConnectionInOrder(current, connection));
       setActive((current) => {
         if (current?.id !== connection.id) return current;
         const targetChanged = connectionTargetChanged(current, connection);
-        return targetChanged ? null : { ...current, name: connection.name, initialPath: connection.initialPath, keyPath: connection.keyPath, keyPassphraseNotRequired: connection.keyPassphraseNotRequired, localDirectory: connection.localDirectory, tags: connection.tags };
+        return targetChanged ? null : { ...current, name: connection.name, initialPath: connection.initialPath, keyPath: connection.keyPath, keyPassphraseNotRequired: connection.keyPassphraseNotRequired, localDirectory: connection.localDirectory, tags: connection.tags, transferMaxConcurrent: connection.transferMaxConcurrent, transferBandwidthLimitKbps: connection.transferBandwidthLimitKbps, transferRetryCount: connection.transferRetryCount };
       });
       setNotice(t.bookmarkSaved);
       setShowConnect(false);
@@ -2058,7 +2113,7 @@ function SyncPreviewSheet({ preview, localDirectory, remoteDirectory, direction,
   </section></div>;
 }
 
-function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, googleClientId, t, phaseCopy, passphraseText, localCopy, s3Text, sambaText, googleText, cloudFtpText, onClose, onSaved, onConnected }: { mode: 'connect' | 'edit'; bookmark: Connection | null; initialKeyPath: string; defaultProtocol: Protocol; googleClientId: string; t: typeof copy[keyof typeof copy]; phaseCopy: typeof phaseOneCopy[keyof typeof phaseOneCopy]; passphraseText: typeof sshPassphrasePromptCopy[keyof typeof sshPassphrasePromptCopy]; localCopy: typeof bookmarkLocalCopy[keyof typeof bookmarkLocalCopy]; s3Text: typeof s3Copy[keyof typeof s3Copy]; sambaText: typeof sambaCopy[keyof typeof sambaCopy]; googleText: typeof googleDriveCopy[keyof typeof googleDriveCopy]; cloudFtpText: typeof cloudFtpCopy[keyof typeof cloudFtpCopy]; onClose: () => void; onSaved: (connection: Connection) => void; onConnected: (connection: Connection) => void }) {
+function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, googleClientId, googleExportFormats, t, phaseCopy, passphraseText, localCopy, s3Text, sambaText, googleText, cloudFtpText, transferText, onClose, onSaved, onConnected }: { mode: 'connect' | 'edit'; bookmark: Connection | null; initialKeyPath: string; defaultProtocol: Protocol; googleClientId: string; googleExportFormats: GoogleExportPreferences; t: typeof copy[keyof typeof copy]; phaseCopy: typeof phaseOneCopy[keyof typeof phaseOneCopy]; passphraseText: typeof sshPassphrasePromptCopy[keyof typeof sshPassphrasePromptCopy]; localCopy: typeof bookmarkLocalCopy[keyof typeof bookmarkLocalCopy]; s3Text: typeof s3Copy[keyof typeof s3Copy]; sambaText: typeof sambaCopy[keyof typeof sambaCopy]; googleText: typeof googleDriveCopy[keyof typeof googleDriveCopy]; cloudFtpText: typeof cloudFtpCopy[keyof typeof cloudFtpCopy]; transferText: typeof transferSettingsCopy[keyof typeof transferSettingsCopy]; onClose: () => void; onSaved: (connection: Connection) => void; onConnected: (connection: Connection) => void }) {
   const [bookmarkName, setBookmarkName] = useState(bookmark?.name ?? '');
   const [protocol, setProtocol] = useState<Protocol>(bookmark?.protocol ?? defaultProtocol);
   const [host, setHost] = useState(bookmark?.host ?? '');
@@ -2074,11 +2129,18 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, googleC
   const [smbShare, setSmbShare] = useState(bookmark?.smbShare ?? '');
   const [smbDomain, setSmbDomain] = useState(bookmark?.smbDomain ?? '');
   const [smbGuest, setSmbGuest] = useState(bookmark?.smbGuest ?? false);
+  const [googleDriveLocationKind, setGoogleDriveLocationKind] = useState<GoogleDriveLocationKind>(bookmark?.googleDriveLocationKind ?? 'myDrive');
+  const [googleDriveLocationId, setGoogleDriveLocationId] = useState(bookmark?.googleDriveLocationId ?? '');
+  const [googleDriveLocations, setGoogleDriveLocations] = useState<GoogleDriveLocation[]>([]);
+  const [googleDriveLocationsLoading, setGoogleDriveLocationsLoading] = useState(false);
   const [keyPath, setKeyPath] = useState(initialKeyPath || bookmark?.keyPath || '');
   const [keyPassphraseNotRequired, setKeyPassphraseNotRequired] = useState(bookmark?.keyPassphraseNotRequired ?? false);
   const [saveKeyPassphrase, setSaveKeyPassphrase] = useState(true);
   const [tags, setTags] = useState(bookmark?.tags ?? '');
   const [localDirectory, setLocalDirectory] = useState(bookmark?.localDirectory ?? '');
+  const [transferMaxConcurrent, setTransferMaxConcurrent] = useState<number | undefined>(bookmark?.transferMaxConcurrent);
+  const [transferBandwidthLimitKbps, setTransferBandwidthLimitKbps] = useState<number | undefined>(bookmark?.transferBandwidthLimitKbps);
+  const [transferRetryCount, setTransferRetryCount] = useState<number | undefined>(bookmark?.transferRetryCount);
   const [busy, setBusy] = useState(false);
   const [busyMessage, setBusyMessage] = useState('');
   const [error, setError] = useState('');
@@ -2094,6 +2156,16 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, googleC
     if (selected && !Array.isArray(selected)) setKeyPath(selected);
   }
   useEffect(() => { if (bookmark && bookmark.protocol !== 'googleDrive') void invoke<string | null>('credential_load', { bookmarkId: bookmark.id }).then((saved) => { if (!saved) return; if (bookmark.protocol === 's3') { try { const value = JSON.parse(saved) as { accessKeyId?: string; secretAccessKey?: string; sessionToken?: string }; setUsername(value.accessKeyId ?? ''); setPassword(value.secretAccessKey ?? ''); setS3SessionToken(value.sessionToken ?? ''); } catch { setUsername(''); setPassword(''); } } else if (!(bookmark.protocol === 'smb' && bookmark.smbGuest) && !bookmark.keyPassphraseNotRequired) setPassword(saved); }).catch((reason) => setError(`${passphraseText.keychainLoadFailed} ${invokeErrorMessage(reason)}`)); }, [bookmark, passphraseText.keychainLoadFailed]);
+  useEffect(() => {
+    if (protocol !== 'googleDrive' || !googleClientId.trim().endsWith('.apps.googleusercontent.com')) return;
+    let active = true;
+    setGoogleDriveLocationsLoading(true);
+    void invoke<GoogleDriveLocation[]>('google_drive_locations', { clientId: googleClientId.trim() })
+      .then((locations) => { if (active) setGoogleDriveLocations(locations); })
+      .catch(() => { if (active) setGoogleDriveLocations([]); })
+      .finally(() => { if (active) setGoogleDriveLocationsLoading(false); });
+    return () => { active = false; };
+  }, [protocol, googleClientId]);
   async function submit(event: React.FormEvent) {
     event.preventDefault(); setError('');
     const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
@@ -2130,7 +2202,7 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, googleC
       }
       const connectionHost = protocol === 'googleDrive' ? 'drive.google.com' : host.trim();
       const connectionUsername = protocol === 'googleDrive' ? (googleStatus?.email ?? 'Google Account') : protocol === 's3' || (protocol === 'smb' && smbGuest) ? '' : username;
-      const connection: Connection = { id: bookmark?.id ?? crypto.randomUUID(), name: bookmarkName.trim() || (protocol === 'googleDrive' ? 'Google Drive' : connectionHost), protocol, host: connectionHost, port, username: connectionUsername, initialPath: initialDirectory.trim() || '/', keyPath: keyPath || undefined, keyPassphraseNotRequired: useNoKeyPassphrase, hostKey, localDirectory: localDirectory || undefined, tags, s3Region: protocol === 's3' ? s3Region.trim() : undefined, s3Endpoint: protocol === 's3' && s3Endpoint.trim() ? s3Endpoint.trim() : undefined, s3ForcePathStyle: protocol === 's3' && s3ForcePathStyle, s3PreserveEmptyDirectories: protocol === 's3' && s3PreserveEmptyDirectories, smbShare: protocol === 'smb' ? smbShare.trim() : undefined, smbDomain: protocol === 'smb' && smbDomain.trim() ? smbDomain.trim() : undefined, smbGuest: protocol === 'smb' && smbGuest };
+      const connection: Connection = { id: bookmark?.id ?? crypto.randomUUID(), name: bookmarkName.trim() || (protocol === 'googleDrive' ? 'Google Drive' : connectionHost), protocol, host: connectionHost, port, username: connectionUsername, initialPath: initialDirectory.trim() || '/', keyPath: keyPath || undefined, keyPassphraseNotRequired: useNoKeyPassphrase, hostKey, localDirectory: localDirectory || undefined, tags, s3Region: protocol === 's3' ? s3Region.trim() : undefined, s3Endpoint: protocol === 's3' && s3Endpoint.trim() ? s3Endpoint.trim() : undefined, s3ForcePathStyle: protocol === 's3' && s3ForcePathStyle, s3PreserveEmptyDirectories: protocol === 's3' && s3PreserveEmptyDirectories, smbShare: protocol === 'smb' ? smbShare.trim() : undefined, smbDomain: protocol === 'smb' && smbDomain.trim() ? smbDomain.trim() : undefined, smbGuest: protocol === 'smb' && smbGuest, googleDriveLocationKind: protocol === 'googleDrive' ? googleDriveLocationKind : undefined, googleDriveLocationId: protocol === 'googleDrive' && googleDriveLocationKind === 'sharedDrive' ? googleDriveLocationId : undefined, transferMaxConcurrent, transferBandwidthLimitKbps, transferRetryCount };
       const storedCredential = protocol === 's3' ? JSON.stringify({ accessKeyId: username, secretAccessKey: resolvedPassword, sessionToken: s3SessionToken || undefined }) : resolvedPassword;
       const shouldStoreCredential = protocol === 'googleDrive' || protocol === 'smb' && smbGuest ? false : !(isSshProtocol(protocol) && keyPath.trim()) || saveKeyPassphrase;
       const shouldDeleteStoredCredential = Boolean(bookmark && bookmark.protocol !== 'googleDrive' && (connection.keyPassphraseNotRequired || !shouldStoreCredential));
@@ -2142,7 +2214,7 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, googleC
         return;
       }
       setBusyMessage(t.connectingToServer);
-      await invoke('connection_connect', { request: { connectionId: connection.id, protocol, host: connection.host, port, username: connection.username, password: protocol === 'googleDrive' || isSshProtocol(protocol) && keyPath.trim() || (protocol === 'smb' && smbGuest) ? null : resolvedPassword || null, keyPath: keyPath.trim() || null, passphrase: usesSshKeyPassphrase ? resolvedPassword : null, expectedHostKey: hostKey ?? null, initialPath: connection.initialPath, s3Region: connection.s3Region ?? null, s3Endpoint: connection.s3Endpoint ?? null, s3SessionToken: s3SessionToken || null, s3ForcePathStyle: connection.s3ForcePathStyle ?? false, s3PreserveEmptyDirectories: connection.s3PreserveEmptyDirectories ?? false, smbShare: connection.smbShare ?? null, smbDomain: connection.smbDomain ?? null, smbGuest: connection.smbGuest ?? false, googleClientId: protocol === 'googleDrive' ? googleClientId.trim() : null } });
+      await invoke('connection_connect', { request: { connectionId: connection.id, protocol, host: connection.host, port, username: connection.username, password: protocol === 'googleDrive' || isSshProtocol(protocol) && keyPath.trim() || (protocol === 'smb' && smbGuest) ? null : resolvedPassword || null, keyPath: keyPath.trim() || null, passphrase: usesSshKeyPassphrase ? resolvedPassword : null, expectedHostKey: hostKey ?? null, initialPath: connection.initialPath, s3Region: connection.s3Region ?? null, s3Endpoint: connection.s3Endpoint ?? null, s3SessionToken: s3SessionToken || null, s3ForcePathStyle: connection.s3ForcePathStyle ?? false, s3PreserveEmptyDirectories: connection.s3PreserveEmptyDirectories ?? false, smbShare: connection.smbShare ?? null, smbDomain: connection.smbDomain ?? null, smbGuest: connection.smbGuest ?? false, googleClientId: protocol === 'googleDrive' ? googleClientId.trim() : null, googleDriveLocationKind: connection.googleDriveLocationKind ?? null, googleDriveLocationId: connection.googleDriveLocationId ?? null, googleDocsExport: googleExportFormats.googleDocsExport, googleSheetsExport: googleExportFormats.googleSheetsExport, googleSlidesExport: googleExportFormats.googleSlidesExport, googleDrawingsExport: googleExportFormats.googleDrawingsExport } });
       if (shouldDeleteStoredCredential) await invoke('credential_delete', { bookmarkId: connection.id });
       else if (resolvedPassword) await invoke('credential_save', { bookmarkId: connection.id, password: storedCredential });
       onConnected(connection);
@@ -2163,6 +2235,7 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, googleC
       <label>{t.protocol}<select value={protocol} onChange={(event) => updateProtocol(event.target.value as Protocol)}><option value="sftp">SFTP</option><option value="cloudFtp">Google Cloud FTP (SFTP)</option><option value="ftp">FTP</option><option value="ftps">Explicit FTPS</option><option value="webdav">WebDAV (HTTPS)</option><option value="s3">Amazon S3 / S3-compatible</option><option value="smb">Samba / SMB 2/3</option><option value="googleDrive">Google Drive</option></select></label>
       {protocol !== 'googleDrive' && <div className="form-grid"><label>{protocol === 's3' ? s3Text.bucket : t.host}<input {...technicalInputProps} required value={host} onChange={(event) => setHost(event.target.value)} placeholder={protocol === 's3' ? 'example-bucket' : 'example.com'}/></label>{protocol !== 's3' && <label>{t.port}<input required min={1} max={65535} step={1} type="number" value={port} onChange={(event) => setPort(Number(event.target.value))}/></label>}</div>}
       {protocol === 'googleDrive' && <p className="protocol-security-hint google-drive-connect-hint"><Cloud size={17}/><span>{googleText.connectHint}</span></p>}
+      {protocol === 'googleDrive' && <label>{googleText.location}<select value={`${googleDriveLocationKind}:${googleDriveLocationId}`} disabled={googleDriveLocationsLoading} onChange={(event) => { const [kind, ...id] = event.target.value.split(':'); setGoogleDriveLocationKind(kind as GoogleDriveLocationKind); setGoogleDriveLocationId(id.join(':')); setInitialDirectory('/'); }}><option value="myDrive:">{googleText.myDrive}</option><option value="sharedWithMe:">{googleText.sharedWithMe}</option>{googleDriveLocations.filter((location) => location.kind === 'sharedDrive').map((location) => <option key={location.id} value={`sharedDrive:${location.id ?? ''}`}>{location.name}</option>)}{googleDriveLocationKind === 'sharedDrive' && googleDriveLocationId && !googleDriveLocations.some((location) => location.id === googleDriveLocationId) && <option value={`sharedDrive:${googleDriveLocationId}`}>{bookmark?.name ?? googleDriveLocationId}</option>}</select><small className="field-hint">{googleDriveLocationsLoading ? googleText.loadingLocations : googleDriveLocations.length === 0 ? googleText.locationLoadFailed : ''}</small></label>}
       {protocol === 'cloudFtp' && <p className="protocol-security-hint google-drive-connect-hint"><Cloud size={17}/><span>{cloudFtpText.hint}</span></p>}
       {protocol === 'webdav' && <p className="protocol-security-hint">{phaseCopy.webdavHint}</p>}
       <label>{t.initialDirectory}<input {...technicalInputProps} required value={initialDirectory} onChange={(event) => setInitialDirectory(event.target.value)} placeholder={t.initialDirectoryHint}/></label>
@@ -2173,6 +2246,10 @@ function ConnectSheet({ mode, bookmark, initialKeyPath, defaultProtocol, googleC
       {isSshProtocol(protocol) && <label>{t.key}<span className="ssh-key-picker"><input {...technicalInputProps} required={protocol === 'cloudFtp'} value={keyPath} onChange={(event) => setKeyPath(event.target.value)} placeholder="~/.ssh/id_ed25519"/><button type="button" onClick={() => void selectSshKey()}>{t.chooseKey}</button></span><small className="field-hint">{protocol === 'cloudFtp' ? cloudFtpText.keyRequired : t.keyFormatHint}</small></label>}
       {isSshProtocol(protocol) && keyPath.trim() && <><label className="check-row"><input type="checkbox" checked={keyPassphraseNotRequired} onChange={(event) => { passphrasePromptOverride.current = false; setKeyPassphraseNotRequired(event.target.checked); if (event.target.checked) setPassword(''); }}/><span>{passphraseText.withoutPassphrase}</span></label><p className="protocol-security-hint ssh-passphrase-option-hint">{passphraseText.withoutPassphraseDetail}</p>{!keyPassphraseNotRequired && <><label>{t.keyPassphrase}<input type="password" value={password} onChange={(event) => setPassword(event.target.value)}/></label><label className="check-row"><input type="checkbox" checked={saveKeyPassphrase} onChange={(event) => setSaveKeyPassphrase(event.target.checked)}/><span>{passphraseText.saveInKeychain}</span></label><p className="protocol-security-hint ssh-passphrase-option-hint">{passphraseText.saveInKeychainDetail}</p></>}</>}
       <label>{phaseCopy.tags}<input {...technicalInputProps} value={tags} onChange={(event) => setTags(event.target.value)} placeholder={phaseCopy.tagHint}/></label>
+      <section className="bookmark-local-directory-section bookmark-transfer-settings">
+        <div className="bookmark-local-directory-copy"><strong>{transferText.title}</strong><p>{transferText.bookmarkDetail}</p></div>
+        <div className="form-grid"><label>{transferText.concurrent}<input type="number" min="1" max="16" step="1" value={transferMaxConcurrent ?? ''} placeholder={transferText.inherit} onChange={(event) => setTransferMaxConcurrent(event.target.value === '' ? undefined : Math.min(16, Math.max(1, Math.round(Number(event.target.value)))))}/></label><label>{transferText.bandwidth}<input type="number" min="0" max="10485760" step="1" value={transferBandwidthLimitKbps ?? ''} placeholder={transferText.inherit} onChange={(event) => setTransferBandwidthLimitKbps(event.target.value === '' ? undefined : Math.min(10_485_760, Math.max(0, Math.round(Number(event.target.value)))))}/></label><label>{transferText.retries}<input type="number" min="0" max="10" step="1" value={transferRetryCount ?? ''} placeholder={transferText.inherit} onChange={(event) => setTransferRetryCount(event.target.value === '' ? undefined : Math.min(10, Math.max(0, Math.round(Number(event.target.value)))))}/></label></div>
+      </section>
       <section className="bookmark-local-directory-section">
         <div className="bookmark-local-directory-copy"><strong>{localCopy.title}</strong><p>{localCopy.detail}</p></div>
         <div className="bookmark-local-directory-picker"><div className={`local-directory-path ${localDirectory ? '' : 'empty'}`} title={localDirectory || localCopy.none}><Folder size={16}/><span>{localDirectory || localCopy.none}</span></div><button type="button" onClick={() => void selectLocalDirectory()}>{localCopy.select}</button>{localDirectory && <button type="button" onClick={() => setLocalDirectory('')}>{localCopy.clear}</button>}</div>
@@ -2212,6 +2289,7 @@ function PreferencesSheet({ value, language, t, softwareUpdate, onCheckUpdate, o
   const text = preferencesCopy[language];
   const updateText = softwareUpdateCopy[language];
   const googleText = googleDriveCopy[language];
+  const transferText = transferSettingsCopy[language];
   const tabs = [
     { id: 'general' as const, label: text.general },
     { id: 'appearance' as const, label: text.appearance },
@@ -2292,6 +2370,8 @@ function PreferencesSheet({ value, language, t, softwareUpdate, onCheckUpdate, o
           <div className="file-name-size-setting"><div className="preference-setting-heading"><strong>{text.fileNameSize}</strong><output>{draft.fileNameFontSize}px</output></div><p className="preferences-field-detail">{text.fileNameSizeDetail}</p><input aria-label={text.fileNameSize} type="range" min="10" max="20" step="1" value={draft.fileNameFontSize} onChange={(event) => setDraft((current) => ({ ...current, fileNameFontSize: Number(event.target.value) }))}/><div className="file-name-size-preview" style={{ fontSize: `${draft.fileNameFontSize}px`, fontWeight: draft.fileNameFontWeight === 'normal' ? 400 : 650 }}><FileText size={18}/><span>{text.fileNamePreview}</span></div></div>
         </section>}
         {activeTab === 'transfers' && <section className="preferences-panel" id="preferences-panel-transfers" role="tabpanel"><h3>{text.transfers}</h3>
+          <p className="preferences-field-detail">{transferText.globalDetail}</p>
+          <div className="form-grid"><label>{transferText.concurrent}<input type="number" min="1" max="16" step="1" value={draft.maxConcurrentTransfers} onChange={(event) => setDraft((current) => ({ ...current, maxConcurrentTransfers: Math.min(16, Math.max(1, Math.round(Number(event.target.value) || 1))) }))}/></label><label>{transferText.bandwidth}<input type="number" min="0" max="10485760" step="1" value={draft.bandwidthLimitKbps} onChange={(event) => setDraft((current) => ({ ...current, bandwidthLimitKbps: Math.min(10_485_760, Math.max(0, Math.round(Number(event.target.value) || 0))) }))}/></label><label>{transferText.retries}<input type="number" min="0" max="10" step="1" value={draft.automaticRetryCount} onChange={(event) => setDraft((current) => ({ ...current, automaticRetryCount: Math.min(10, Math.max(0, Math.round(Number(event.target.value) || 0))) }))}/></label></div>
           <label>{text.conflictPolicy}<select value={draft.conflictPolicy} onChange={(event) => setDraft((current) => ({ ...current, conflictPolicy: event.target.value as Preferences['conflictPolicy'] }))}><option value="ask">{text.ask}</option><option value="overwrite">{text.overwrite}</option><option value="skip">{text.skip}</option></select></label>
           <label className="check-row"><input type="checkbox" checked={draft.transferNotifications} onChange={(event) => setDraft((current) => ({ ...current, transferNotifications: event.target.checked }))}/><span>{text.notifications}</span></label>
         </section>}
@@ -2307,6 +2387,7 @@ function PreferencesSheet({ value, language, t, softwareUpdate, onCheckUpdate, o
           <div className="google-oauth-card"><p>{googleText.stepPaste}</p><button type="button" disabled={googleBusy} onClick={() => void importGoogleCredentials()}><FileJson size={15}/>{googleText.importCredentials}</button><label>{googleText.clientId}<input {...technicalInputProps} value={draft.googleClientId} onChange={(event) => { setDraft((current) => ({ ...current, googleClientId: event.target.value })); setGoogleStatus((current) => current ? { ...current, clientMatches: false, credentialsReady: false } : null); }} placeholder={googleText.clientIdHint} aria-invalid={Boolean(normalizedGoogleClientId) && !validGoogleClientId}/></label><p className={`google-credentials-status ${googleStatus?.credentialsReady ? 'ready' : ''}`}>{googleStatus?.credentialsReady ? googleText.credentialsReady : googleText.credentialsMissing}</p><p className="google-scope-warning">{googleText.scopeWarning}</p>
             <div className="google-auth-row"><span className={`google-auth-status ${googleStatus?.authorized && googleStatus.clientMatches ? 'connected' : ''}`}><span/>{googleStatus?.authorized ? (googleStatus.clientMatches ? `${googleText.connected}${googleStatus.email ? ` · ${googleStatus.email}` : ''}` : googleText.mismatch) : googleText.notConnected}</span><div>{googleStatus?.authorized && googleStatus.clientMatches && <button type="button" disabled={googleBusy} onClick={() => void disconnectGoogleDrive()}>{googleText.disconnect}</button>}<button type="button" className="primary" disabled={googleBusy || !validGoogleClientId || !googleStatus?.credentialsReady} onClick={() => void authorizeGoogleDrive()}>{googleBusy ? <><LoaderCircle className="spinning" size={14}/>{googleText.authorizing}</> : googleText.authorize}</button></div></div>
           </div>
+          <section className="google-oauth-card google-export-settings"><h4>{googleText.exportTitle}</h4><p>{googleText.exportDetail}</p><div className="form-grid"><label>{googleText.documents}<select value={draft.googleDocsExport} onChange={(event) => setDraft((current) => ({ ...current, googleDocsExport: event.target.value as Preferences['googleDocsExport'] }))}><option value="docx">DOCX</option><option value="pdf">PDF</option><option value="odt">ODT</option><option value="txt">TXT</option></select></label><label>{googleText.spreadsheets}<select value={draft.googleSheetsExport} onChange={(event) => setDraft((current) => ({ ...current, googleSheetsExport: event.target.value as Preferences['googleSheetsExport'] }))}><option value="xlsx">XLSX</option><option value="pdf">PDF</option><option value="csv">CSV</option></select></label><label>{googleText.presentations}<select value={draft.googleSlidesExport} onChange={(event) => setDraft((current) => ({ ...current, googleSlidesExport: event.target.value as Preferences['googleSlidesExport'] }))}><option value="pptx">PPTX</option><option value="pdf">PDF</option></select></label><label>{googleText.drawings}<select value={draft.googleDrawingsExport} onChange={(event) => setDraft((current) => ({ ...current, googleDrawingsExport: event.target.value as Preferences['googleDrawingsExport'] }))}><option value="pdf">PDF</option><option value="png">PNG</option><option value="svg">SVG</option></select></label></div></section>
           {googleError && <p className="form-error" role="alert">{googleError}</p>}
         </section>}
         {activeTab === 'security' && <section className="preferences-panel" id="preferences-panel-security" role="tabpanel"><h3>{text.security}</h3><label className="check-row"><input type="checkbox" checked={draft.confirmDelete} onChange={(event) => setDraft((current) => ({ ...current, confirmDelete: event.target.checked }))}/><span>{text.confirmDelete}</span></label></section>}

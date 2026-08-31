@@ -8,11 +8,11 @@ use reqwest::{header, Client, Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio_util::io::ReaderStream;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 
 const DRIVE_API: &str = "https://www.googleapis.com/drive/v3";
 const DRIVE_UPLOAD_API: &str = "https://www.googleapis.com/upload/drive/v3";
@@ -26,6 +26,9 @@ const GOOGLE_AUTHORIZATION_VAULT_KEY: &str = "google:authorization";
 const GOOGLE_CREDENTIALS_VAULT_KEY: &str = "google:client-credentials";
 const MAX_LIST_ENTRIES: usize = 100_000;
 const DRIVE_PATH_PREFIX: &str = "~gdrive~";
+const SHARED_WITH_ME_ROOT_ID: &str = "~shared-with-me~";
+const RESUMABLE_CHUNK_SIZE: usize = 8 * 1024 * 1024;
+const MAX_API_RETRIES: u32 = 5;
 
 #[derive(Default)]
 struct GoogleKeychainCache {
@@ -76,6 +79,22 @@ pub struct GoogleAuthorizationStatus {
     pub email: Option<String>,
     pub client_matches: bool,
     pub credentials_ready: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleDriveUploadState {
+    pub upload_url: String,
+    pub remote_path: String,
+    pub total_size: u64,
+    pub source_modified_ns: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GoogleUploadStatus {
+    Active(u64),
+    Complete,
+    Expired,
 }
 
 #[derive(Deserialize)]
@@ -129,20 +148,85 @@ struct DriveFileList {
     next_page_token: Option<String>,
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SharedDrive {
+    id: String,
+    name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SharedDriveList {
+    drives: Vec<SharedDrive>,
+    next_page_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleDriveLocation {
+    pub kind: String,
+    pub id: Option<String>,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GoogleExportOptions {
+    pub documents: Option<String>,
+    pub spreadsheets: Option<String>,
+    pub presentations: Option<String>,
+    pub drawings: Option<String>,
+}
+
+impl GoogleExportOptions {
+    fn validate(&self) -> Result<()> {
+        validate_export_choice(self.documents.as_deref(), &["docx", "pdf", "odt", "txt"])?;
+        validate_export_choice(self.spreadsheets.as_deref(), &["xlsx", "pdf", "csv"])?;
+        validate_export_choice(self.presentations.as_deref(), &["pptx", "pdf"])?;
+        validate_export_choice(self.drawings.as_deref(), &["pdf", "png", "svg"])?;
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
 pub struct GoogleDriveClient {
     http: Client,
     authorization: StoredGoogleAuthorization,
     file_cache: HashMap<String, DriveFile>,
+    root_id: String,
+    shared_with_me_root: bool,
+    shared_drive_id: Option<String>,
+    export_options: GoogleExportOptions,
 }
 
 impl GoogleDriveClient {
-    pub async fn connect(client_id: &str, probe_path: &str) -> Result<Self> {
+    pub async fn connect(
+        client_id: &str,
+        probe_path: &str,
+        location_kind: Option<&str>,
+        location_id: Option<&str>,
+        export_options: GoogleExportOptions,
+    ) -> Result<Self> {
         validate_client_id(client_id)?;
+        export_options.validate()?;
         let authorization = load_authorization()?
             .ok_or_else(|| anyhow!("Google Drive is not authorized. Open Preferences and sign in first."))?;
         if authorization.client_id != client_id.trim() {
             bail!("The saved Google authorization belongs to a different Client ID. Authorize this Client ID in Preferences.");
         }
+        let (root_id, shared_with_me_root, shared_drive_id) = match location_kind.unwrap_or("myDrive") {
+            "myDrive" => ("root".to_string(), false, None),
+            "sharedWithMe" => (SHARED_WITH_ME_ROOT_ID.to_string(), true, None),
+            "sharedDrive" => {
+                let id = location_id
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| anyhow!("A shared drive ID is required."))?;
+                validate_file_id(id)?;
+                (id.to_string(), false, Some(id.to_string()))
+            }
+            _ => bail!("Unsupported Google Drive location."),
+        };
         let mut client = Self {
             http: Client::builder()
                 .https_only(true)
@@ -151,9 +235,50 @@ impl GoogleDriveClient {
                 .build()?,
             authorization,
             file_cache: HashMap::new(),
+            root_id,
+            shared_with_me_root,
+            shared_drive_id,
+            export_options,
         };
         client.list_dir(probe_path).await?;
         Ok(client)
+    }
+
+    pub async fn locations(client_id: &str) -> Result<Vec<GoogleDriveLocation>> {
+        let mut client =
+            Self::connect(client_id, "/", Some("myDrive"), None, GoogleExportOptions::default()).await?;
+        let mut locations = vec![
+            GoogleDriveLocation { kind: "myDrive".to_string(), id: None, name: "My Drive".to_string() },
+            GoogleDriveLocation {
+                kind: "sharedWithMe".to_string(),
+                id: None,
+                name: "Shared with me".to_string(),
+            },
+        ];
+        let mut page_token: Option<String> = None;
+        loop {
+            client.ensure_access_token().await?;
+            let mut request = client
+                .http
+                .get(format!("{DRIVE_API}/drives"))
+                .bearer_auth(&client.authorization.access_token)
+                .query(&[("pageSize", "100"), ("fields", "nextPageToken,drives(id,name)")]);
+            if let Some(token) = page_token.as_ref() {
+                request = request.query(&[("pageToken", token)]);
+            }
+            let response = require_success(send_with_retry(request).await?, "list shared drives").await?;
+            let page: SharedDriveList = response.json().await?;
+            locations.extend(page.drives.into_iter().map(|drive| GoogleDriveLocation {
+                kind: "sharedDrive".to_string(),
+                id: Some(drive.id),
+                name: drive.name,
+            }));
+            page_token = page.next_page_token;
+            if page_token.is_none() {
+                break;
+            }
+        }
+        Ok(locations)
     }
 
     pub async fn list_dir(&mut self, path: &str) -> Result<Vec<FileEntry>> {
@@ -165,7 +290,11 @@ impl GoogleDriveClient {
         let mut page_token: Option<String> = None;
         loop {
             self.ensure_access_token().await?;
-            let query = format!("'{}' in parents and trashed = false", folder.id);
+            let query = if self.shared_with_me_root && folder.id == SHARED_WITH_ME_ROOT_ID {
+                "sharedWithMe = true and trashed = false".to_string()
+            } else {
+                format!("'{}' in parents and trashed = false", folder.id)
+            };
             let mut request = self
                 .http
                 .get(format!("{DRIVE_API}/files"))
@@ -181,12 +310,15 @@ impl GoogleDriveClient {
             if let Some(token) = page_token.as_ref() {
                 request = request.query(&[("pageToken", token)]);
             }
-            let response = request.send().await?;
+            if let Some(drive_id) = self.shared_drive_id.as_ref() {
+                request = request.query(&[("corpora", "drive"), ("driveId", drive_id.as_str())]);
+            }
+            let response = send_with_retry(request).await?;
             let response = require_success(response, "list Google Drive files").await?;
             let page: DriveFileList = response.json().await?;
             for file in page.files {
                 self.file_cache.insert(file.id.clone(), file.clone());
-                let download_name = export_format(&file.mime_type)
+                let download_name = export_format(&file.mime_type, &self.export_options)
                     .map(|(_, extension)| format!("{}.{}", file.name, extension));
                 entries.push(FileEntry {
                     path_component: Some(encode_drive_path_component(&file.name, &file.id)),
@@ -221,14 +353,236 @@ impl GoogleDriveClient {
     }
 
     pub async fn upload_file(&mut self, local_path: &str, remote_path: &str) -> Result<u64> {
+        self.upload_file_with_progress(local_path, remote_path, |_, _| async { Ok(()) }).await
+    }
+
+    pub async fn upload_file_with_progress<F, Fut>(
+        &mut self,
+        local_path: &str,
+        remote_path: &str,
+        on_progress: F,
+    ) -> Result<u64>
+    where
+        F: FnMut(u64, u64) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        self.upload_file_resumable_with_progress(
+            local_path,
+            remote_path,
+            None,
+            false,
+            |_| Ok(()),
+            on_progress,
+        )
+        .await
+    }
+
+    pub async fn upload_file_resumable_with_progress<S, F, Fut>(
+        &mut self,
+        local_path: &str,
+        remote_path: &str,
+        resume_state: Option<GoogleDriveUploadState>,
+        preserve_on_error: bool,
+        mut on_state: S,
+        mut on_progress: F,
+    ) -> Result<u64>
+    where
+        S: FnMut(&GoogleDriveUploadState) -> Result<()>,
+        F: FnMut(u64, u64) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        let source = PathBuf::from(local_path);
+        let source_metadata = tokio::fs::metadata(&source).await?;
+        let total = source_metadata.len();
+        let source_modified_ns = modified_time_ns(&source_metadata);
+        self.ensure_access_token().await?;
+
+        let (mut upload_state, mut offset) = match resume_state {
+            Some(saved) if google_upload_state_matches(&saved, remote_path, total, source_modified_ns) => {
+                match self.query_upload_status(&saved.upload_url, total).await? {
+                    GoogleUploadStatus::Active(offset) => (saved, offset),
+                    GoogleUploadStatus::Complete => return Ok(total),
+                    GoogleUploadStatus::Expired => {
+                        (self.start_upload_session(remote_path, total, source_modified_ns).await?, 0)
+                    }
+                }
+            }
+            Some(saved) => {
+                let _ = self.cancel_upload_state(&saved).await;
+                (self.start_upload_session(remote_path, total, source_modified_ns).await?, 0)
+            }
+            None => (self.start_upload_session(remote_path, total, source_modified_ns).await?, 0),
+        };
+        if let Err(error) = on_state(&upload_state) {
+            let _ = self.cancel_upload_state(&upload_state).await;
+            return Err(anyhow!("Could not securely persist the Google Drive upload session: {error}"));
+        }
+
+        let result: Result<u64> = async {
+            if total == 0 {
+                on_progress(0, 0).await?;
+                let response = self
+                    .http
+                    .put(&upload_state.upload_url)
+                    .header(header::CONTENT_LENGTH, 0)
+                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                    .body(Vec::new())
+                    .send()
+                    .await?;
+                require_success(response, "upload an empty Google Drive file").await?;
+                return Ok(0);
+            }
+
+            let mut file = tokio::fs::File::open(&source).await?;
+            let mut session_restarts = 0u32;
+            while offset < total {
+                on_progress(offset, total).await?;
+                file.seek(SeekFrom::Start(offset)).await?;
+                let length = (total - offset).min(RESUMABLE_CHUNK_SIZE as u64) as usize;
+                let mut chunk = vec![0u8; length];
+                file.read_exact(&mut chunk).await?;
+                let end = offset + length as u64 - 1;
+                let mut attempt = 0;
+                loop {
+                    let response = self
+                        .http
+                        .put(&upload_state.upload_url)
+                        .header(header::CONTENT_LENGTH, length)
+                        .header(header::CONTENT_TYPE, "application/octet-stream")
+                        .header(header::CONTENT_RANGE, format!("bytes {offset}-{end}/{total}"))
+                        .body(chunk.clone())
+                        .send()
+                        .await;
+                    match response {
+                        Ok(response) if response.status().is_success() => {
+                            offset = total;
+                            break;
+                        }
+                        Ok(response) if response.status() == StatusCode::PERMANENT_REDIRECT => {
+                            offset = uploaded_offset(&response).unwrap_or(end + 1).min(total);
+                            break;
+                        }
+                        Ok(response)
+                            if matches!(response.status(), StatusCode::NOT_FOUND | StatusCode::GONE) =>
+                        {
+                            session_restarts += 1;
+                            if session_restarts > 2 {
+                                bail!("Google Drive repeatedly expired the resumable upload session.");
+                            }
+                            upload_state =
+                                self.start_upload_session(remote_path, total, source_modified_ns).await?;
+                            on_state(&upload_state).map_err(|error| {
+                                anyhow!("Could not securely persist the Google Drive upload session: {error}")
+                            })?;
+                            offset = 0;
+                            break;
+                        }
+                        Ok(response)
+                            if is_retryable_status(response.status()) && attempt < MAX_API_RETRIES =>
+                        {
+                            retry_delay(attempt).await;
+                            attempt += 1;
+                            match self.query_upload_status(&upload_state.upload_url, total).await? {
+                                GoogleUploadStatus::Active(recovered) if recovered > offset => {
+                                    offset = recovered;
+                                    break;
+                                }
+                                GoogleUploadStatus::Active(_) => continue,
+                                GoogleUploadStatus::Complete => {
+                                    offset = total;
+                                    break;
+                                }
+                                GoogleUploadStatus::Expired => {
+                                    session_restarts += 1;
+                                    if session_restarts > 2 {
+                                        bail!(
+                                            "Google Drive repeatedly expired the resumable upload session."
+                                        );
+                                    }
+                                    upload_state = self
+                                        .start_upload_session(remote_path, total, source_modified_ns)
+                                        .await?;
+                                    on_state(&upload_state).map_err(|error| {
+                                        anyhow!(
+                                            "Could not securely persist the Google Drive upload session: {error}"
+                                        )
+                                    })?;
+                                    offset = 0;
+                                    break;
+                                }
+                            }
+                        }
+                        Err(_) if attempt < MAX_API_RETRIES => {
+                            retry_delay(attempt).await;
+                            attempt += 1;
+                            match self.query_upload_status(&upload_state.upload_url, total).await? {
+                                GoogleUploadStatus::Active(recovered) if recovered > offset => {
+                                    offset = recovered;
+                                    break;
+                                }
+                                GoogleUploadStatus::Active(_) => continue,
+                                GoogleUploadStatus::Complete => {
+                                    offset = total;
+                                    break;
+                                }
+                                GoogleUploadStatus::Expired => {
+                                    session_restarts += 1;
+                                    if session_restarts > 2 {
+                                        bail!(
+                                            "Google Drive repeatedly expired the resumable upload session."
+                                        );
+                                    }
+                                    upload_state = self
+                                        .start_upload_session(remote_path, total, source_modified_ns)
+                                        .await?;
+                                    on_state(&upload_state).map_err(|error| {
+                                        anyhow!(
+                                            "Could not securely persist the Google Drive upload session: {error}"
+                                        )
+                                    })?;
+                                    offset = 0;
+                                    break;
+                                }
+                            }
+                        }
+                        Ok(response) => {
+                            require_success(response, "upload a Google Drive chunk").await?;
+                            unreachable!();
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            }
+            Ok(total)
+        }
+        .await;
+        if result.as_ref().is_err_and(|error| {
+            !preserve_on_error
+                || error.to_string() == "Transfer cancelled."
+                || error
+                    .to_string()
+                    .starts_with("Could not securely persist the Google Drive upload session:")
+        }) {
+            let _ = self.cancel_upload_state(&upload_state).await;
+        }
+        result
+    }
+
+    async fn start_upload_session(
+        &mut self,
+        remote_path: &str,
+        total: u64,
+        source_modified_ns: u64,
+    ) -> Result<GoogleDriveUploadState> {
         let (parent_path, name) = split_parent_and_name(remote_path)?;
         let parent = self.resolve_path(&parent_path).await?;
+        if parent.id == SHARED_WITH_ME_ROOT_ID {
+            bail!("Choose a shared folder before uploading to Shared with me.");
+        }
         let existing = self.find_child(&parent.id, &name).await?;
         if existing.as_ref().is_some_and(|file| file.mime_type == "application/vnd.google-apps.folder") {
             bail!("A Google Drive folder already uses the name '{name}'.");
         }
-        let source = PathBuf::from(local_path);
-        let total = tokio::fs::metadata(&source).await?.len();
         self.ensure_access_token().await?;
         let (method, url, metadata) = if let Some(file) = existing {
             (
@@ -243,16 +597,30 @@ impl GoogleDriveClient {
                 serde_json::json!({ "name": name, "parents": [parent.id] }),
             )
         };
-        let response = self
-            .http
-            .request(method, url)
-            .bearer_auth(&self.authorization.access_token)
-            .query(&[("uploadType", "resumable"), ("supportsAllDrives", "true")])
-            .header("X-Upload-Content-Type", "application/octet-stream")
-            .header("X-Upload-Content-Length", total)
-            .json(&metadata)
-            .send()
-            .await?;
+        let mut attempt = 0;
+        let response = loop {
+            let response = self
+                .http
+                .request(method.clone(), &url)
+                .bearer_auth(&self.authorization.access_token)
+                .query(&[("uploadType", "resumable"), ("supportsAllDrives", "true")])
+                .header("X-Upload-Content-Type", "application/octet-stream")
+                .header("X-Upload-Content-Length", total)
+                .json(&metadata)
+                .send()
+                .await;
+            match response {
+                Ok(response) if !is_retryable_status(response.status()) || attempt >= MAX_API_RETRIES => {
+                    break response
+                }
+                Ok(_) | Err(_) if attempt < MAX_API_RETRIES => {
+                    retry_delay(attempt).await;
+                    attempt += 1;
+                }
+                Err(error) => return Err(error.into()),
+                Ok(response) => break response,
+            }
+        };
         let response = require_success(response, "start a Google Drive resumable upload").await?;
         let upload_url = response
             .headers()
@@ -260,43 +628,56 @@ impl GoogleDriveClient {
             .and_then(|value| value.to_str().ok())
             .ok_or_else(|| anyhow!("Google Drive did not return a resumable upload URL."))?
             .to_string();
-        let file = tokio::fs::File::open(&source).await?;
-        let response = self
-            .http
-            .put(upload_url)
-            .header(header::CONTENT_LENGTH, total)
-            .header(header::CONTENT_TYPE, "application/octet-stream")
-            .body(reqwest::Body::wrap_stream(ReaderStream::new(file)))
-            .send()
-            .await?;
-        require_success(response, "upload a Google Drive file").await?;
-        Ok(total)
+        Ok(GoogleDriveUploadState {
+            upload_url,
+            remote_path: remote_path.to_string(),
+            total_size: total,
+            source_modified_ns,
+        })
     }
 
     pub async fn download_file(&mut self, remote_path: &str, local_path: &str) -> Result<u64> {
+        self.download_file_with_progress(remote_path, local_path, |_, _| async { Ok(()) }).await
+    }
+
+    pub async fn download_file_with_progress<F, Fut>(
+        &mut self,
+        remote_path: &str,
+        local_path: &str,
+        mut on_progress: F,
+    ) -> Result<u64>
+    where
+        F: FnMut(u64, u64) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
         let file = self.resolve_path(remote_path).await?;
         if file.mime_type == "application/vnd.google-apps.folder" {
             bail!("A Google Drive folder cannot be downloaded as a file.");
         }
         self.ensure_access_token().await?;
-        let response = if let Some((mime_type, _)) = export_format(&file.mime_type) {
-            self.http
-                .get(format!("{DRIVE_API}/files/{}/export", file.id))
-                .bearer_auth(&self.authorization.access_token)
-                .query(&[("mimeType", mime_type)])
-                .send()
-                .await?
+        let response = if let Some((mime_type, _)) = export_format(&file.mime_type, &self.export_options) {
+            send_with_retry(
+                self.http
+                    .get(format!("{DRIVE_API}/files/{}/export", file.id))
+                    .bearer_auth(&self.authorization.access_token)
+                    .query(&[("mimeType", mime_type)]),
+            )
+            .await?
         } else if file.mime_type.starts_with("application/vnd.google-apps.") {
             bail!("This Google-native item does not have a supported export format.");
         } else {
-            self.http
-                .get(format!("{DRIVE_API}/files/{}", file.id))
-                .bearer_auth(&self.authorization.access_token)
-                .query(&[("alt", "media"), ("supportsAllDrives", "true")])
-                .send()
-                .await?
+            send_with_retry(
+                self.http
+                    .get(format!("{DRIVE_API}/files/{}", file.id))
+                    .bearer_auth(&self.authorization.access_token)
+                    .query(&[("alt", "media"), ("supportsAllDrives", "true")]),
+            )
+            .await?
         };
         let response = require_success(response, "download a Google Drive file").await?;
+        let total = response
+            .content_length()
+            .unwrap_or(file.size.as_deref().and_then(|value| value.parse().ok()).unwrap_or(0));
         let target = PathBuf::from(local_path);
         let temporary = temporary_download_path(&target)?;
         let result: Result<u64> = async {
@@ -307,6 +688,7 @@ impl GoogleDriveClient {
                 let chunk = chunk?;
                 output.write_all(&chunk).await?;
                 transferred += chunk.len() as u64;
+                on_progress(transferred, total).await?;
             }
             output.flush().await?;
             drop(output);
@@ -320,25 +702,58 @@ impl GoogleDriveClient {
         result
     }
 
+    async fn query_upload_status(&self, upload_url: &str, total: u64) -> Result<GoogleUploadStatus> {
+        let response = send_with_retry(
+            self.http
+                .put(upload_url)
+                .header(header::CONTENT_LENGTH, 0)
+                .header(header::CONTENT_RANGE, format!("bytes */{total}")),
+        )
+        .await?;
+        if let Some(status) = google_upload_status(
+            response.status(),
+            response.headers().get(header::RANGE).and_then(|value| value.to_str().ok()),
+            total,
+        ) {
+            return Ok(status);
+        }
+        require_success(response, "resume a Google Drive upload").await?;
+        unreachable!()
+    }
+
+    pub async fn cancel_upload_state(&self, state: &GoogleDriveUploadState) -> Result<()> {
+        let response = self.http.delete(&state.upload_url).send().await?;
+        if response.status().is_success()
+            || matches!(response.status(), StatusCode::NOT_FOUND | StatusCode::GONE)
+        {
+            return Ok(());
+        }
+        require_success(response, "cancel a Google Drive upload").await?;
+        Ok(())
+    }
+
     pub async fn create_dir(&mut self, path: &str) -> Result<()> {
         let (parent_path, name) = split_parent_and_name(path)?;
         let parent = self.resolve_path(&parent_path).await?;
+        if parent.id == SHARED_WITH_ME_ROOT_ID {
+            bail!("Choose a shared folder before creating items in Shared with me.");
+        }
         if self.find_child(&parent.id, &name).await?.is_some() {
             return Ok(());
         }
         self.ensure_access_token().await?;
-        let response = self
-            .http
-            .post(format!("{DRIVE_API}/files"))
-            .bearer_auth(&self.authorization.access_token)
-            .query(&[("supportsAllDrives", "true")])
-            .json(&serde_json::json!({
-                "name": name,
-                "mimeType": "application/vnd.google-apps.folder",
-                "parents": [parent.id]
-            }))
-            .send()
-            .await?;
+        let response = send_with_retry(
+            self.http
+                .post(format!("{DRIVE_API}/files"))
+                .bearer_auth(&self.authorization.access_token)
+                .query(&[("supportsAllDrives", "true")])
+                .json(&serde_json::json!({
+                    "name": name,
+                    "mimeType": "application/vnd.google-apps.folder",
+                    "parents": [parent.id]
+                })),
+        )
+        .await?;
         require_success(response, "create a Google Drive folder").await?;
         Ok(())
     }
@@ -363,7 +778,7 @@ impl GoogleDriveClient {
             request = request
                 .query(&[("addParents", new_parent.id.as_str()), ("removeParents", old_parent.id.as_str())]);
         }
-        let response = request.send().await?;
+        let response = send_with_retry(request).await?;
         require_success(response, "rename or move a Google Drive item").await?;
         Ok(())
     }
@@ -374,14 +789,14 @@ impl GoogleDriveClient {
         }
         let file = self.resolve_path(path).await?;
         self.ensure_access_token().await?;
-        let response = self
-            .http
-            .patch(format!("{DRIVE_API}/files/{}", file.id))
-            .bearer_auth(&self.authorization.access_token)
-            .query(&[("supportsAllDrives", "true")])
-            .json(&serde_json::json!({ "trashed": true }))
-            .send()
-            .await?;
+        let response = send_with_retry(
+            self.http
+                .patch(format!("{DRIVE_API}/files/{}", file.id))
+                .bearer_auth(&self.authorization.access_token)
+                .query(&[("supportsAllDrives", "true")])
+                .json(&serde_json::json!({ "trashed": true })),
+        )
+        .await?;
         require_success(response, "move a Google Drive item to trash").await?;
         Ok(())
     }
@@ -401,7 +816,7 @@ impl GoogleDriveClient {
             return self.get_file(file_id).await;
         }
         let mut current = DriveFile {
-            id: "root".to_string(),
+            id: self.root_id.clone(),
             name: "/".to_string(),
             mime_type: "application/vnd.google-apps.folder".to_string(),
             size: None,
@@ -420,21 +835,15 @@ impl GoogleDriveClient {
     }
 
     async fn get_file(&mut self, file_id: &str) -> Result<DriveFile> {
-        if file_id.is_empty()
-            || !file_id
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-        {
-            bail!("Invalid Google Drive file ID in path.");
-        }
+        validate_file_id(file_id)?;
         self.ensure_access_token().await?;
-        let response = self
-            .http
-            .get(format!("{DRIVE_API}/files/{file_id}"))
-            .bearer_auth(&self.authorization.access_token)
-            .query(&[("fields", "id,name,mimeType,size,modifiedTime"), ("supportsAllDrives", "true")])
-            .send()
-            .await?;
+        let response = send_with_retry(
+            self.http
+                .get(format!("{DRIVE_API}/files/{file_id}"))
+                .bearer_auth(&self.authorization.access_token)
+                .query(&[("fields", "id,name,mimeType,size,modifiedTime"), ("supportsAllDrives", "true")]),
+        )
+        .await?;
         let response = require_success(response, "resolve a Google Drive file ID").await?;
         let file: DriveFile = response.json().await?;
         self.file_cache.insert(file.id.clone(), file.clone());
@@ -445,20 +854,21 @@ impl GoogleDriveClient {
         self.ensure_access_token().await?;
         let escaped_name = name.replace('\\', "\\\\").replace('\'', "\\'");
         let query = format!("'{parent_id}' in parents and name = '{escaped_name}' and trashed = false");
-        let response = self
-            .http
-            .get(format!("{DRIVE_API}/files"))
-            .bearer_auth(&self.authorization.access_token)
-            .query(&[
-                ("q", query.as_str()),
-                ("spaces", "drive"),
-                ("pageSize", "2"),
-                ("fields", "files(id,name,mimeType,size,modifiedTime)"),
-                ("supportsAllDrives", "true"),
-                ("includeItemsFromAllDrives", "true"),
-            ])
-            .send()
-            .await?;
+        let mut request =
+            self.http.get(format!("{DRIVE_API}/files")).bearer_auth(&self.authorization.access_token).query(
+                &[
+                    ("q", query.as_str()),
+                    ("spaces", "drive"),
+                    ("pageSize", "2"),
+                    ("fields", "files(id,name,mimeType,size,modifiedTime)"),
+                    ("supportsAllDrives", "true"),
+                    ("includeItemsFromAllDrives", "true"),
+                ],
+            );
+        if let Some(drive_id) = self.shared_drive_id.as_ref() {
+            request = request.query(&[("corpora", "drive"), ("driveId", drive_id.as_str())]);
+        }
+        let response = send_with_retry(request).await?;
         let response = require_success(response, "resolve a Google Drive path").await?;
         let mut files = response.json::<DriveFileList>().await?.files;
         if files.len() > 1 {
@@ -657,6 +1067,100 @@ fn validate_client_id(client_id: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_file_id(file_id: &str) -> Result<()> {
+    if file_id.is_empty()
+        || !file_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        bail!("Invalid Google Drive file ID.");
+    }
+    Ok(())
+}
+
+fn validate_export_choice(value: Option<&str>, allowed: &[&str]) -> Result<()> {
+    if value.is_some_and(|value| !allowed.contains(&value)) {
+        bail!("Unsupported Google Drive export format.");
+    }
+    Ok(())
+}
+
+fn is_retryable_status(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+async fn retry_delay(attempt: u32) {
+    let milliseconds = 500u64.saturating_mul(1u64 << attempt.min(4));
+    tokio::time::sleep(Duration::from_millis(milliseconds)).await;
+}
+
+async fn send_with_retry(request: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+    let mut attempt = 0;
+    loop {
+        let next = request
+            .try_clone()
+            .ok_or_else(|| anyhow!("Google Drive request body cannot be retried safely."))?;
+        match next.send().await {
+            Ok(response) if is_retryable_status(response.status()) && attempt < MAX_API_RETRIES => {
+                retry_delay(attempt).await;
+                attempt += 1;
+            }
+            Ok(response) => return Ok(response),
+            Err(_) if attempt < MAX_API_RETRIES => {
+                retry_delay(attempt).await;
+                attempt += 1;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+fn uploaded_offset(response: &reqwest::Response) -> Option<u64> {
+    let range = response.headers().get(header::RANGE)?.to_str().ok()?;
+    uploaded_offset_from_range(range)
+}
+
+fn uploaded_offset_from_range(range: &str) -> Option<u64> {
+    let end = range.rsplit_once('-')?.1.parse::<u64>().ok()?;
+    end.checked_add(1)
+}
+
+fn google_upload_status(status: StatusCode, range: Option<&str>, total: u64) -> Option<GoogleUploadStatus> {
+    if status.is_success() {
+        return Some(GoogleUploadStatus::Complete);
+    }
+    if status == StatusCode::PERMANENT_REDIRECT {
+        return Some(GoogleUploadStatus::Active(
+            range.and_then(uploaded_offset_from_range).unwrap_or(0).min(total),
+        ));
+    }
+    if matches!(status, StatusCode::NOT_FOUND | StatusCode::GONE) {
+        return Some(GoogleUploadStatus::Expired);
+    }
+    None
+}
+
+fn modified_time_ns(metadata: &std::fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_nanos().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
+}
+
+fn google_upload_state_matches(
+    state: &GoogleDriveUploadState,
+    remote_path: &str,
+    total_size: u64,
+    source_modified_ns: u64,
+) -> bool {
+    state.remote_path == remote_path
+        && state.total_size == total_size
+        && state.source_modified_ns == source_modified_ns
+        && matches!(Url::parse(&state.upload_url), Ok(url) if url.scheme() == "https")
+}
+
 fn authorization_entry() -> Result<keyring::Entry> {
     keyring::Entry::new("Harbor Transfer", GOOGLE_KEYCHAIN_ACCOUNT).map_err(Into::into)
 }
@@ -776,18 +1280,35 @@ fn drive_file_id_from_component(component: &str) -> Option<&str> {
     component.rsplit_once('\u{1f}').map(|(_, file_id)| file_id).filter(|value| !value.is_empty())
 }
 
-fn export_format(mime_type: &str) -> Option<(&'static str, &'static str)> {
+fn export_format(mime_type: &str, options: &GoogleExportOptions) -> Option<(&'static str, &'static str)> {
     match mime_type {
-        "application/vnd.google-apps.document" => {
-            Some(("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx"))
-        }
+        "application/vnd.google-apps.document" => match options.documents.as_deref().unwrap_or("docx") {
+            "pdf" => Some(("application/pdf", "pdf")),
+            "odt" => Some(("application/vnd.oasis.opendocument.text", "odt")),
+            "txt" => Some(("text/plain", "txt")),
+            _ => Some(("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx")),
+        },
         "application/vnd.google-apps.spreadsheet" => {
-            Some(("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx"))
+            match options.spreadsheets.as_deref().unwrap_or("xlsx") {
+                "pdf" => Some(("application/pdf", "pdf")),
+                "csv" => Some(("text/csv", "csv")),
+                _ => Some(("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx")),
+            }
         }
         "application/vnd.google-apps.presentation" => {
-            Some(("application/vnd.openxmlformats-officedocument.presentationml.presentation", "pptx"))
+            match options.presentations.as_deref().unwrap_or("pptx") {
+                "pdf" => Some(("application/pdf", "pdf")),
+                _ => Some((
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    "pptx",
+                )),
+            }
         }
-        "application/vnd.google-apps.drawing" => Some(("application/pdf", "pdf")),
+        "application/vnd.google-apps.drawing" => match options.drawings.as_deref().unwrap_or("pdf") {
+            "png" => Some(("image/png", "png")),
+            "svg" => Some(("image/svg+xml", "svg")),
+            _ => Some(("application/pdf", "pdf")),
+        },
         "application/vnd.google-apps.script" => Some(("application/vnd.google-apps.script+json", "json")),
         _ => None,
     }
@@ -836,8 +1357,9 @@ fn open_system_browser(url: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        drive_file_id_from_component, encode_drive_path_component, export_format, normalize_path,
-        split_parent_and_name, validate_client_id,
+        drive_file_id_from_component, encode_drive_path_component, export_format,
+        google_upload_state_matches, google_upload_status, normalize_path, split_parent_and_name,
+        validate_client_id, GoogleDriveUploadState, GoogleExportOptions, GoogleUploadStatus,
     };
 
     #[test]
@@ -865,13 +1387,62 @@ mod tests {
     #[test]
     fn chooses_editable_exports_for_google_workspace_documents() {
         assert_eq!(
-            export_format("application/vnd.google-apps.document"),
+            export_format("application/vnd.google-apps.document", &GoogleExportOptions::default()),
             Some(("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx"))
         );
         assert_eq!(
-            export_format("application/vnd.google-apps.spreadsheet").map(|value| value.1),
+            export_format("application/vnd.google-apps.spreadsheet", &GoogleExportOptions::default())
+                .map(|value| value.1),
             Some("xlsx")
         );
-        assert!(export_format("application/pdf").is_none());
+        assert!(export_format("application/pdf", &GoogleExportOptions::default()).is_none());
+        let options = GoogleExportOptions {
+            documents: Some("pdf".into()),
+            drawings: Some("svg".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            export_format("application/vnd.google-apps.document", &options).map(|value| value.1),
+            Some("pdf")
+        );
+        assert_eq!(
+            export_format("application/vnd.google-apps.drawing", &options).map(|value| value.1),
+            Some("svg")
+        );
+    }
+
+    #[test]
+    fn only_resumes_an_unchanged_source_and_https_session() {
+        let state = GoogleDriveUploadState {
+            upload_url: "https://www.googleapis.com/upload/session-1".into(),
+            remote_path: "/Folder/archive.zip".into(),
+            total_size: 42,
+            source_modified_ns: 99,
+        };
+        assert!(google_upload_state_matches(&state, "/Folder/archive.zip", 42, 99));
+        assert!(!google_upload_state_matches(&state, "/Folder/archive.zip", 43, 99));
+        let mut insecure = state;
+        insecure.upload_url = "http://example.test/session-1".into();
+        assert!(!google_upload_state_matches(&insecure, "/Folder/archive.zip", 42, 99));
+    }
+
+    #[test]
+    fn reads_the_authoritative_offset_and_expiry_from_a_resumable_session() {
+        assert_eq!(
+            google_upload_status(
+                reqwest::StatusCode::PERMANENT_REDIRECT,
+                Some("bytes=0-8388607"),
+                20_000_000,
+            ),
+            Some(GoogleUploadStatus::Active(8_388_608))
+        );
+        assert_eq!(
+            google_upload_status(reqwest::StatusCode::GONE, None, 20_000_000),
+            Some(GoogleUploadStatus::Expired)
+        );
+        assert_eq!(
+            google_upload_status(reqwest::StatusCode::OK, None, 20_000_000),
+            Some(GoogleUploadStatus::Complete)
+        );
     }
 }

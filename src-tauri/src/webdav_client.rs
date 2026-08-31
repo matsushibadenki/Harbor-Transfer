@@ -4,9 +4,10 @@ use percent_encoding::percent_decode_str;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use reqwest::{Client, Method, StatusCode, Url};
+use std::future::Future;
 use std::path::Path;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio_util::io::ReaderStream;
 
 use crate::sftp_client::{FileEntry, FileEntryType};
@@ -23,11 +24,13 @@ pub struct WebDavConfig {
     pub probe_path: String,
 }
 
+#[derive(Clone)]
 pub struct WebDavClient {
     client: Client,
     base_url: Url,
     username: String,
     password: String,
+    config: WebDavConfig,
 }
 
 impl WebDavClient {
@@ -53,8 +56,13 @@ impl WebDavClient {
             Err(_) => builder,
         };
         let client = builder.build().map_err(|error| anyhow!("Could not configure WebDAV HTTPS: {error}"))?;
-        let connected =
-            Self { client, base_url, username: config.username.clone(), password: config.password.clone() };
+        let connected = Self {
+            client,
+            base_url,
+            username: config.username.clone(),
+            password: config.password.clone(),
+            config: config.clone(),
+        };
         connected.propfind(&config.probe_path, "0").await?;
         Ok(connected)
     }
@@ -113,19 +121,68 @@ impl WebDavClient {
     }
 
     pub async fn download_file(&self, remote_path: &str, local_path: &str) -> Result<u64> {
-        let response = self
-            .authenticated(Method::GET, self.url(remote_path)?)
-            .send()
-            .await
-            .map_err(|error| anyhow!("WebDAV download failed: {error}"))?;
+        self.download_file_resumable_with_progress(remote_path, local_path, 0, |_, _| async { Ok(()) }).await
+    }
+
+    pub async fn download_file_resumable_with_progress<F, Fut>(
+        &self,
+        remote_path: &str,
+        local_path: &str,
+        requested_offset: u64,
+        mut on_progress: F,
+    ) -> Result<u64>
+    where
+        F: FnMut(u64, u64) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        let local_size = tokio::fs::metadata(local_path).await.map(|metadata| metadata.len()).unwrap_or(0);
+        let requested_offset = requested_offset.min(local_size);
+        let mut request = self.authenticated(Method::GET, self.url(remote_path)?);
+        if requested_offset > 0 {
+            request = request.header(reqwest::header::RANGE, format!("bytes={requested_offset}-"));
+        }
+        let mut response =
+            request.send().await.map_err(|error| anyhow!("WebDAV download failed: {error}"))?;
+
+        // A compliant range server returns 206. A 200 response means Range is
+        // unsupported or ignored, so restart instead of appending corrupt data.
+        let offset = if requested_offset > 0 && response.status() == StatusCode::PARTIAL_CONTENT {
+            requested_offset
+        } else {
+            if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+                response = self
+                    .authenticated(Method::GET, self.url(remote_path)?)
+                    .send()
+                    .await
+                    .map_err(|error| anyhow!("WebDAV download restart failed: {error}"))?;
+            }
+            ensure_success("GET", response.status())?;
+            0
+        };
         ensure_success("GET", response.status())?;
+        let total = response
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.rsplit('/').next())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or_else(|| offset + response.content_length().unwrap_or(0));
         let mut stream = response.bytes_stream();
-        let mut output = tokio::fs::File::create(local_path).await?;
-        let mut written = 0u64;
+        let mut output = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(offset == 0)
+            .open(local_path)
+            .await?;
+        output.set_len(offset).await?;
+        output.seek(SeekFrom::Start(offset)).await?;
+        let mut written = offset;
+        on_progress(written, total).await?;
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|error| anyhow!("WebDAV download stream failed: {error}"))?;
             output.write_all(&chunk).await?;
             written += chunk.len() as u64;
+            on_progress(written, total).await?;
         }
         output.flush().await?;
         Ok(written)
@@ -141,15 +198,39 @@ impl WebDavClient {
     }
 
     pub async fn rename(&self, old_path: &str, new_path: &str) -> Result<()> {
+        self.move_item(old_path, new_path, false).await
+    }
+
+    /// MOVE a completed temporary resource over the destination. WebDAV
+    /// servers perform MOVE within a collection as a single publish operation.
+    pub async fn atomic_replace(&self, old_path: &str, new_path: &str) -> Result<()> {
+        self.move_item(old_path, new_path, true).await
+    }
+
+    async fn move_item(&self, old_path: &str, new_path: &str, overwrite: bool) -> Result<()> {
         let method = Method::from_bytes(b"MOVE").expect("constant WebDAV method");
         let destination = self.url(new_path)?;
         let response = self
             .authenticated(method, self.url(old_path)?)
             .header("Destination", destination.as_str())
-            .header("Overwrite", "F")
+            .header("Overwrite", if overwrite { "T" } else { "F" })
             .send()
             .await?;
         ensure_success("MOVE", response.status())
+    }
+
+    pub async fn file_size(&self, path: &str) -> Result<u64> {
+        let normalized = path.trim_end_matches('/');
+        let separator =
+            normalized.rfind('/').ok_or_else(|| anyhow!("Invalid WebDAV file path: '{path}'."))?;
+        let name = &normalized[separator + 1..];
+        let parent = if separator == 0 { "/" } else { &normalized[..separator] };
+        self.list_dir(parent)
+            .await?
+            .into_iter()
+            .find(|entry| entry.name == name && matches!(entry.file_type, FileEntryType::File))
+            .map(|entry| entry.size)
+            .ok_or_else(|| anyhow!("The WebDAV server did not report a size for '{}'.", path))
     }
 
     pub async fn delete(&self, path: &str) -> Result<()> {
@@ -158,6 +239,11 @@ impl WebDavClient {
     }
 
     pub async fn disconnect(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    pub async fn reconnect(&mut self) -> Result<()> {
+        *self = Self::connect(&self.config.clone()).await?;
         Ok(())
     }
 }
@@ -315,17 +401,33 @@ mod tests {
         let download = std::env::temp_dir().join("harbor_webdav_download.bin");
         let content = vec![0x57; 2 * 1024 * 1024 + 17];
         tokio::fs::write(&upload, &content).await.unwrap();
+        tokio::fs::write(&download, b"old destination").await.unwrap();
+        client
+            .upload_file(download.to_str().unwrap(), &renamed)
+            .await
+            .expect("create destination to replace");
         client.upload_file(upload.to_str().unwrap(), &remote).await.expect("upload");
-        client.rename(&remote, &renamed).await.expect("move");
-        client.download_file(&renamed, download.to_str().unwrap()).await.expect("download");
+        assert_eq!(client.file_size(&remote).await.expect("uploaded size"), content.len() as u64);
+        client.atomic_replace(&remote, &renamed).await.expect("atomic overwrite move");
+        let resume_offset = 512 * 1024;
+        tokio::fs::write(&download, &content[..resume_offset]).await.unwrap();
+        client
+            .download_file_resumable_with_progress(
+                &renamed,
+                download.to_str().unwrap(),
+                resume_offset as u64,
+                |_, _| async { Ok(()) },
+            )
+            .await
+            .expect("resume or safely restart WebDAV download");
         assert_eq!(tokio::fs::read(&download).await.unwrap(), content);
         client.delete(&renamed).await.expect("delete file");
         client.delete(&directory).await.expect("delete collection");
         let _ = tokio::fs::remove_file(upload).await;
         let _ = tokio::fs::remove_file(download).await;
         client.disconnect().await.unwrap();
-        let mut recovered = WebDavClient::connect(&config).await.expect("reconnect after disconnect");
-        recovered.list_dir(&root).await.expect("list after reconnect");
-        recovered.disconnect().await.unwrap();
+        client.reconnect().await.expect("reconnect after disconnect");
+        client.list_dir(&root).await.expect("list after reconnect");
+        client.disconnect().await.unwrap();
     }
 }

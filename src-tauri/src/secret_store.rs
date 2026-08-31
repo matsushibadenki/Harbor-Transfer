@@ -113,6 +113,26 @@ pub fn remove(key: &str) -> Result<()> {
     Ok(())
 }
 
+/// Removes short-lived state that has no legacy Keychain entry to suppress.
+/// Unlike credential removal, this does not retain a permanent tombstone.
+pub fn remove_ephemeral(key: &str) -> Result<()> {
+    let mut cache = cache().lock().map_err(|_| anyhow!("The Keychain vault cache is unavailable."))?;
+    ensure_loaded(&mut cache)?;
+    if !cache.vault.entries.contains_key(key) && !cache.vault.removed.contains(key) {
+        return Ok(());
+    }
+    let mut updated = SecretVault {
+        version: 1,
+        entries: cache.vault.entries.clone(),
+        removed: cache.vault.removed.clone(),
+    };
+    updated.entries.remove(key);
+    updated.removed.remove(key);
+    persist(&updated)?;
+    cache.vault = updated;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{SecretLookup, SecretVault};

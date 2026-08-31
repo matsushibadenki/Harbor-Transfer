@@ -80,6 +80,15 @@ impl SambaClient {
         Ok((client, tree))
     }
 
+    pub async fn reconnect(&mut self) -> Result<()> {
+        *self = Self::connect(self.config.clone()).await?;
+        Ok(())
+    }
+
+    pub async fn duplicate(&self) -> Result<Self> {
+        Self::connect(self.config.clone()).await
+    }
+
     pub async fn list_dir(&mut self, path: &str) -> Result<Vec<FileEntry>> {
         let relative = smb_relative_path(path)?;
         let (client, tree) = self.parts_mut()?;
@@ -515,6 +524,9 @@ mod tests {
         let reconnect = live_config().expect("live configuration");
         let mut client = SambaClient::connect(reconnect).await.expect("reconnect Samba");
         client.list_dir("/").await.expect("list after reconnect");
+        let mut parallel = client.duplicate().await.expect("open parallel SMB transfer session");
+        parallel.list_dir("/").await.expect("list through parallel SMB session");
+        parallel.disconnect().await.expect("disconnect parallel SMB session");
         client.disconnect().await.expect("disconnect after reconnect");
 
         let mut read_only = live_config().expect("read-only configuration");

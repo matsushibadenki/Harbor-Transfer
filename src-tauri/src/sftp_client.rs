@@ -1,12 +1,12 @@
 use anyhow::Result;
 use russh::*;
 use russh_sftp::client::SftpSession;
-use russh_sftp::protocol::FileAttributes;
+use russh_sftp::protocol::{FileAttributes, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 
 use crate::ssh::Client;
 
@@ -172,12 +172,13 @@ pub(crate) async fn list_sftp_dir(sftp: &SftpSession, path: &str) -> Result<Vec<
 pub struct StandaloneSftpClient {
     session: Option<Arc<client::Handle<Client>>>,
     sftp: Option<SftpSession>,
+    config: Option<SftpConfig>,
 }
 
 impl StandaloneSftpClient {
     #[cfg(test)]
     pub fn new() -> Self {
-        Self { session: None, sftp: None }
+        Self { session: None, sftp: None, config: None }
     }
 
     /// Establish an SSH connection, authenticate, and open the SFTP subsystem.
@@ -260,7 +261,7 @@ impl StandaloneSftpClient {
         channel.request_subsystem(true, "sftp").await?;
         let sftp = SftpSession::new(channel.into_stream()).await?;
 
-        Ok(Self { session: Some(session), sftp: Some(sftp) })
+        Ok(Self { session: Some(session), sftp: Some(sftp), config: Some(config.clone()) })
     }
 
     #[cfg(test)]
@@ -285,6 +286,20 @@ impl StandaloneSftpClient {
         Ok(())
     }
 
+    pub async fn reconnect(&mut self) -> Result<()> {
+        let config =
+            self.config.clone().ok_or_else(|| anyhow::anyhow!("SFTP reconnect settings are unavailable."))?;
+        let _ = self.disconnect().await;
+        *self = Self::connect(&config).await?;
+        Ok(())
+    }
+
+    pub async fn duplicate(&self) -> Result<Self> {
+        let config =
+            self.config.clone().ok_or_else(|| anyhow::anyhow!("SFTP transfer settings are unavailable."))?;
+        Self::connect(&config).await
+    }
+
     // ===== File Operations =====
 
     pub(crate) fn sftp_session(&self) -> Result<&SftpSession> {
@@ -305,6 +320,20 @@ impl StandaloneSftpClient {
         &self,
         remote_path: &str,
         local_path: &str,
+        on_progress: F,
+    ) -> Result<u64>
+    where
+        F: FnMut(u64, u64) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        self.download_file_resumable_with_progress(remote_path, local_path, 0, on_progress).await
+    }
+
+    pub async fn download_file_resumable_with_progress<F, Fut>(
+        &self,
+        remote_path: &str,
+        local_path: &str,
+        requested_offset: u64,
         mut on_progress: F,
     ) -> Result<u64>
     where
@@ -315,14 +344,26 @@ impl StandaloneSftpClient {
         let total_size =
             sftp.metadata(remote_path).await.ok().and_then(|metadata| metadata.size).unwrap_or(0);
 
+        let local_size = tokio::fs::metadata(local_path).await.map(|metadata| metadata.len()).unwrap_or(0);
+        let offset = requested_offset.min(local_size).min(total_size);
+
         let mut remote_file = sftp
             .open(remote_path)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to open remote file '{}': {}", remote_path, e))?;
 
-        let mut local_file = tokio::fs::File::create(local_path).await?;
+        remote_file.seek(SeekFrom::Start(offset)).await?;
+        let mut local_file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(offset == 0)
+            .open(local_path)
+            .await?;
+        local_file.set_len(offset).await?;
+        local_file.seek(SeekFrom::Start(offset)).await?;
         let mut temp_buf = vec![0u8; 32768];
-        let mut total_bytes = 0u64;
+        let mut total_bytes = offset;
+        on_progress(total_bytes, total_size).await?;
 
         loop {
             let n = remote_file.read(&mut temp_buf).await?;
@@ -346,6 +387,20 @@ impl StandaloneSftpClient {
         &self,
         local_path: &str,
         remote_path: &str,
+        on_progress: F,
+    ) -> Result<u64>
+    where
+        F: FnMut(u64, u64) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        self.upload_file_resumable_with_progress(local_path, remote_path, 0, on_progress).await
+    }
+
+    pub async fn upload_file_resumable_with_progress<F, Fut>(
+        &self,
+        local_path: &str,
+        remote_path: &str,
+        requested_offset: u64,
         mut on_progress: F,
     ) -> Result<u64>
     where
@@ -359,13 +414,26 @@ impl StandaloneSftpClient {
             .map_err(|e| anyhow::anyhow!("Failed to read local file '{}': {}", local_path, e))?;
         let total_bytes = local_file.metadata().await?.len();
 
-        let mut remote_file = sftp
-            .create(remote_path)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to create remote file '{}': {}", remote_path, e))?;
+        let remote_size =
+            sftp.metadata(remote_path).await.ok().and_then(|metadata| metadata.size).unwrap_or(0);
+        let offset = if requested_offset > 0 && remote_size >= requested_offset && remote_size <= total_bytes
+        {
+            remote_size
+        } else {
+            0
+        };
+        let mut remote_file = if offset == 0 {
+            sftp.create(remote_path).await
+        } else {
+            sftp.open_with_flags(remote_path, OpenFlags::WRITE).await
+        }
+        .map_err(|e| anyhow::anyhow!("Failed to open remote file '{}': {}", remote_path, e))?;
+        local_file.seek(SeekFrom::Start(offset)).await?;
+        remote_file.seek(SeekFrom::Start(offset)).await?;
 
         let mut buffer = vec![0u8; 32768];
-        let mut transferred = 0u64;
+        let mut transferred = offset;
+        on_progress(transferred, total_bytes).await?;
         loop {
             let count = local_file.read(&mut buffer).await?;
             if count == 0 {
@@ -716,10 +784,24 @@ mod tests {
         assert!(client.list_dir(directory).await.expect("list empty directory").is_empty());
 
         let upload = std::env::temp_dir().join("harbor_sftp_large_upload.bin");
+        let partial_upload = std::env::temp_dir().join("harbor_sftp_partial_upload.bin");
         let download = std::env::temp_dir().join("harbor_sftp_large_download.bin");
         let content = vec![0x5a; 2 * 1024 * 1024 + 17];
+        let resume_offset = 512 * 1024;
         tokio::fs::write(&upload, &content).await.expect("write upload fixture");
-        client.upload_file(upload.to_str().unwrap(), &remote).await.expect("upload Unicode path");
+        tokio::fs::write(&partial_upload, &content[..resume_offset])
+            .await
+            .expect("write partial upload fixture");
+        client.upload_file(partial_upload.to_str().unwrap(), &remote).await.expect("upload partial file");
+        client
+            .upload_file_resumable_with_progress(
+                upload.to_str().unwrap(),
+                &remote,
+                resume_offset as u64,
+                |_, _| async { Ok(()) },
+            )
+            .await
+            .expect("resume SFTP upload");
         client
             .set_metadata(&remote, Some(0o640), Some(1_787_706_123), None, None)
             .await
@@ -734,16 +816,29 @@ mod tests {
         assert_eq!(metadata_entry.permissions.as_deref(), Some("rw-r-----"));
         assert_eq!(metadata_entry.modified.as_deref(), Some("2026-08-26 01:02:03"));
         client.rename(&remote, &renamed).await.expect("rename Unicode path");
-        client.download_file(&renamed, download.to_str().unwrap()).await.expect("download large file");
+        tokio::fs::write(&download, &content[..resume_offset]).await.expect("write partial download fixture");
+        client
+            .download_file_resumable_with_progress(
+                &renamed,
+                download.to_str().unwrap(),
+                resume_offset as u64,
+                |_, _| async { Ok(()) },
+            )
+            .await
+            .expect("resume SFTP download");
         assert_eq!(tokio::fs::read(&download).await.expect("read download"), content);
 
         client.delete_file(&renamed).await.expect("delete test file");
         client.delete_dir(directory).await.expect("delete test directory");
         let _ = tokio::fs::remove_file(upload).await;
+        let _ = tokio::fs::remove_file(partial_upload).await;
         let _ = tokio::fs::remove_file(download).await;
         client.disconnect().await.expect("disconnect");
-        let mut recovered = StandaloneSftpClient::connect(&config).await.expect("reconnect after disconnect");
-        recovered.list_dir("/upload").await.expect("list after reconnect");
-        recovered.disconnect().await.expect("disconnect recovered session");
+        client.reconnect().await.expect("reconnect after disconnect");
+        client.list_dir("/upload").await.expect("list after reconnect");
+        let mut parallel = client.duplicate().await.expect("open parallel SFTP transfer session");
+        parallel.list_dir("/upload").await.expect("list through parallel SFTP session");
+        parallel.disconnect().await.expect("disconnect parallel SFTP session");
+        client.disconnect().await.expect("disconnect recovered session");
     }
 }

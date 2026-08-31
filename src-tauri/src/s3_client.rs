@@ -6,6 +6,8 @@ use aws_sdk_s3::config::Region;
 use aws_sdk_s3::primitives::{ByteStream, Length};
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -33,10 +35,32 @@ pub struct S3Config {
     pub probe_path: String,
 }
 
+#[derive(Clone)]
 pub struct S3Client {
     client: aws_sdk_s3::Client,
     bucket: String,
     preserve_empty_directories: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct S3UploadedPartState {
+    pub part_number: i32,
+    pub e_tag: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct S3MultipartState {
+    pub upload_id: String,
+    pub key: String,
+    pub part_size: u64,
+    pub total_size: u64,
+    pub source_modified_ns: u64,
+    #[serde(default)]
+    pub source_sha256: String,
+    pub parts: Vec<S3UploadedPartState>,
 }
 
 impl S3Client {
@@ -177,46 +201,101 @@ impl S3Client {
         &mut self,
         local_path: &str,
         remote_path: &str,
-        mut on_progress: F,
+        on_progress: F,
     ) -> Result<u64>
     where
         F: FnMut(u64, u64) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
+        self.upload_file_resumable_with_progress(
+            local_path,
+            remote_path,
+            None,
+            false,
+            |_| Ok(()),
+            on_progress,
+        )
+        .await
+    }
+
+    pub async fn upload_file_resumable_with_progress<S, F, Fut>(
+        &mut self,
+        local_path: &str,
+        remote_path: &str,
+        resume_state: Option<S3MultipartState>,
+        preserve_on_error: bool,
+        mut on_state: S,
+        mut on_progress: F,
+    ) -> Result<u64>
+    where
+        S: FnMut(&S3MultipartState) -> Result<()>,
+        F: FnMut(u64, u64) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
         let key = path_to_key(remote_path)?;
         let source = PathBuf::from(local_path);
-        let total = tokio::fs::metadata(&source)
+        let metadata = tokio::fs::metadata(&source)
             .await
-            .map_err(|error| anyhow!("Failed to inspect local file '{local_path}': {error}"))?
-            .len();
+            .map_err(|error| anyhow!("Failed to inspect local file '{local_path}': {error}"))?;
+        let total = metadata.len();
+        let source_modified_ns = modified_time_ns(&metadata);
+        let source_sha256 = sha256_file(&source).await?;
         if total == 0 {
             self.client
                 .put_object()
                 .bucket(&self.bucket)
                 .key(&key)
+                .metadata("harbor-sha256", &source_sha256)
                 .body(ByteStream::from_static(&[]))
                 .send()
                 .await
                 .map_err(|error| anyhow!("Failed to upload empty S3 object '{key}': {error}"))?;
             on_progress(0, 0).await?;
+            self.verify_object_sha256(&key, &source_sha256).await?;
             return Ok(0);
         }
         let part_size = multipart_part_size(total)?;
 
-        let created = self
-            .client
-            .create_multipart_upload()
-            .bucket(&self.bucket)
-            .key(&key)
-            .send()
-            .await
-            .map_err(|error| anyhow!("Failed to start multipart upload for '{key}': {error}"))?;
-        let upload_id =
-            created.upload_id().ok_or_else(|| anyhow!("S3 did not return a multipart upload ID."))?;
-        let mut parts = Vec::new();
+        let mut state = match resume_state {
+            Some(previous)
+                if previous.key == key
+                    && previous.part_size == part_size
+                    && previous.total_size == total
+                    && previous.source_modified_ns == source_modified_ns
+                    && previous.source_sha256 == source_sha256 =>
+            {
+                match self.reconcile_multipart_state(previous.clone()).await {
+                    Ok(value) => value,
+                    Err(_) => {
+                        let _ = self.abort_multipart_state(&previous).await;
+                        self.create_multipart_state(
+                            &key,
+                            part_size,
+                            total,
+                            source_modified_ns,
+                            &source_sha256,
+                        )
+                        .await?
+                    }
+                }
+            }
+            Some(previous) => {
+                let _ = self.abort_multipart_state(&previous).await;
+                self.create_multipart_state(&key, part_size, total, source_modified_ns, &source_sha256)
+                    .await?
+            }
+            None => {
+                self.create_multipart_state(&key, part_size, total, source_modified_ns, &source_sha256)
+                    .await?
+            }
+        };
+        on_state(&state)?;
+        let upload_id = state.upload_id.clone();
         let result: Result<u64> = async {
-            let mut transferred = 0u64;
-            let mut part_number = 1i32;
+            let mut transferred = state.parts.iter().map(|part| part.size).sum::<u64>();
+            let mut part_number =
+                i32::try_from(state.parts.len() + 1).map_err(|_| anyhow!("Too many multipart parts."))?;
+            on_progress(transferred, total).await?;
             while transferred < total {
                 let part_length = part_size.min(total - transferred);
                 let body = ByteStream::read_from()
@@ -232,7 +311,7 @@ impl S3Client {
                     .upload_part()
                     .bucket(&self.bucket)
                     .key(&key)
-                    .upload_id(upload_id)
+                    .upload_id(&upload_id)
                     .part_number(part_number)
                     .body(body)
                     .send()
@@ -243,8 +322,13 @@ impl S3Client {
                 let e_tag = uploaded
                     .e_tag()
                     .ok_or_else(|| anyhow!("S3 did not return an ETag for uploaded part {part_number}."))?;
-                parts.push(CompletedPart::builder().part_number(part_number).e_tag(e_tag).build());
+                state.parts.push(S3UploadedPartState {
+                    part_number,
+                    e_tag: e_tag.to_string(),
+                    size: part_length,
+                });
                 transferred += part_length;
+                on_state(&state)?;
                 on_progress(transferred, total).await?;
                 part_number =
                     part_number.checked_add(1).ok_or_else(|| anyhow!("Too many multipart parts."))?;
@@ -253,26 +337,117 @@ impl S3Client {
                 .complete_multipart_upload()
                 .bucket(&self.bucket)
                 .key(&key)
-                .upload_id(upload_id)
-                .multipart_upload(CompletedMultipartUpload::builder().set_parts(Some(parts)).build())
+                .upload_id(&upload_id)
+                .multipart_upload(
+                    CompletedMultipartUpload::builder()
+                        .set_parts(Some(completed_parts(&state.parts)))
+                        .build(),
+                )
                 .send()
                 .await
                 .map_err(|error| anyhow!("Failed to complete multipart upload for '{key}': {error}"))?;
+            self.verify_object_sha256(&key, &source_sha256).await?;
             Ok(transferred)
         }
         .await;
 
-        if result.is_err() {
-            let _ = self
-                .client
-                .abort_multipart_upload()
-                .bucket(&self.bucket)
-                .key(&key)
-                .upload_id(upload_id)
-                .send()
-                .await;
+        if result
+            .as_ref()
+            .is_err_and(|error| !preserve_on_error || error.to_string() == "Transfer cancelled.")
+        {
+            let _ = self.abort_multipart_state(&state).await;
         }
         result
+    }
+
+    async fn create_multipart_state(
+        &self,
+        key: &str,
+        part_size: u64,
+        total_size: u64,
+        source_modified_ns: u64,
+        source_sha256: &str,
+    ) -> Result<S3MultipartState> {
+        let created = self
+            .client
+            .create_multipart_upload()
+            .bucket(&self.bucket)
+            .key(key)
+            .metadata("harbor-sha256", source_sha256)
+            .send()
+            .await
+            .map_err(|error| anyhow!("Failed to start multipart upload for '{key}': {error}"))?;
+        Ok(S3MultipartState {
+            upload_id: created
+                .upload_id()
+                .ok_or_else(|| anyhow!("S3 did not return a multipart upload ID."))?
+                .to_string(),
+            key: key.to_string(),
+            part_size,
+            total_size,
+            source_modified_ns,
+            source_sha256: source_sha256.to_string(),
+            parts: Vec::new(),
+        })
+    }
+
+    async fn reconcile_multipart_state(&self, mut state: S3MultipartState) -> Result<S3MultipartState> {
+        let mut marker = None;
+        let mut parts = Vec::new();
+        loop {
+            let output = self
+                .client
+                .list_parts()
+                .bucket(&self.bucket)
+                .key(&state.key)
+                .upload_id(&state.upload_id)
+                .set_part_number_marker(marker)
+                .send()
+                .await
+                .map_err(|error| anyhow!("Failed to inspect resumable S3 upload: {error}"))?;
+            for part in output.parts() {
+                let part_number =
+                    part.part_number().ok_or_else(|| anyhow!("S3 returned a part without a number."))?;
+                let e_tag = part.e_tag().ok_or_else(|| anyhow!("S3 returned a part without an ETag."))?;
+                let size = part.size().unwrap_or_default().max(0) as u64;
+                parts.push(S3UploadedPartState { part_number, e_tag: e_tag.to_string(), size });
+            }
+            if output.is_truncated() != Some(true) {
+                break;
+            }
+            marker = Some(
+                output
+                    .next_part_number_marker()
+                    .ok_or_else(|| anyhow!("S3 returned a truncated part list without a marker."))?
+                    .to_string(),
+            );
+        }
+        parts.sort_by_key(|part| part.part_number);
+        let mut offset = 0u64;
+        for (index, part) in parts.iter().enumerate() {
+            let expected_number =
+                i32::try_from(index + 1).map_err(|_| anyhow!("Too many multipart parts."))?;
+            let expected_size = state.part_size.min(state.total_size.saturating_sub(offset));
+            if part.part_number != expected_number || part.size != expected_size || expected_size == 0 {
+                let _ = self.abort_multipart_state(&state).await;
+                return Err(anyhow!("The saved S3 multipart upload is inconsistent."));
+            }
+            offset += part.size;
+        }
+        state.parts = parts;
+        Ok(state)
+    }
+
+    pub async fn abort_multipart_state(&self, state: &S3MultipartState) -> Result<()> {
+        self.client
+            .abort_multipart_upload()
+            .bucket(&self.bucket)
+            .key(&state.key)
+            .upload_id(&state.upload_id)
+            .send()
+            .await
+            .map_err(|error| anyhow!("Failed to abort S3 multipart upload: {error}"))?;
+        Ok(())
     }
 
     pub async fn download_file(&mut self, remote_path: &str, local_path: &str) -> Result<u64> {
@@ -299,6 +474,7 @@ impl S3Client {
             .await
             .map_err(|error| anyhow!("Failed to download S3 object '{key}': {error}"))?;
         let total = output.content_length().unwrap_or_default().max(0) as u64;
+        let expected_sha256 = output.metadata().and_then(|metadata| metadata.get("harbor-sha256")).cloned();
         let target = PathBuf::from(local_path);
         let temporary = temporary_download_path(&target)?;
         let result: Result<u64> = async {
@@ -317,6 +493,18 @@ impl S3Client {
             }
             file.flush().await?;
             drop(file);
+            anyhow::ensure!(
+                transferred == total,
+                "S3 download size verification failed for '{key}': expected {total} bytes, received {transferred} bytes."
+            );
+            let actual = sha256_file(&temporary).await?;
+            if let Some(expected) = expected_sha256.as_deref() {
+                anyhow::ensure!(
+                    actual == expected,
+                    "S3 download SHA-256 verification failed for '{key}'. The destination was not replaced."
+                );
+            }
+            self.verify_object_sha256(&key, &actual).await?;
             tokio::fs::rename(&temporary, &target).await?;
             Ok(transferred)
         }
@@ -582,6 +770,61 @@ impl S3Client {
             .map_err(|error| anyhow!("Failed to delete S3 object '{key}': {error}"))?;
         Ok(())
     }
+
+    async fn verify_object_sha256(&self, key: &str, expected: &str) -> Result<()> {
+        let output =
+            self.client.get_object().bucket(&self.bucket).key(key).send().await.map_err(|error| {
+                anyhow!("Failed to read S3 object '{key}' for checksum verification: {error}")
+            })?;
+        let mut reader = output.body.into_async_read();
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; 64 * 1024];
+        loop {
+            let count = reader.read(&mut buffer).await?;
+            if count == 0 {
+                break;
+            }
+            hasher.update(&buffer[..count]);
+        }
+        let actual = format!("{:x}", hasher.finalize());
+        anyhow::ensure!(
+            actual == expected,
+            "S3 upload SHA-256 verification failed for '{key}'. The uploaded object does not match the local source."
+        );
+        Ok(())
+    }
+}
+
+async fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| anyhow!("Failed to open '{}' for SHA-256 verification: {error}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer).await?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn modified_time_ns(metadata: &std::fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_nanos().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
+}
+
+fn completed_parts(parts: &[S3UploadedPartState]) -> Vec<CompletedPart> {
+    parts
+        .iter()
+        .map(|part| CompletedPart::builder().part_number(part.part_number).e_tag(&part.e_tag).build())
+        .collect()
 }
 
 fn validate_config(config: &S3Config) -> Result<()> {
@@ -722,6 +965,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn computes_the_standard_sha256_digest_without_loading_the_file_at_once() {
+        let workspace = tempfile::tempdir().unwrap();
+        let file = workspace.path().join("digest.txt");
+        tokio::fs::write(&file, b"abc").await.unwrap();
+        assert_eq!(
+            sha256_file(&file).await.unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[tokio::test]
     async fn live_s3_multipart_unicode_pagination_and_abort() {
         let Ok(endpoint) = std::env::var("S3_TEST_ENDPOINT") else { return };
         let access_key_id = std::env::var("S3_TEST_ACCESS_KEY").expect("S3_TEST_ACCESS_KEY");
@@ -747,21 +1001,49 @@ mod tests {
         let payload: Vec<u8> =
             (0..(MIN_MULTIPART_PART_SIZE * 2 + 257)).map(|index| (index % 251) as u8).collect();
         tokio::fs::write(&source, &payload).await.expect("write multipart source");
+        let saved_state = Arc::new(Mutex::new(None::<S3MultipartState>));
+        let state_events = saved_state.clone();
+        let interrupted = s3
+            .upload_file_resumable_with_progress(
+                &source.to_string_lossy(),
+                "/ページ/海の写真.bin",
+                None,
+                true,
+                move |state| {
+                    *state_events.lock().unwrap() = Some(state.clone());
+                    Ok(())
+                },
+                |done, _| async move {
+                    if done >= MIN_MULTIPART_PART_SIZE {
+                        Err(anyhow!("simulated application interruption"))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .await;
+        assert!(interrupted.is_err());
+        let resume_state = saved_state.lock().unwrap().clone().expect("saved multipart state");
+        assert_eq!(resume_state.parts.len(), 1);
+
         let progress = Arc::new(Mutex::new(Vec::new()));
         let progress_events = progress.clone();
         let uploaded = s3
-            .upload_file_with_progress(
+            .upload_file_resumable_with_progress(
                 &source.to_string_lossy(),
                 "/ページ/海の写真.bin",
+                Some(resume_state),
+                true,
+                |_| Ok(()),
                 move |done, total| {
                     progress_events.lock().unwrap().push((done, total));
                     async { Ok(()) }
                 },
             )
             .await
-            .expect("multipart upload");
+            .expect("resume multipart upload");
         assert_eq!(uploaded, payload.len() as u64);
-        assert!(progress.lock().unwrap().len() >= 3);
+        assert_eq!(progress.lock().unwrap().first().unwrap().0, MIN_MULTIPART_PART_SIZE);
 
         s3.rename("/ページ/海の写真.bin", "/ページ/名前変更.bin").await.expect("verified Unicode rename");
         let listed = s3.list_dir("/ページ").await.expect("list Unicode prefix");

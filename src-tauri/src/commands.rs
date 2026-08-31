@@ -1,8 +1,12 @@
-use crate::bookmarks::{Bookmark, BookmarkStore, ConnectionHistory, SyncHistory, TransferHistory};
+use crate::bookmarks::{
+    Bookmark, BookmarkStore, ConnectionHistory, SyncHistory, TransferHistory, TransferJob,
+};
 use crate::ftp_client::{FtpClient, FtpConfig};
-use crate::google_drive::{self, GoogleAuthorizationStatus, GoogleDriveClient};
+use crate::google_drive::{
+    self, GoogleAuthorizationStatus, GoogleDriveClient, GoogleDriveUploadState, GoogleExportOptions,
+};
 use crate::remote_fs::RemoteFileSystem;
-use crate::s3_client::{S3Client, S3Config};
+use crate::s3_client::{S3Client, S3Config, S3MultipartState};
 use crate::samba_client::{SambaClient, SambaConfig};
 use crate::secret_store::{self, SecretLookup};
 use crate::sftp_client::{FileEntry, SftpAuthMethod, SftpConfig, StandaloneSftpClient};
@@ -18,7 +22,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, State};
 use tokio::sync::Mutex;
@@ -26,12 +30,211 @@ use tokio::sync::Mutex;
 static EDIT_SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static DRAG_EXPORT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static REMOTE_COPY_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+const MAX_AUTOMATIC_TRANSFER_RETRIES: u32 = 3;
+const DEFAULT_MAX_CONCURRENT_TRANSFERS: u32 = 3;
+
+#[derive(Default)]
+struct TransferAdmissionState {
+    active_total: u32,
+    active_by_connection: HashMap<String, u32>,
+}
+
+struct TransferScheduler {
+    state: StdMutex<TransferAdmissionState>,
+    changed: tokio::sync::Notify,
+}
+
+impl TransferScheduler {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: StdMutex::new(TransferAdmissionState::default()),
+            changed: tokio::sync::Notify::new(),
+        })
+    }
+
+    #[cfg(test)]
+    async fn acquire(
+        self: &Arc<Self>,
+        connection_id: &str,
+        global_limit: u32,
+        connection_limit: u32,
+    ) -> TransferPermit {
+        let global_limit = global_limit.clamp(1, 16);
+        let connection_limit = connection_limit.clamp(1, 16).min(global_limit);
+        loop {
+            let changed = self.changed.notified();
+            {
+                let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let connection_active = state.active_by_connection.get(connection_id).copied().unwrap_or(0);
+                if state.active_total < global_limit && connection_active < connection_limit {
+                    state.active_total += 1;
+                    *state.active_by_connection.entry(connection_id.to_string()).or_default() += 1;
+                    return TransferPermit {
+                        scheduler: self.clone(),
+                        connection_id: connection_id.to_string(),
+                    };
+                }
+            }
+            changed.await;
+        }
+    }
+
+    async fn acquire_cancellable(
+        self: &Arc<Self>,
+        connection_id: &str,
+        global_limit: u32,
+        connection_limit: u32,
+        control: &TransferControl,
+    ) -> Result<TransferPermit, String> {
+        let global_limit = global_limit.clamp(1, 16);
+        let connection_limit = connection_limit.clamp(1, 16).min(global_limit);
+        loop {
+            if control.cancelled.load(Ordering::Acquire) {
+                return Err("Transfer cancelled.".to_string());
+            }
+            let changed = self.changed.notified();
+            if !control.paused.load(Ordering::Acquire) {
+                let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let connection_active = state.active_by_connection.get(connection_id).copied().unwrap_or(0);
+                if state.active_total < global_limit && connection_active < connection_limit {
+                    state.active_total += 1;
+                    *state.active_by_connection.entry(connection_id.to_string()).or_default() += 1;
+                    return Ok(TransferPermit {
+                        scheduler: self.clone(),
+                        connection_id: connection_id.to_string(),
+                    });
+                }
+            }
+            changed.await;
+        }
+    }
+}
+
+struct TransferPermit {
+    scheduler: Arc<TransferScheduler>,
+    connection_id: String,
+}
+
+impl Drop for TransferPermit {
+    fn drop(&mut self) {
+        let mut state = self.scheduler.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.active_total = state.active_total.saturating_sub(1);
+        if let Some(active) = state.active_by_connection.get_mut(&self.connection_id) {
+            *active = active.saturating_sub(1);
+            if *active == 0 {
+                state.active_by_connection.remove(&self.connection_id);
+            }
+        }
+        drop(state);
+        self.scheduler.changed.notify_waiters();
+    }
+}
+
+#[derive(Default)]
+struct BandwidthSchedule {
+    global_next: Option<Instant>,
+    connection_next: HashMap<String, Instant>,
+}
+
+struct BandwidthLimiter {
+    schedule: StdMutex<BandwidthSchedule>,
+}
+
+impl BandwidthLimiter {
+    fn new() -> Arc<Self> {
+        Arc::new(Self { schedule: StdMutex::new(BandwidthSchedule::default()) })
+    }
+
+    async fn throttle(&self, connection_id: &str, bytes: u64, global_bps: u64, connection_bps: u64) {
+        if bytes == 0 || (global_bps == 0 && connection_bps == 0) {
+            return;
+        }
+        let deadline = {
+            let now = Instant::now();
+            let mut schedule = self.schedule.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut deadline = now;
+            if global_bps > 0 {
+                deadline = reserve_bandwidth(&mut schedule.global_next, now, bytes, global_bps);
+            }
+            if connection_bps > 0 {
+                let next = schedule.connection_next.entry(connection_id.to_string()).or_insert(now);
+                let connection_deadline = reserve_bandwidth_instant(next, now, bytes, connection_bps);
+                deadline = deadline.max(connection_deadline);
+            }
+            deadline
+        };
+        if deadline > Instant::now() {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+        }
+    }
+}
+
+fn reserve_bandwidth(slot: &mut Option<Instant>, now: Instant, bytes: u64, bytes_per_second: u64) -> Instant {
+    let next = slot.get_or_insert(now);
+    reserve_bandwidth_instant(next, now, bytes, bytes_per_second)
+}
+
+fn reserve_bandwidth_instant(next: &mut Instant, now: Instant, bytes: u64, bytes_per_second: u64) -> Instant {
+    let start = (*next).max(now);
+    let seconds = bytes as f64 / bytes_per_second.max(1) as f64;
+    let deadline = start + Duration::from_secs_f64(seconds.min(86_400.0));
+    *next = deadline;
+    deadline
+}
+
+fn retry_backoff(attempt: u32) -> Duration {
+    Duration::from_millis(500u64.saturating_mul(1u64 << attempt.min(3)))
+}
+
+fn is_retryable_transfer_error(error: &anyhow::Error) -> bool {
+    let messages = error.chain().map(|cause| cause.to_string().to_ascii_lowercase()).collect::<Vec<_>>();
+    let permanent = [
+        "authentication",
+        "unauthorized",
+        "forbidden",
+        "bad credentials",
+        "permission denied",
+        "connection not found",
+        "not found",
+        "no such file",
+        "invalid",
+        "unsafe",
+        "checksum verification failed",
+        "size verification failed",
+        "transfer cancelled",
+        "already exists",
+        "quota",
+    ];
+    if permanent.iter().any(|needle| messages.iter().any(|message| message.contains(needle))) {
+        return false;
+    }
+    [
+        "timed out",
+        "timeout",
+        "connection",
+        "broken pipe",
+        "unexpected eof",
+        "temporarily unavailable",
+        "too many requests",
+        "rate limit",
+        "http 429",
+        "http 500",
+        "http 502",
+        "http 503",
+        "http 504",
+        "connection reset",
+    ]
+    .iter()
+    .any(|needle| messages.iter().any(|message| message.contains(needle)))
+}
 
 pub struct AppState {
-    connections: Mutex<HashMap<String, RemoteConnection>>,
+    connections: Mutex<HashMap<String, Arc<Mutex<RemoteConnection>>>>,
     credential_cache: Mutex<HashMap<String, Option<String>>>,
     bookmarks: BookmarkStore,
     transfer_controls: Mutex<HashMap<String, Arc<TransferControl>>>,
+    transfer_scheduler: Arc<TransferScheduler>,
+    bandwidth_limiter: Arc<BandwidthLimiter>,
     edit_cache_directory: PathBuf,
     remote_edits: Mutex<HashMap<String, RemoteEditSession>>,
     drag_cache_directory: PathBuf,
@@ -53,12 +256,18 @@ impl AppState {
             credential_cache: Mutex::new(HashMap::new()),
             bookmarks: BookmarkStore::new(&data_directory)?,
             transfer_controls: Mutex::new(HashMap::new()),
+            transfer_scheduler: TransferScheduler::new(),
+            bandwidth_limiter: BandwidthLimiter::new(),
             edit_cache_directory,
             remote_edits: Mutex::new(HashMap::new()),
             drag_cache_directory,
             drag_icon_path,
             drag_exports: Mutex::new(HashMap::new()),
         })
+    }
+
+    async fn connection(&self, connection_id: &str) -> Option<Arc<Mutex<RemoteConnection>>> {
+        self.connections.lock().await.get(connection_id).cloned()
     }
 }
 
@@ -132,6 +341,33 @@ impl RemoteConnection {
             Self::GoogleDrive(_) => Protocol::GoogleDrive,
         }
     }
+
+    async fn reconnect(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::Sftp { client, .. } => client.reconnect().await,
+            Self::Ftp { client, .. } => client.reconnect().await,
+            Self::WebDav(client) => client.reconnect().await,
+            // AWS SDK, Google HTTP requests, and smb2 already have their own
+            // connection pools/retry or auto-reconnect behavior.
+            Self::S3(_) | Self::GoogleDrive(_) => Ok(()),
+            Self::Samba(client) => client.reconnect().await,
+        }
+    }
+
+    async fn duplicate_for_transfer(&self) -> anyhow::Result<Self> {
+        match self {
+            Self::Sftp { client, protocol } => {
+                Ok(Self::Sftp { client: client.duplicate().await?, protocol: *protocol })
+            }
+            Self::Ftp { client, protocol } => {
+                Ok(Self::Ftp { client: client.duplicate().await?, protocol: *protocol })
+            }
+            Self::WebDav(client) => Ok(Self::WebDav(client.clone())),
+            Self::S3(client) => Ok(Self::S3(client.clone())),
+            Self::Samba(client) => Ok(Self::Samba(Box::new(client.duplicate().await?))),
+            Self::GoogleDrive(client) => Ok(Self::GoogleDrive(client.clone())),
+        }
+    }
 }
 
 // Do not derive `Debug`: the request carries passwords and S3 credentials.
@@ -160,6 +396,12 @@ pub struct ConnectRequest {
     #[serde(default)]
     pub smb_guest: bool,
     pub google_client_id: Option<String>,
+    pub google_drive_location_kind: Option<String>,
+    pub google_drive_location_id: Option<String>,
+    pub google_docs_export: Option<String>,
+    pub google_sheets_export: Option<String>,
+    pub google_slides_export: Option<String>,
+    pub google_drawings_export: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -182,6 +424,16 @@ pub enum Protocol {
 pub struct ConnectionSummary {
     pub connection_id: String,
     pub protocol: Protocol,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferOutcome {
+    pub bytes: u64,
+    /// `sha256` means an independently re-read remote object matched the
+    /// local digest. `size` is the explicit fallback for protocols that do not
+    /// expose a portable server-side checksum.
+    pub verification: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -235,6 +487,95 @@ pub struct TransferRequest {
     pub connection_id: String,
     pub local_path: String,
     pub remote_path: String,
+    pub name: Option<String>,
+    pub conflict_policy: Option<String>,
+    pub resume_from: Option<u64>,
+    #[serde(default = "default_max_concurrent_transfers")]
+    pub global_max_concurrent_transfers: u32,
+    pub connection_max_concurrent_transfers: Option<u32>,
+    #[serde(default)]
+    pub global_bandwidth_limit_bps: u64,
+    pub connection_bandwidth_limit_bps: Option<u64>,
+    pub automatic_retry_count: Option<u32>,
+}
+
+fn default_max_concurrent_transfers() -> u32 {
+    DEFAULT_MAX_CONCURRENT_TRANSFERS
+}
+
+#[derive(Clone, Copy)]
+struct EffectiveTransferLimits {
+    global_concurrency: u32,
+    connection_concurrency: u32,
+    global_bandwidth_bps: u64,
+    connection_bandwidth_bps: u64,
+    automatic_retries: u32,
+}
+
+fn effective_transfer_limits(
+    global_concurrency: u32,
+    connection_concurrency: Option<u32>,
+    global_bandwidth_bps: u64,
+    connection_bandwidth_bps: Option<u64>,
+    automatic_retries: Option<u32>,
+) -> EffectiveTransferLimits {
+    let global_concurrency = global_concurrency.clamp(1, 16);
+    EffectiveTransferLimits {
+        global_concurrency,
+        connection_concurrency: connection_concurrency.unwrap_or(global_concurrency).clamp(1, 16),
+        global_bandwidth_bps: global_bandwidth_bps.min(10 * 1024 * 1024 * 1024),
+        connection_bandwidth_bps: connection_bandwidth_bps.unwrap_or(0).min(10 * 1024 * 1024 * 1024),
+        automatic_retries: automatic_retries.unwrap_or(MAX_AUTOMATIC_TRANSFER_RETRIES).min(10),
+    }
+}
+
+impl TransferRequest {
+    fn limits(&self) -> EffectiveTransferLimits {
+        effective_transfer_limits(
+            self.global_max_concurrent_transfers,
+            self.connection_max_concurrent_transfers,
+            self.global_bandwidth_limit_bps,
+            self.connection_bandwidth_limit_bps,
+            self.automatic_retry_count,
+        )
+    }
+}
+
+#[derive(Clone)]
+struct TransferBandwidth {
+    limiter: Arc<BandwidthLimiter>,
+    connection_id: String,
+    global_bps: u64,
+    connection_bps: u64,
+    last_bytes: Arc<AtomicU64>,
+}
+
+impl TransferBandwidth {
+    fn new(limiter: Arc<BandwidthLimiter>, connection_id: &str, limits: EffectiveTransferLimits) -> Self {
+        Self {
+            limiter,
+            connection_id: connection_id.to_string(),
+            global_bps: limits.global_bandwidth_bps,
+            connection_bps: limits.connection_bandwidth_bps,
+            last_bytes: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn reset(&self, transferred: u64) {
+        self.last_bytes.store(transferred, Ordering::Release);
+    }
+
+    async fn progress(&self, transferred: u64) {
+        let previous = self.last_bytes.swap(transferred, Ordering::AcqRel);
+        self.limiter
+            .throttle(
+                &self.connection_id,
+                transferred.saturating_sub(previous),
+                self.global_bps,
+                self.connection_bps,
+            )
+            .await;
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -245,6 +586,37 @@ pub struct FileTransferProgress {
     pub total_bytes: u64,
     pub elapsed_ms: u64,
     pub status: String,
+}
+
+const TRANSFER_PROGRESS_PERSIST_INTERVAL: u64 = 4 * 1024 * 1024;
+
+fn transfer_display_name(explicit: Option<&str>, path: &str) -> String {
+    explicit
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| Path::new(path).file_name().and_then(|value| value.to_str()).map(str::to_string))
+        .unwrap_or_else(|| "Transfer".to_string())
+}
+
+fn persist_progress(
+    store: &BookmarkStore,
+    transfer_id: &str,
+    transferred: u64,
+    total: u64,
+    persisted: &AtomicU64,
+) {
+    let checkpoint =
+        if transferred == total { u64::MAX } else { transferred / TRANSFER_PROGRESS_PERSIST_INTERVAL };
+    let previous = persisted.load(Ordering::Relaxed);
+    if checkpoint <= previous
+        || persisted.compare_exchange(previous, checkpoint, Ordering::AcqRel, Ordering::Relaxed).is_err()
+    {
+        return;
+    }
+    if let Err(error) = store.update_transfer_job_progress(transfer_id, transferred, total) {
+        tracing::warn!("Could not persist transfer progress: {error}");
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -388,9 +760,10 @@ pub async fn drag_export_prepare(
     std::fs::create_dir(&export_directory).map_err(|error| error.to_string())?;
     let local_item = export_directory.join(&name);
     let prepare = {
-        let mut connections = state.connections.lock().await;
-        match connections.get_mut(&request.connection_id) {
+        let connection = state.connection(&request.connection_id).await;
+        match connection {
             Some(connection) if request.is_directory => {
+                let mut connection = connection.lock().await;
                 let file_system = connection.file_system();
                 match collect_remote_export_entries(file_system, &request.remote_path).await {
                     Ok(entries) => {
@@ -429,6 +802,8 @@ pub async fn drag_export_prepare(
                 }
             }
             Some(connection) => connection
+                .lock()
+                .await
                 .file_system()
                 .download_file(&request.remote_path, &local_item.to_string_lossy())
                 .await
@@ -536,9 +911,10 @@ pub async fn remote_edit_open(
     let cache_file = cache_directory.join(&name);
 
     let download = {
-        let mut connections = state.connections.lock().await;
-        match connections.get_mut(&request.connection_id) {
+        match state.connection(&request.connection_id).await {
             Some(connection) => connection
+                .lock()
+                .await
                 .file_system()
                 .download_file(&request.remote_path, &cache_file.to_string_lossy())
                 .await
@@ -638,9 +1014,10 @@ pub async fn remote_edit_poll(
     }
 
     let upload = {
-        let mut connections = state.connections.lock().await;
-        match connections.get_mut(&snapshot.connection_id) {
+        match state.connection(&snapshot.connection_id).await {
             Some(connection) => connection
+                .lock()
+                .await
                 .file_system()
                 .upload_file(&snapshot.cache_file.to_string_lossy(), &snapshot.remote_path)
                 .await
@@ -764,6 +1141,27 @@ pub struct DirectoryTransferRequest {
     pub connection_id: String,
     pub local_directory: String,
     pub remote_directory: String,
+    pub name: Option<String>,
+    pub conflict_policy: Option<String>,
+    #[serde(default = "default_max_concurrent_transfers")]
+    pub global_max_concurrent_transfers: u32,
+    pub connection_max_concurrent_transfers: Option<u32>,
+    #[serde(default)]
+    pub global_bandwidth_limit_bps: u64,
+    pub connection_bandwidth_limit_bps: Option<u64>,
+    pub automatic_retry_count: Option<u32>,
+}
+
+impl DirectoryTransferRequest {
+    fn limits(&self) -> EffectiveTransferLimits {
+        effective_transfer_limits(
+            self.global_max_concurrent_transfers,
+            self.connection_max_concurrent_transfers,
+            self.global_bandwidth_limit_bps,
+            self.connection_bandwidth_limit_bps,
+            self.automatic_retry_count,
+        )
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -847,6 +1245,8 @@ pub async fn transfer_pause(transfer_id: String, state: State<'_, Arc<AppState>>
     let controls = state.transfer_controls.lock().await;
     let control = controls.get(&transfer_id).ok_or("Transfer not found.")?;
     control.paused.store(true, Ordering::Release);
+    state.transfer_scheduler.changed.notify_waiters();
+    state.bookmarks.set_transfer_job_status(&transfer_id, "Paused", "")?;
     Ok(())
 }
 
@@ -856,6 +1256,8 @@ pub async fn transfer_resume(transfer_id: String, state: State<'_, Arc<AppState>
     let control = controls.get(&transfer_id).ok_or("Transfer not found.")?;
     control.paused.store(false, Ordering::Release);
     control.resumed.notify_waiters();
+    state.transfer_scheduler.changed.notify_waiters();
+    state.bookmarks.set_transfer_job_status(&transfer_id, "Running", "")?;
     Ok(())
 }
 
@@ -865,6 +1267,12 @@ pub async fn transfer_cancel(transfer_id: String, state: State<'_, Arc<AppState>
     let control = controls.get(&transfer_id).ok_or("Transfer not found.")?;
     control.cancelled.store(true, Ordering::Release);
     control.resumed.notify_waiters();
+    state.transfer_scheduler.changed.notify_waiters();
+    let google_session_key = format!("google:upload-session:{transfer_id}");
+    if matches!(secret_store::lookup(&google_session_key), Ok(SecretLookup::Value(_))) {
+        secret_store::remove_ephemeral(&google_session_key).map_err(|error| error.to_string())?;
+    }
+    state.bookmarks.delete_transfer_job(&transfer_id)?;
     Ok(())
 }
 
@@ -1148,6 +1556,31 @@ pub async fn transfer_history_clear(state: State<'_, Arc<AppState>>) -> Result<(
 }
 
 #[tauri::command]
+pub async fn transfer_jobs_list(state: State<'_, Arc<AppState>>) -> Result<Vec<TransferJob>, String> {
+    state.bookmarks.transfer_jobs()
+}
+
+#[tauri::command]
+pub async fn transfer_job_delete(id: String, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let session_key = format!("google:upload-session:{id}");
+    if matches!(secret_store::lookup(&session_key), Ok(SecretLookup::Value(_))) {
+        secret_store::remove_ephemeral(&session_key).map_err(|error| error.to_string())?;
+    }
+    state.bookmarks.delete_transfer_job(&id)
+}
+
+#[tauri::command]
+pub async fn transfer_jobs_clear(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    for job in state.bookmarks.transfer_jobs()? {
+        let session_key = format!("google:upload-session:{}", job.id);
+        if matches!(secret_store::lookup(&session_key), Ok(SecretLookup::Value(_))) {
+            secret_store::remove_ephemeral(&session_key).map_err(|error| error.to_string())?;
+        }
+    }
+    state.bookmarks.clear_transfer_jobs()
+}
+
+#[tauri::command]
 pub async fn sync_history_list(state: State<'_, Arc<AppState>>) -> Result<Vec<SyncHistory>, String> {
     state.bookmarks.sync_history()
 }
@@ -1256,13 +1689,21 @@ pub async fn connection_connect(
             GoogleDriveClient::connect(
                 request.google_client_id.as_deref().ok_or("A Google OAuth Client ID is required.")?,
                 request.initial_path.as_deref().unwrap_or("/"),
+                request.google_drive_location_kind.as_deref(),
+                request.google_drive_location_id.as_deref(),
+                GoogleExportOptions {
+                    documents: request.google_docs_export,
+                    spreadsheets: request.google_sheets_export,
+                    presentations: request.google_slides_export,
+                    drawings: request.google_drawings_export,
+                },
             )
             .await
             .map_err(|error| error.to_string())?,
         ),
     };
 
-    state.connections.lock().await.insert(request.connection_id.clone(), connection);
+    state.connections.lock().await.insert(request.connection_id.clone(), Arc::new(Mutex::new(connection)));
     Ok(ConnectionSummary { connection_id: request.connection_id, protocol })
 }
 
@@ -1281,6 +1722,13 @@ pub async fn google_drive_authorization_status(
     client_id: String,
 ) -> Result<GoogleAuthorizationStatus, String> {
     google_drive::authorization_status(&client_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn google_drive_locations(
+    client_id: String,
+) -> Result<Vec<google_drive::GoogleDriveLocation>, String> {
+    GoogleDriveClient::locations(&client_id).await.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1304,22 +1752,25 @@ pub async fn connection_disconnect(
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
     let connection = state.connections.lock().await.remove(&connection_id);
-    let mut connection = connection.ok_or("Connection not found.".to_string())?;
+    let connection = connection.ok_or("Connection not found.".to_string())?;
+    let mut connection = connection.lock().await;
     connection.file_system().disconnect().await.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 pub async fn connection_list(state: State<'_, Arc<AppState>>) -> Result<Vec<ConnectionSummary>, String> {
-    Ok(state
+    let connections = state
         .connections
         .lock()
         .await
         .iter()
-        .map(|(connection_id, connection)| ConnectionSummary {
-            connection_id: connection_id.clone(),
-            protocol: connection.protocol(),
-        })
-        .collect())
+        .map(|(connection_id, connection)| (connection_id.clone(), connection.clone()))
+        .collect::<Vec<_>>();
+    let mut summaries = Vec::with_capacity(connections.len());
+    for (connection_id, connection) in connections {
+        summaries.push(ConnectionSummary { connection_id, protocol: connection.lock().await.protocol() });
+    }
+    Ok(summaries)
 }
 
 #[tauri::command]
@@ -1383,8 +1834,8 @@ pub async fn remote_list(
     request: RemotePathRequest,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<FileEntry>, String> {
-    let mut connections = state.connections.lock().await;
-    let connection = connections.get_mut(&request.connection_id).ok_or("Connection not found.")?;
+    let connection = state.connection(&request.connection_id).await.ok_or("Connection not found.")?;
+    let mut connection = connection.lock().await;
     connection.file_system().list_dir(&request.path).await.map_err(|error| error.to_string())
 }
 
@@ -1395,8 +1846,8 @@ pub async fn sync_preview(
 ) -> Result<SyncPreview, String> {
     let local =
         filter_snapshot(collect_local_snapshot(Path::new(&request.local_directory))?, &request.exclusions);
-    let mut connections = state.connections.lock().await;
-    let connection = connections.get_mut(&request.connection_id).ok_or("Connection not found.")?;
+    let connection = state.connection(&request.connection_id).await.ok_or("Connection not found.")?;
+    let mut connection = connection.lock().await;
     let remote = filter_snapshot(
         collect_remote_snapshot(connection.file_system(), &request.remote_directory).await?,
         &request.exclusions,
@@ -1420,8 +1871,8 @@ pub async fn sync_execute(
     }
 
     let local = filter_snapshot(collect_local_snapshot(&canonical_local_root)?, &request.exclusions);
-    let mut connections = state.connections.lock().await;
-    let connection = connections.get_mut(&request.connection_id).ok_or("Connection not found.")?;
+    let connection = state.connection(&request.connection_id).await.ok_or("Connection not found.")?;
+    let mut connection = connection.lock().await;
     let remote = filter_snapshot(
         collect_remote_snapshot(connection.file_system(), &request.remote_directory).await?,
         &request.exclusions,
@@ -1573,7 +2024,7 @@ pub async fn sync_execute(
         }
     }
 
-    drop(connections);
+    drop(connection);
     state.transfer_controls.lock().await.remove(&request.sync_id);
     let result = SyncExecutionResult {
         sync_id: request.sync_id.clone(),
@@ -1614,22 +2065,16 @@ pub async fn remote_create_directory(
     request: RemotePathRequest,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    let mut connections = state.connections.lock().await;
-    connections
-        .get_mut(&request.connection_id)
-        .ok_or("Connection not found.")?
-        .file_system()
-        .create_dir(&request.path)
-        .await
-        .map_err(|error| error.to_string())
+    let connection = state.connection(&request.connection_id).await.ok_or("Connection not found.")?;
+    let mut connection = connection.lock().await;
+    connection.file_system().create_dir(&request.path).await.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 pub async fn remote_rename(request: RenameRequest, state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    let mut connections = state.connections.lock().await;
-    connections
-        .get_mut(&request.connection_id)
-        .ok_or("Connection not found.")?
+    let connection = state.connection(&request.connection_id).await.ok_or("Connection not found.")?;
+    let mut connection = connection.lock().await;
+    connection
         .file_system()
         .rename(&request.old_path, &request.new_path)
         .await
@@ -1658,6 +2103,42 @@ fn remote_child(parent: &str, name: &str) -> String {
     }
 }
 
+fn atomic_upload_path(destination: &str, transfer_id: &str) -> Result<String, String> {
+    let (parent, _) = remote_parent_and_name(destination)?;
+    let mut hasher = DefaultHasher::new();
+    transfer_id.hash(&mut hasher);
+    destination.hash(&mut hasher);
+    let temporary_name = format!(".harbor-upload-{:016x}.part", hasher.finish());
+    Ok(remote_child(&parent, &temporary_name))
+}
+
+fn verify_uploaded_size(protocol: &str, path: &str, actual: u64, expected: u64) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        actual == expected,
+        "{protocol} atomic upload verification failed for '{path}': expected {expected} bytes, but the server reported {actual} bytes. The original destination was not changed."
+    );
+    Ok(())
+}
+
+async fn verify_remote_file_size(
+    file_system: &mut dyn RemoteFileSystem,
+    path: &str,
+    expected: u64,
+) -> anyhow::Result<()> {
+    let (parent, name) = remote_parent_and_name(path).map_err(anyhow::Error::msg)?;
+    let entry = file_system
+        .list_dir(&parent)
+        .await?
+        .into_iter()
+        .find(|entry| {
+            entry.name == name && matches!(entry.file_type, crate::sftp_client::FileEntryType::File)
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!("The uploaded file was not found during transfer verification: '{path}'.")
+        })?;
+    verify_uploaded_size("Remote", path, entry.size, expected)
+}
+
 #[tauri::command]
 pub async fn remote_paste(
     request: RemotePasteRequest,
@@ -1677,9 +2158,9 @@ pub async fn remote_paste(
         return Err("A directory cannot be pasted inside itself.".to_string());
     }
 
-    let mut connections = state.connections.lock().await;
-    let file_system =
-        connections.get_mut(&request.connection_id).ok_or("Connection not found.")?.file_system();
+    let connection = state.connection(&request.connection_id).await.ok_or("Connection not found.")?;
+    let mut connection = connection.lock().await;
+    let file_system = connection.file_system();
     let destination_entries =
         file_system.list_dir(&destination_parent).await.map_err(|error| error.to_string())?;
     if destination_entries.iter().any(|entry| entry.name == destination_name) {
@@ -1765,8 +2246,8 @@ pub async fn remote_set_metadata(
                 .map_err(|_| "The modification date is outside the supported range.".to_string())
         })
         .transpose()?;
-    let mut connections = state.connections.lock().await;
-    let connection = connections.get_mut(&request.connection_id).ok_or("Connection not found.")?;
+    let connection = state.connection(&request.connection_id).await.ok_or("Connection not found.")?;
+    let mut connection = connection.lock().await;
     if matches!(connection.protocol(), Protocol::CloudFtp) {
         return Err("Google Cloud FTP does not support changing POSIX permissions, owner, group, or modification time. Access is controlled by Cloud Storage IAM.".to_string());
     }
@@ -1779,9 +2260,9 @@ pub async fn remote_set_metadata(
 
 #[tauri::command]
 pub async fn remote_delete(request: DeleteRequest, state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    let mut connections = state.connections.lock().await;
-    let file_system =
-        connections.get_mut(&request.connection_id).ok_or("Connection not found.")?.file_system();
+    let connection = state.connection(&request.connection_id).await.ok_or("Connection not found.")?;
+    let mut connection = connection.lock().await;
+    let file_system = connection.file_system();
     if request.is_directory {
         file_system.delete_dir(&request.path).await
     } else {
@@ -1797,9 +2278,9 @@ pub async fn remote_delete_tree(
 ) -> Result<(), String> {
     let target = remote_replace_target(&request.path)?;
 
-    let mut connections = state.connections.lock().await;
-    let file_system =
-        connections.get_mut(&request.connection_id).ok_or("Connection not found.")?.file_system();
+    let connection = state.connection(&request.connection_id).await.ok_or("Connection not found.")?;
+    let mut connection = connection.lock().await;
+    let file_system = connection.file_system();
 
     if !request.is_directory {
         return file_system.delete_file(&target).await.map_err(|error| error.to_string());
@@ -1833,101 +2314,396 @@ pub async fn transfer_upload(
     request: TransferRequest,
     app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
-) -> Result<u64, String> {
+) -> Result<TransferOutcome, String> {
+    let limits = request.limits();
+    let resume_from = request.resume_from.unwrap_or(0);
     let transfer_id = request.transfer_id.unwrap_or_else(|| "single-upload".to_string());
     let started = std::time::Instant::now();
+    let total_bytes = tokio::fs::metadata(&request.local_path).await.map(|value| value.len()).unwrap_or(0);
+    let conflict_policy = request.conflict_policy.as_deref().unwrap_or("ask");
+    if !matches!(conflict_policy, "ask" | "overwrite" | "skip" | "rename") {
+        return Err("Invalid transfer conflict policy.".to_string());
+    }
+    state.bookmarks.save_transfer_job(&TransferJob {
+        id: transfer_id.clone(),
+        connection_id: request.connection_id.clone(),
+        name: transfer_display_name(request.name.as_deref(), &request.remote_path),
+        direction: "Upload".to_string(),
+        local_path: request.local_path.clone(),
+        remote_path: request.remote_path.clone(),
+        status: "Queued".to_string(),
+        detail: String::new(),
+        transferred_bytes: resume_from,
+        total_bytes,
+        retry_count: 0,
+        conflict_policy: conflict_policy.to_string(),
+        is_directory: false,
+        updated_at: String::new(),
+    })?;
     let control = Arc::new(TransferControl::new());
     state.transfer_controls.lock().await.insert(transfer_id.clone(), control.clone());
-    let mut connections = state.connections.lock().await;
-    let result = match connections.get_mut(&request.connection_id).ok_or("Connection not found.")? {
-        RemoteConnection::Sftp { client, .. } => {
-            let event_app = app.clone();
-            let event_id = transfer_id.clone();
-            client
-                .upload_file_with_progress(&request.local_path, &request.remote_path, move |done, total| {
-                    let event_app = event_app.clone();
-                    let event_id = event_id.clone();
-                    let control = control.clone();
-                    async move {
-                        control.wait_until_running().await.map_err(anyhow::Error::msg)?;
-                        let _ = event_app.emit(
-                            "transfer://file-progress",
-                            FileTransferProgress {
-                                transfer_id: event_id,
-                                transferred_bytes: done,
-                                total_bytes: total,
-                                elapsed_ms: started.elapsed().as_millis() as u64,
-                                status: "running".to_string(),
-                            },
-                        );
-                        Ok(())
-                    }
-                })
-                .await
-        }
-        RemoteConnection::Ftp { client, .. } => {
-            client.upload_file(&request.local_path, &request.remote_path).await
-        }
-        RemoteConnection::WebDav(client) => {
-            client.upload_file(&request.local_path, &request.remote_path).await
-        }
-        RemoteConnection::S3(client) => {
-            let event_app = app.clone();
-            let event_id = transfer_id.clone();
-            client
-                .upload_file_with_progress(&request.local_path, &request.remote_path, move |done, total| {
-                    let event_app = event_app.clone();
-                    let event_id = event_id.clone();
-                    let control = control.clone();
-                    async move {
-                        control.wait_until_running().await.map_err(anyhow::Error::msg)?;
-                        let _ = event_app.emit(
-                            "transfer://file-progress",
-                            FileTransferProgress {
-                                transfer_id: event_id,
-                                transferred_bytes: done,
-                                total_bytes: total,
-                                elapsed_ms: started.elapsed().as_millis() as u64,
-                                status: "running".to_string(),
-                            },
-                        );
-                        Ok(())
-                    }
-                })
-                .await
-        }
-        RemoteConnection::Samba(client) => {
-            let event_app = app.clone();
-            let event_id = transfer_id.clone();
-            client
-                .upload_file_with_progress(&request.local_path, &request.remote_path, move |done, total| {
-                    let event_app = event_app.clone();
-                    let event_id = event_id.clone();
-                    let control = control.clone();
-                    async move {
-                        control.wait_until_running().await.map_err(anyhow::Error::msg)?;
-                        let _ = event_app.emit(
-                            "transfer://file-progress",
-                            FileTransferProgress {
-                                transfer_id: event_id,
-                                transferred_bytes: done,
-                                total_bytes: total,
-                                elapsed_ms: started.elapsed().as_millis() as u64,
-                                status: "running".to_string(),
-                            },
-                        );
-                        Ok(())
-                    }
-                })
-                .await
-        }
-        RemoteConnection::GoogleDrive(client) => {
-            client.upload_file(&request.local_path, &request.remote_path).await
+    let _ = app.emit(
+        "transfer://file-progress",
+        FileTransferProgress {
+            transfer_id: transfer_id.clone(),
+            transferred_bytes: resume_from,
+            total_bytes,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            status: "queued".to_string(),
+        },
+    );
+    let permit = state
+        .transfer_scheduler
+        .acquire_cancellable(
+            &request.connection_id,
+            limits.global_concurrency,
+            limits.connection_concurrency,
+            &control,
+        )
+        .await;
+    let _permit = match permit {
+        Ok(permit) => permit,
+        Err(error) => {
+            state.transfer_controls.lock().await.remove(&transfer_id);
+            return Err(error);
         }
     };
-    drop(connections);
+    if let Err(error) = control.wait_until_running().await {
+        state.transfer_controls.lock().await.remove(&transfer_id);
+        state.bookmarks.set_transfer_job_status(&transfer_id, "Cancelled", &error)?;
+        return Err(error);
+    }
+    state.bookmarks.set_transfer_job_status(&transfer_id, "Running", "")?;
+    let bandwidth = TransferBandwidth::new(state.bandwidth_limiter.clone(), &request.connection_id, limits);
+    let progress_store = state.bookmarks.clone();
+    let persisted_progress = Arc::new(AtomicU64::new(resume_from / TRANSFER_PROGRESS_PERSIST_INTERVAL));
+    let Some(connection) = state.connection(&request.connection_id).await else {
+        state.transfer_controls.lock().await.remove(&transfer_id);
+        state.bookmarks.set_transfer_job_status(&transfer_id, "Failed", "Connection not found.")?;
+        return Err("Connection not found.".to_string());
+    };
+    let connection_result = {
+        let connection = connection.lock().await;
+        connection.duplicate_for_transfer().await.map_err(|error| error.to_string())
+    };
+    let mut connection = match connection_result {
+        Ok(connection) => connection,
+        Err(error) => {
+            state.transfer_controls.lock().await.remove(&transfer_id);
+            state.bookmarks.set_transfer_job_status(&transfer_id, "Failed", &error)?;
+            return Err(error);
+        }
+    };
+    let is_google_drive_upload = matches!(&connection, RemoteConnection::GoogleDrive(_));
+    let uses_sha256_verification = matches!(&connection, RemoteConnection::S3(_));
+    let retry_count_base = state
+        .bookmarks
+        .transfer_job_checkpoint(&transfer_id)?
+        .map(|(_, _, retry_count)| retry_count)
+        .unwrap_or(0);
+    let mut automatic_retry = 0;
+    let mut attempt_resume_from = resume_from;
+    let result = loop {
+        bandwidth.reset(attempt_resume_from);
+        let control = control.clone();
+        let progress_store = progress_store.clone();
+        let persisted_progress = persisted_progress.clone();
+        let bandwidth = bandwidth.clone();
+        let completion_bandwidth = bandwidth.clone();
+        let result = match &mut connection {
+            RemoteConnection::Sftp { client, .. } => {
+                let event_app = app.clone();
+                let event_id = transfer_id.clone();
+                client
+                    .upload_file_resumable_with_progress(
+                        &request.local_path,
+                        &request.remote_path,
+                        attempt_resume_from,
+                        move |done, total| {
+                            let event_app = event_app.clone();
+                            let event_id = event_id.clone();
+                            let control = control.clone();
+                            let progress_store = progress_store.clone();
+                            let persisted_progress = persisted_progress.clone();
+                            let bandwidth = bandwidth.clone();
+                            async move {
+                                control.wait_until_running().await.map_err(anyhow::Error::msg)?;
+                                bandwidth.progress(done).await;
+                                persist_progress(
+                                    &progress_store,
+                                    &event_id,
+                                    done,
+                                    total,
+                                    &persisted_progress,
+                                );
+                                let _ = event_app.emit(
+                                    "transfer://file-progress",
+                                    FileTransferProgress {
+                                        transfer_id: event_id,
+                                        transferred_bytes: done,
+                                        total_bytes: total,
+                                        elapsed_ms: started.elapsed().as_millis() as u64,
+                                        status: "running".to_string(),
+                                    },
+                                );
+                                Ok(())
+                            }
+                        },
+                    )
+                    .await
+            }
+            RemoteConnection::Ftp { client, .. } => {
+                client
+                    .upload_file_resumable(&request.local_path, &request.remote_path, attempt_resume_from)
+                    .await
+            }
+            RemoteConnection::WebDav(client) => {
+                async {
+                    let temporary_path =
+                        atomic_upload_path(&request.remote_path, &transfer_id).map_err(anyhow::Error::msg)?;
+                    if attempt_resume_from > 0 {
+                        let _ = state.bookmarks.update_transfer_job_progress(&transfer_id, 0, total_bytes);
+                    }
+                    let bytes = client.upload_file(&request.local_path, &temporary_path).await?;
+                    let remote_size = client.file_size(&temporary_path).await?;
+                    verify_uploaded_size("WebDAV", &temporary_path, remote_size, total_bytes)?;
+                    client.atomic_replace(&temporary_path, &request.remote_path).await?;
+                    Ok(bytes)
+                }
+                .await
+            }
+            RemoteConnection::S3(client) => {
+                let event_app = app.clone();
+                let event_id = transfer_id.clone();
+                let resume_state = state.bookmarks.s3_multipart_state(&transfer_id)?.and_then(|json| {
+                    match serde_json::from_str::<S3MultipartState>(&json) {
+                        Ok(value) => Some(value),
+                        Err(error) => {
+                            tracing::warn!("Discarding invalid saved S3 multipart state: {error}");
+                            let _ = state.bookmarks.delete_s3_multipart_state(&transfer_id);
+                            None
+                        }
+                    }
+                });
+                let state_store = state.bookmarks.clone();
+                let state_id = transfer_id.clone();
+                client
+                    .upload_file_resumable_with_progress(
+                        &request.local_path,
+                        &request.remote_path,
+                        resume_state,
+                        true,
+                        move |multipart| {
+                            let json = serde_json::to_string(multipart)?;
+                            state_store.save_s3_multipart_state(&state_id, &json).map_err(anyhow::Error::msg)
+                        },
+                        move |done, total| {
+                            let event_app = event_app.clone();
+                            let event_id = event_id.clone();
+                            let control = control.clone();
+                            let progress_store = progress_store.clone();
+                            let persisted_progress = persisted_progress.clone();
+                            let bandwidth = bandwidth.clone();
+                            async move {
+                                control.wait_until_running().await.map_err(anyhow::Error::msg)?;
+                                bandwidth.progress(done).await;
+                                persist_progress(
+                                    &progress_store,
+                                    &event_id,
+                                    done,
+                                    total,
+                                    &persisted_progress,
+                                );
+                                let _ = event_app.emit(
+                                    "transfer://file-progress",
+                                    FileTransferProgress {
+                                        transfer_id: event_id,
+                                        transferred_bytes: done,
+                                        total_bytes: total,
+                                        elapsed_ms: started.elapsed().as_millis() as u64,
+                                        status: "running".to_string(),
+                                    },
+                                );
+                                Ok(())
+                            }
+                        },
+                    )
+                    .await
+            }
+            RemoteConnection::Samba(client) => {
+                let event_app = app.clone();
+                let event_id = transfer_id.clone();
+                client
+                    .upload_file_with_progress(
+                        &request.local_path,
+                        &request.remote_path,
+                        move |done, total| {
+                            let event_app = event_app.clone();
+                            let event_id = event_id.clone();
+                            let control = control.clone();
+                            let progress_store = progress_store.clone();
+                            let persisted_progress = persisted_progress.clone();
+                            let bandwidth = bandwidth.clone();
+                            async move {
+                                control.wait_until_running().await.map_err(anyhow::Error::msg)?;
+                                bandwidth.progress(done).await;
+                                persist_progress(
+                                    &progress_store,
+                                    &event_id,
+                                    done,
+                                    total,
+                                    &persisted_progress,
+                                );
+                                let _ = event_app.emit(
+                                    "transfer://file-progress",
+                                    FileTransferProgress {
+                                        transfer_id: event_id,
+                                        transferred_bytes: done,
+                                        total_bytes: total,
+                                        elapsed_ms: started.elapsed().as_millis() as u64,
+                                        status: "running".to_string(),
+                                    },
+                                );
+                                Ok(())
+                            }
+                        },
+                    )
+                    .await
+            }
+            RemoteConnection::GoogleDrive(client) => {
+                let event_app = app.clone();
+                let event_id = transfer_id.clone();
+                let session_key = format!("google:upload-session:{transfer_id}");
+                let resume_state = match secret_store::lookup(&session_key)
+                    .map_err(|error| error.to_string())?
+                {
+                    SecretLookup::Value(json) => {
+                        match serde_json::from_str::<GoogleDriveUploadState>(&json) {
+                            Ok(value) => Some(value),
+                            Err(error) => {
+                                tracing::warn!("Discarding invalid saved Google Drive upload state: {error}");
+                                secret_store::remove_ephemeral(&session_key)
+                                    .map_err(|error| error.to_string())?;
+                                None
+                            }
+                        }
+                    }
+                    SecretLookup::Missing | SecretLookup::Removed => None,
+                };
+                let state_key = session_key.clone();
+                client
+                    .upload_file_resumable_with_progress(
+                        &request.local_path,
+                        &request.remote_path,
+                        resume_state,
+                        true,
+                        move |upload_state| {
+                            secret_store::store(&state_key, &serde_json::to_string(upload_state)?)
+                        },
+                        move |done, total| {
+                            let event_app = event_app.clone();
+                            let event_id = event_id.clone();
+                            let control = control.clone();
+                            let progress_store = progress_store.clone();
+                            let persisted_progress = persisted_progress.clone();
+                            let bandwidth = bandwidth.clone();
+                            async move {
+                                control.wait_until_running().await.map_err(anyhow::Error::msg)?;
+                                bandwidth.progress(done).await;
+                                persist_progress(
+                                    &progress_store,
+                                    &event_id,
+                                    done,
+                                    total,
+                                    &persisted_progress,
+                                );
+                                let _ = event_app.emit(
+                                    "transfer://file-progress",
+                                    FileTransferProgress {
+                                        transfer_id: event_id,
+                                        transferred_bytes: done,
+                                        total_bytes: total,
+                                        elapsed_ms: started.elapsed().as_millis() as u64,
+                                        status: "running".to_string(),
+                                    },
+                                );
+                                Ok(())
+                            }
+                        },
+                    )
+                    .await
+            }
+        };
+        if let Ok(bytes) = &result {
+            completion_bandwidth.progress(*bytes).await;
+        }
+        let result = match result {
+            Ok(bytes) if bytes != total_bytes => Err(anyhow::anyhow!(
+                "Upload size verification failed: expected {total_bytes} bytes, but the transfer reported {bytes} bytes."
+            )),
+            Ok(bytes) if !is_google_drive_upload => {
+                verify_remote_file_size(connection.file_system(), &request.remote_path, total_bytes)
+                    .await
+                    .map(|_| bytes)
+            }
+            other => other,
+        };
+        match result {
+            Err(error)
+                if automatic_retry < limits.automatic_retries && is_retryable_transfer_error(&error) =>
+            {
+                automatic_retry += 1;
+                let detail = format!(
+                    "Temporary transfer failure. Reconnecting (attempt {automatic_retry}/{}): {error}",
+                    limits.automatic_retries
+                );
+                state.bookmarks.set_transfer_job_retry(
+                    &transfer_id,
+                    retry_count_base.saturating_add(automatic_retry),
+                    &detail,
+                )?;
+                let _ = app.emit(
+                    "transfer://file-progress",
+                    FileTransferProgress {
+                        transfer_id: transfer_id.clone(),
+                        transferred_bytes: attempt_resume_from,
+                        total_bytes,
+                        elapsed_ms: started.elapsed().as_millis() as u64,
+                        status: "reconnecting".to_string(),
+                    },
+                );
+                tokio::time::sleep(retry_backoff(automatic_retry - 1)).await;
+                if let Err(reconnect_error) = connection.reconnect().await {
+                    tracing::warn!("Automatic reconnect attempt {automatic_retry} failed: {reconnect_error}");
+                }
+                attempt_resume_from = state
+                    .bookmarks
+                    .transfer_job_checkpoint(&transfer_id)?
+                    .map(|(transferred, _, _)| transferred)
+                    .unwrap_or(attempt_resume_from);
+            }
+            other => break other,
+        }
+    };
+    drop(connection);
     state.transfer_controls.lock().await.remove(&transfer_id);
-    let bytes = result.map_err(|error| error.to_string())?;
+    let bytes = match result {
+        Ok(bytes) => {
+            if is_google_drive_upload {
+                let session_key = format!("google:upload-session:{transfer_id}");
+                if matches!(secret_store::lookup(&session_key), Ok(SecretLookup::Value(_))) {
+                    secret_store::remove_ephemeral(&session_key).map_err(|error| error.to_string())?;
+                }
+            }
+            state.bookmarks.delete_transfer_job(&transfer_id)?;
+            bytes
+        }
+        Err(error) => {
+            let detail = error.to_string();
+            state.bookmarks.set_transfer_job_status(&transfer_id, "Failed", &detail)?;
+            return Err(detail);
+        }
+    };
     let _ = app.emit(
         "transfer://file-progress",
         FileTransferProgress {
@@ -1938,7 +2714,10 @@ pub async fn transfer_upload(
             status: "completed".to_string(),
         },
     );
-    Ok(bytes)
+    Ok(TransferOutcome {
+        bytes,
+        verification: if uses_sha256_verification { "sha256" } else { "size" }.to_string(),
+    })
 }
 
 #[tauri::command]
@@ -1946,101 +2725,423 @@ pub async fn transfer_download(
     request: TransferRequest,
     app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
-) -> Result<u64, String> {
+) -> Result<TransferOutcome, String> {
+    let limits = request.limits();
+    let resume_from = request.resume_from.unwrap_or(0);
     let transfer_id = request.transfer_id.unwrap_or_else(|| "single-download".to_string());
     let started = std::time::Instant::now();
+    let conflict_policy = request.conflict_policy.as_deref().unwrap_or("ask");
+    if !matches!(conflict_policy, "ask" | "overwrite" | "skip" | "rename") {
+        return Err("Invalid transfer conflict policy.".to_string());
+    }
+    state.bookmarks.save_transfer_job(&TransferJob {
+        id: transfer_id.clone(),
+        connection_id: request.connection_id.clone(),
+        name: transfer_display_name(request.name.as_deref(), &request.remote_path),
+        direction: "Download".to_string(),
+        local_path: request.local_path.clone(),
+        remote_path: request.remote_path.clone(),
+        status: "Queued".to_string(),
+        detail: String::new(),
+        transferred_bytes: resume_from,
+        total_bytes: 0,
+        retry_count: 0,
+        conflict_policy: conflict_policy.to_string(),
+        is_directory: false,
+        updated_at: String::new(),
+    })?;
     let control = Arc::new(TransferControl::new());
     state.transfer_controls.lock().await.insert(transfer_id.clone(), control.clone());
-    let mut connections = state.connections.lock().await;
-    let result = match connections.get_mut(&request.connection_id).ok_or("Connection not found.")? {
-        RemoteConnection::Sftp { client, .. } => {
-            let event_app = app.clone();
-            let event_id = transfer_id.clone();
-            client
-                .download_file_with_progress(&request.remote_path, &request.local_path, move |done, total| {
-                    let event_app = event_app.clone();
-                    let event_id = event_id.clone();
-                    let control = control.clone();
-                    async move {
-                        control.wait_until_running().await.map_err(anyhow::Error::msg)?;
-                        let _ = event_app.emit(
-                            "transfer://file-progress",
-                            FileTransferProgress {
-                                transfer_id: event_id,
-                                transferred_bytes: done,
-                                total_bytes: total,
-                                elapsed_ms: started.elapsed().as_millis() as u64,
-                                status: "running".to_string(),
-                            },
-                        );
-                        Ok(())
-                    }
-                })
-                .await
-        }
-        RemoteConnection::Ftp { client, .. } => {
-            client.download_file(&request.remote_path, &request.local_path).await
-        }
-        RemoteConnection::WebDav(client) => {
-            client.download_file(&request.remote_path, &request.local_path).await
-        }
-        RemoteConnection::S3(client) => {
-            let event_app = app.clone();
-            let event_id = transfer_id.clone();
-            client
-                .download_file_with_progress(&request.remote_path, &request.local_path, move |done, total| {
-                    let event_app = event_app.clone();
-                    let event_id = event_id.clone();
-                    let control = control.clone();
-                    async move {
-                        control.wait_until_running().await.map_err(anyhow::Error::msg)?;
-                        let _ = event_app.emit(
-                            "transfer://file-progress",
-                            FileTransferProgress {
-                                transfer_id: event_id,
-                                transferred_bytes: done,
-                                total_bytes: total,
-                                elapsed_ms: started.elapsed().as_millis() as u64,
-                                status: "running".to_string(),
-                            },
-                        );
-                        Ok(())
-                    }
-                })
-                .await
-        }
-        RemoteConnection::Samba(client) => {
-            let event_app = app.clone();
-            let event_id = transfer_id.clone();
-            client
-                .download_file_with_progress(&request.remote_path, &request.local_path, move |done, total| {
-                    let event_app = event_app.clone();
-                    let event_id = event_id.clone();
-                    let control = control.clone();
-                    async move {
-                        control.wait_until_running().await.map_err(anyhow::Error::msg)?;
-                        let _ = event_app.emit(
-                            "transfer://file-progress",
-                            FileTransferProgress {
-                                transfer_id: event_id,
-                                transferred_bytes: done,
-                                total_bytes: total,
-                                elapsed_ms: started.elapsed().as_millis() as u64,
-                                status: "running".to_string(),
-                            },
-                        );
-                        Ok(())
-                    }
-                })
-                .await
-        }
-        RemoteConnection::GoogleDrive(client) => {
-            client.download_file(&request.remote_path, &request.local_path).await
+    let _ = app.emit(
+        "transfer://file-progress",
+        FileTransferProgress {
+            transfer_id: transfer_id.clone(),
+            transferred_bytes: resume_from,
+            total_bytes: 0,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            status: "queued".to_string(),
+        },
+    );
+    let permit = state
+        .transfer_scheduler
+        .acquire_cancellable(
+            &request.connection_id,
+            limits.global_concurrency,
+            limits.connection_concurrency,
+            &control,
+        )
+        .await;
+    let _permit = match permit {
+        Ok(permit) => permit,
+        Err(error) => {
+            state.transfer_controls.lock().await.remove(&transfer_id);
+            return Err(error);
         }
     };
-    drop(connections);
+    if let Err(error) = control.wait_until_running().await {
+        state.transfer_controls.lock().await.remove(&transfer_id);
+        state.bookmarks.set_transfer_job_status(&transfer_id, "Cancelled", &error)?;
+        return Err(error);
+    }
+    state.bookmarks.set_transfer_job_status(&transfer_id, "Running", "")?;
+    let bandwidth = TransferBandwidth::new(state.bandwidth_limiter.clone(), &request.connection_id, limits);
+    let progress_store = state.bookmarks.clone();
+    let persisted_progress = Arc::new(AtomicU64::new(resume_from / TRANSFER_PROGRESS_PERSIST_INTERVAL));
+    let Some(connection) = state.connection(&request.connection_id).await else {
+        state.transfer_controls.lock().await.remove(&transfer_id);
+        state.bookmarks.set_transfer_job_status(&transfer_id, "Failed", "Connection not found.")?;
+        return Err("Connection not found.".to_string());
+    };
+    let connection_result = {
+        let connection = connection.lock().await;
+        connection.duplicate_for_transfer().await.map_err(|error| error.to_string())
+    };
+    let mut connection = match connection_result {
+        Ok(connection) => connection,
+        Err(error) => {
+            state.transfer_controls.lock().await.remove(&transfer_id);
+            state.bookmarks.set_transfer_job_status(&transfer_id, "Failed", &error)?;
+            return Err(error);
+        }
+    };
+    let is_google_drive_download = matches!(&connection, RemoteConnection::GoogleDrive(_));
+    let uses_sha256_verification = matches!(&connection, RemoteConnection::S3(_));
+    let retry_count_base = state
+        .bookmarks
+        .transfer_job_checkpoint(&transfer_id)?
+        .map(|(_, _, retry_count)| retry_count)
+        .unwrap_or(0);
+    let mut automatic_retry = 0;
+    let mut attempt_resume_from = resume_from;
+    let result = loop {
+        bandwidth.reset(attempt_resume_from);
+        let control = control.clone();
+        let progress_store = progress_store.clone();
+        let persisted_progress = persisted_progress.clone();
+        let bandwidth = bandwidth.clone();
+        let completion_bandwidth = bandwidth.clone();
+        let result = match &mut connection {
+            RemoteConnection::Sftp { client, .. } => {
+                let event_app = app.clone();
+                let event_id = transfer_id.clone();
+                client
+                    .download_file_resumable_with_progress(
+                        &request.remote_path,
+                        &request.local_path,
+                        attempt_resume_from,
+                        move |done, total| {
+                            let event_app = event_app.clone();
+                            let event_id = event_id.clone();
+                            let control = control.clone();
+                            let progress_store = progress_store.clone();
+                            let persisted_progress = persisted_progress.clone();
+                            let bandwidth = bandwidth.clone();
+                            async move {
+                                control.wait_until_running().await.map_err(anyhow::Error::msg)?;
+                                bandwidth.progress(done).await;
+                                persist_progress(
+                                    &progress_store,
+                                    &event_id,
+                                    done,
+                                    total,
+                                    &persisted_progress,
+                                );
+                                let _ = event_app.emit(
+                                    "transfer://file-progress",
+                                    FileTransferProgress {
+                                        transfer_id: event_id,
+                                        transferred_bytes: done,
+                                        total_bytes: total,
+                                        elapsed_ms: started.elapsed().as_millis() as u64,
+                                        status: "running".to_string(),
+                                    },
+                                );
+                                Ok(())
+                            }
+                        },
+                    )
+                    .await
+            }
+            RemoteConnection::Ftp { client, .. } => {
+                let event_app = app.clone();
+                let event_id = transfer_id.clone();
+                client
+                    .download_file_resumable_with_progress(
+                        &request.remote_path,
+                        &request.local_path,
+                        attempt_resume_from,
+                        move |done, total| {
+                            let event_app = event_app.clone();
+                            let event_id = event_id.clone();
+                            let control = control.clone();
+                            let progress_store = progress_store.clone();
+                            let persisted_progress = persisted_progress.clone();
+                            let bandwidth = bandwidth.clone();
+                            async move {
+                                control.wait_until_running().await.map_err(anyhow::Error::msg)?;
+                                bandwidth.progress(done).await;
+                                persist_progress(
+                                    &progress_store,
+                                    &event_id,
+                                    done,
+                                    total,
+                                    &persisted_progress,
+                                );
+                                let _ = event_app.emit(
+                                    "transfer://file-progress",
+                                    FileTransferProgress {
+                                        transfer_id: event_id,
+                                        transferred_bytes: done,
+                                        total_bytes: total,
+                                        elapsed_ms: started.elapsed().as_millis() as u64,
+                                        status: "running".to_string(),
+                                    },
+                                );
+                                Ok(())
+                            }
+                        },
+                    )
+                    .await
+            }
+            RemoteConnection::WebDav(client) => {
+                let event_app = app.clone();
+                let event_id = transfer_id.clone();
+                client
+                    .download_file_resumable_with_progress(
+                        &request.remote_path,
+                        &request.local_path,
+                        attempt_resume_from,
+                        move |done, total| {
+                            let event_app = event_app.clone();
+                            let event_id = event_id.clone();
+                            let control = control.clone();
+                            let progress_store = progress_store.clone();
+                            let persisted_progress = persisted_progress.clone();
+                            let bandwidth = bandwidth.clone();
+                            async move {
+                                control.wait_until_running().await.map_err(anyhow::Error::msg)?;
+                                bandwidth.progress(done).await;
+                                persist_progress(
+                                    &progress_store,
+                                    &event_id,
+                                    done,
+                                    total,
+                                    &persisted_progress,
+                                );
+                                let _ = event_app.emit(
+                                    "transfer://file-progress",
+                                    FileTransferProgress {
+                                        transfer_id: event_id,
+                                        transferred_bytes: done,
+                                        total_bytes: total,
+                                        elapsed_ms: started.elapsed().as_millis() as u64,
+                                        status: "running".to_string(),
+                                    },
+                                );
+                                Ok(())
+                            }
+                        },
+                    )
+                    .await
+            }
+            RemoteConnection::S3(client) => {
+                let event_app = app.clone();
+                let event_id = transfer_id.clone();
+                client
+                    .download_file_with_progress(
+                        &request.remote_path,
+                        &request.local_path,
+                        move |done, total| {
+                            let event_app = event_app.clone();
+                            let event_id = event_id.clone();
+                            let control = control.clone();
+                            let progress_store = progress_store.clone();
+                            let persisted_progress = persisted_progress.clone();
+                            let bandwidth = bandwidth.clone();
+                            async move {
+                                control.wait_until_running().await.map_err(anyhow::Error::msg)?;
+                                bandwidth.progress(done).await;
+                                persist_progress(
+                                    &progress_store,
+                                    &event_id,
+                                    done,
+                                    total,
+                                    &persisted_progress,
+                                );
+                                let _ = event_app.emit(
+                                    "transfer://file-progress",
+                                    FileTransferProgress {
+                                        transfer_id: event_id,
+                                        transferred_bytes: done,
+                                        total_bytes: total,
+                                        elapsed_ms: started.elapsed().as_millis() as u64,
+                                        status: "running".to_string(),
+                                    },
+                                );
+                                Ok(())
+                            }
+                        },
+                    )
+                    .await
+            }
+            RemoteConnection::Samba(client) => {
+                let event_app = app.clone();
+                let event_id = transfer_id.clone();
+                client
+                    .download_file_with_progress(
+                        &request.remote_path,
+                        &request.local_path,
+                        move |done, total| {
+                            let event_app = event_app.clone();
+                            let event_id = event_id.clone();
+                            let control = control.clone();
+                            let progress_store = progress_store.clone();
+                            let persisted_progress = persisted_progress.clone();
+                            let bandwidth = bandwidth.clone();
+                            async move {
+                                control.wait_until_running().await.map_err(anyhow::Error::msg)?;
+                                bandwidth.progress(done).await;
+                                persist_progress(
+                                    &progress_store,
+                                    &event_id,
+                                    done,
+                                    total,
+                                    &persisted_progress,
+                                );
+                                let _ = event_app.emit(
+                                    "transfer://file-progress",
+                                    FileTransferProgress {
+                                        transfer_id: event_id,
+                                        transferred_bytes: done,
+                                        total_bytes: total,
+                                        elapsed_ms: started.elapsed().as_millis() as u64,
+                                        status: "running".to_string(),
+                                    },
+                                );
+                                Ok(())
+                            }
+                        },
+                    )
+                    .await
+            }
+            RemoteConnection::GoogleDrive(client) => {
+                let event_app = app.clone();
+                let event_id = transfer_id.clone();
+                client
+                    .download_file_with_progress(
+                        &request.remote_path,
+                        &request.local_path,
+                        move |done, total| {
+                            let event_app = event_app.clone();
+                            let event_id = event_id.clone();
+                            let control = control.clone();
+                            let progress_store = progress_store.clone();
+                            let persisted_progress = persisted_progress.clone();
+                            let bandwidth = bandwidth.clone();
+                            async move {
+                                control.wait_until_running().await.map_err(anyhow::Error::msg)?;
+                                bandwidth.progress(done).await;
+                                persist_progress(
+                                    &progress_store,
+                                    &event_id,
+                                    done,
+                                    total,
+                                    &persisted_progress,
+                                );
+                                let _ = event_app.emit(
+                                    "transfer://file-progress",
+                                    FileTransferProgress {
+                                        transfer_id: event_id,
+                                        transferred_bytes: done,
+                                        total_bytes: total,
+                                        elapsed_ms: started.elapsed().as_millis() as u64,
+                                        status: "running".to_string(),
+                                    },
+                                );
+                                Ok(())
+                            }
+                        },
+                    )
+                    .await
+            }
+        };
+        if let Ok(bytes) = &result {
+            completion_bandwidth.progress(*bytes).await;
+        }
+        let result = match result {
+            Ok(bytes) => match tokio::fs::metadata(&request.local_path).await {
+                Ok(metadata) if metadata.len() == bytes => Ok(bytes),
+                Ok(metadata) => Err(anyhow::anyhow!(
+                    "Download size verification failed: the transfer reported {bytes} bytes, but the local file contains {} bytes.",
+                    metadata.len()
+                )),
+                Err(error) => Err(anyhow::anyhow!(
+                    "Download verification could not inspect '{}': {error}",
+                    request.local_path
+                )),
+            },
+            other => other,
+        };
+        let result = match result {
+            Ok(bytes) if !is_google_drive_download => {
+                verify_remote_file_size(connection.file_system(), &request.remote_path, bytes)
+                    .await
+                    .map(|_| bytes)
+            }
+            other => other,
+        };
+        match result {
+            Err(error)
+                if automatic_retry < limits.automatic_retries && is_retryable_transfer_error(&error) =>
+            {
+                automatic_retry += 1;
+                let detail = format!(
+                    "Temporary transfer failure. Reconnecting (attempt {automatic_retry}/{}): {error}",
+                    limits.automatic_retries
+                );
+                state.bookmarks.set_transfer_job_retry(
+                    &transfer_id,
+                    retry_count_base.saturating_add(automatic_retry),
+                    &detail,
+                )?;
+                let checkpoint = state.bookmarks.transfer_job_checkpoint(&transfer_id)?;
+                let reconnect_bytes = checkpoint
+                    .as_ref()
+                    .map(|(transferred, _, _)| *transferred)
+                    .unwrap_or(attempt_resume_from);
+                let reconnect_total = checkpoint.map(|(_, total, _)| total).unwrap_or(0);
+                let _ = app.emit(
+                    "transfer://file-progress",
+                    FileTransferProgress {
+                        transfer_id: transfer_id.clone(),
+                        transferred_bytes: reconnect_bytes,
+                        total_bytes: reconnect_total,
+                        elapsed_ms: started.elapsed().as_millis() as u64,
+                        status: "reconnecting".to_string(),
+                    },
+                );
+                tokio::time::sleep(retry_backoff(automatic_retry - 1)).await;
+                if let Err(reconnect_error) = connection.reconnect().await {
+                    tracing::warn!("Automatic reconnect attempt {automatic_retry} failed: {reconnect_error}");
+                }
+                attempt_resume_from = reconnect_bytes;
+            }
+            other => break other,
+        }
+    };
+    drop(connection);
     state.transfer_controls.lock().await.remove(&transfer_id);
-    let bytes = result.map_err(|error| error.to_string())?;
+    let bytes = match result {
+        Ok(bytes) => {
+            state.bookmarks.delete_transfer_job(&transfer_id)?;
+            bytes
+        }
+        Err(error) => {
+            let detail = error.to_string();
+            state.bookmarks.set_transfer_job_status(&transfer_id, "Failed", &detail)?;
+            return Err(detail);
+        }
+    };
     let _ = app.emit(
         "transfer://file-progress",
         FileTransferProgress {
@@ -2051,7 +3152,10 @@ pub async fn transfer_download(
             status: "completed".to_string(),
         },
     );
-    Ok(bytes)
+    Ok(TransferOutcome {
+        bytes,
+        verification: if uses_sha256_verification { "sha256" } else { "size" }.to_string(),
+    })
 }
 
 #[tauri::command]
@@ -2060,6 +3164,7 @@ pub async fn transfer_upload_directory(
     app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
+    let limits = request.limits();
     let root = PathBuf::from(&request.local_directory);
     if !root.is_dir() {
         return Err("The selected local path is not a directory.".to_string());
@@ -2067,11 +3172,92 @@ pub async fn transfer_upload_directory(
     let mut entries = Vec::new();
     collect_local_entries(&root, &root, &mut entries)?;
     let total_files = entries.iter().filter(|entry| matches!(entry, LocalEntry::File(_, _))).count();
+    let total_bytes = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            LocalEntry::File(path, _) => std::fs::metadata(path).ok().map(|value| value.len()),
+            LocalEntry::Directory(_) => None,
+        })
+        .sum();
+    let conflict_policy = request.conflict_policy.as_deref().unwrap_or("ask");
+    if !matches!(conflict_policy, "ask" | "overwrite" | "skip" | "rename") {
+        return Err("Invalid transfer conflict policy.".to_string());
+    }
+    state.bookmarks.save_transfer_job(&TransferJob {
+        id: request.transfer_id.clone(),
+        connection_id: request.connection_id.clone(),
+        name: transfer_display_name(request.name.as_deref(), &request.remote_directory),
+        direction: "Upload".to_string(),
+        local_path: request.local_directory.clone(),
+        remote_path: request.remote_directory.clone(),
+        status: "Queued".to_string(),
+        detail: String::new(),
+        transferred_bytes: 0,
+        total_bytes,
+        retry_count: 0,
+        conflict_policy: conflict_policy.to_string(),
+        is_directory: true,
+        updated_at: String::new(),
+    })?;
     let mut completed_files = 0;
+    let mut transferred_bytes = 0u64;
     let control = Arc::new(TransferControl::new());
     state.transfer_controls.lock().await.insert(request.transfer_id.clone(), control.clone());
-    let mut connections = state.connections.lock().await;
-    let connection = connections.get_mut(&request.connection_id).ok_or("Connection not found.")?;
+    let _ = app.emit(
+        "transfer://progress",
+        DirectoryTransferProgress {
+            transfer_id: request.transfer_id.clone(),
+            completed_files: 0,
+            total_files,
+            current_path: request.remote_directory.clone(),
+            status: "queued".to_string(),
+        },
+    );
+    let permit = state
+        .transfer_scheduler
+        .acquire_cancellable(
+            &request.connection_id,
+            limits.global_concurrency,
+            limits.connection_concurrency,
+            &control,
+        )
+        .await;
+    let _permit = match permit {
+        Ok(permit) => permit,
+        Err(error) => {
+            state.transfer_controls.lock().await.remove(&request.transfer_id);
+            return Err(error);
+        }
+    };
+    if let Err(error) = control.wait_until_running().await {
+        state.transfer_controls.lock().await.remove(&request.transfer_id);
+        state.bookmarks.set_transfer_job_status(&request.transfer_id, "Cancelled", &error)?;
+        return Err(error);
+    }
+    state.bookmarks.set_transfer_job_status(&request.transfer_id, "Running", "")?;
+    let bandwidth = TransferBandwidth::new(state.bandwidth_limiter.clone(), &request.connection_id, limits);
+    let Some(connection) = state.connection(&request.connection_id).await else {
+        state.transfer_controls.lock().await.remove(&request.transfer_id);
+        state.bookmarks.set_transfer_job_status(&request.transfer_id, "Failed", "Connection not found.")?;
+        return Err("Connection not found.".to_string());
+    };
+    let connection_result = {
+        let connection = connection.lock().await;
+        connection.duplicate_for_transfer().await.map_err(|error| error.to_string())
+    };
+    let mut connection = match connection_result {
+        Ok(connection) => connection,
+        Err(error) => {
+            state.transfer_controls.lock().await.remove(&request.transfer_id);
+            state.bookmarks.set_transfer_job_status(&request.transfer_id, "Failed", &error)?;
+            return Err(error);
+        }
+    };
+    let retry_count_base = state
+        .bookmarks
+        .transfer_job_checkpoint(&request.transfer_id)?
+        .map(|(_, _, retry_count)| retry_count)
+        .unwrap_or(0);
 
     // The selected folder itself must exist before empty folders or nested
     // files can be transferred. An existing destination is harmless.
@@ -2080,6 +3266,7 @@ pub async fn transfer_upload_directory(
     for entry in entries {
         if let Err(error) = control.wait_until_running().await {
             state.transfer_controls.lock().await.remove(&request.transfer_id);
+            state.bookmarks.set_transfer_job_status(&request.transfer_id, "Failed", &error)?;
             return Err(error);
         }
         match entry {
@@ -2090,30 +3277,161 @@ pub async fn transfer_upload_directory(
             LocalEntry::File(local_path, relative_path) => {
                 let remote_path = remote_join(&request.remote_directory, &relative_path);
                 let local_path_string = local_path.to_string_lossy().to_string();
-                let upload_result = match connection {
-                    RemoteConnection::S3(client) => {
-                        let file_control = control.clone();
-                        client
-                            .upload_file_with_progress(&local_path_string, &remote_path, move |_, _| {
-                                let file_control = file_control.clone();
-                                async move { file_control.wait_until_running().await.map_err(anyhow::Error::msg) }
-                            })
+                let expected_size =
+                    tokio::fs::metadata(&local_path).await.map(|value| value.len()).unwrap_or(0);
+                let mut automatic_retry = 0;
+                let upload_result = loop {
+                    bandwidth.reset(0);
+                    let control = control.clone();
+                    let bandwidth = bandwidth.clone();
+                    let completion_bandwidth = bandwidth.clone();
+                    let upload_result = match &mut connection {
+                        RemoteConnection::WebDav(client) => {
+                            async {
+                                let temporary_path = atomic_upload_path(&remote_path, &request.transfer_id)
+                                    .map_err(anyhow::Error::msg)?;
+                                let bytes = client.upload_file(&local_path_string, &temporary_path).await?;
+                                let remote_size = client.file_size(&temporary_path).await?;
+                                verify_uploaded_size("WebDAV", &temporary_path, remote_size, expected_size)?;
+                                client.atomic_replace(&temporary_path, &remote_path).await?;
+                                Ok(bytes)
+                            }
                             .await
+                        }
+                        RemoteConnection::S3(client) => {
+                            let file_control = control.clone();
+                            client
+                                .upload_file_with_progress(
+                                    &local_path_string,
+                                    &remote_path,
+                                    move |done, _| {
+                                        let file_control = file_control.clone();
+                                        let bandwidth = bandwidth.clone();
+                                        async move {
+                                            file_control
+                                                .wait_until_running()
+                                                .await
+                                                .map_err(anyhow::Error::msg)?;
+                                            bandwidth.progress(done).await;
+                                            Ok(())
+                                        }
+                                    },
+                                )
+                                .await
+                        }
+                        RemoteConnection::Samba(client) => {
+                            let file_control = control.clone();
+                            client
+                                .upload_file_with_progress(
+                                    &local_path_string,
+                                    &remote_path,
+                                    move |done, _| {
+                                        let file_control = file_control.clone();
+                                        let bandwidth = bandwidth.clone();
+                                        async move {
+                                            file_control
+                                                .wait_until_running()
+                                                .await
+                                                .map_err(anyhow::Error::msg)?;
+                                            bandwidth.progress(done).await;
+                                            Ok(())
+                                        }
+                                    },
+                                )
+                                .await
+                        }
+                        RemoteConnection::GoogleDrive(client) => {
+                            let file_control = control.clone();
+                            client
+                                .upload_file_with_progress(
+                                    &local_path_string,
+                                    &remote_path,
+                                    move |done, _| {
+                                        let file_control = file_control.clone();
+                                        let bandwidth = bandwidth.clone();
+                                        async move {
+                                            file_control
+                                                .wait_until_running()
+                                                .await
+                                                .map_err(anyhow::Error::msg)?;
+                                            bandwidth.progress(done).await;
+                                            Ok(())
+                                        }
+                                    },
+                                )
+                                .await
+                        }
+                        _ => connection.file_system().upload_file(&local_path_string, &remote_path).await,
+                    };
+                    if let Ok(bytes) = &upload_result {
+                        completion_bandwidth.progress(*bytes).await;
                     }
-                    RemoteConnection::Samba(client) => {
-                        let file_control = control.clone();
-                        client
-                            .upload_file_with_progress(&local_path_string, &remote_path, move |_, _| {
-                                let file_control = file_control.clone();
-                                async move { file_control.wait_until_running().await.map_err(anyhow::Error::msg) }
-                            })
-                            .await
+                    let upload_result = match upload_result {
+                        Ok(bytes) if bytes != expected_size => Err(anyhow::anyhow!(
+                            "Upload size verification failed for '{}': expected {expected_size} bytes, but the transfer reported {bytes} bytes.",
+                            relative_path.display()
+                        )),
+                        Ok(bytes) if !matches!(&connection, RemoteConnection::GoogleDrive(_)) => {
+                            verify_remote_file_size(connection.file_system(), &remote_path, expected_size)
+                                .await
+                                .map(|_| bytes)
+                        }
+                        other => other,
+                    };
+                    match upload_result {
+                        Err(error)
+                            if automatic_retry < limits.automatic_retries
+                                && is_retryable_transfer_error(&error) =>
+                        {
+                            automatic_retry += 1;
+                            let detail = format!(
+                                "Temporary transfer failure for '{}'. Reconnecting (attempt {automatic_retry}/{}): {error}",
+                                relative_path.display(),
+                                limits.automatic_retries
+                            );
+                            state.bookmarks.set_transfer_job_retry(
+                                &request.transfer_id,
+                                retry_count_base.saturating_add(automatic_retry),
+                                &detail,
+                            )?;
+                            let _ = app.emit(
+                                "transfer://progress",
+                                DirectoryTransferProgress {
+                                    transfer_id: request.transfer_id.clone(),
+                                    completed_files,
+                                    total_files,
+                                    current_path: relative_path.to_string_lossy().to_string(),
+                                    status: "reconnecting".to_string(),
+                                },
+                            );
+                            tokio::time::sleep(retry_backoff(automatic_retry - 1)).await;
+                            if let Err(reconnect_error) = connection.reconnect().await {
+                                tracing::warn!(
+                                    "Automatic directory-transfer reconnect attempt {automatic_retry} failed: {reconnect_error}"
+                                );
+                            }
+                        }
+                        other => break other,
                     }
-                    _ => connection.file_system().upload_file(&local_path_string, &remote_path).await,
                 };
-                if let Err(error) = upload_result {
-                    state.transfer_controls.lock().await.remove(&request.transfer_id);
-                    return Err(error.to_string());
+                match upload_result {
+                    Ok(bytes) => {
+                        transferred_bytes = transferred_bytes.saturating_add(bytes);
+                        state.bookmarks.update_transfer_job_progress(
+                            &request.transfer_id,
+                            transferred_bytes,
+                            total_bytes,
+                        )?;
+                    }
+                    Err(error) => {
+                        state.transfer_controls.lock().await.remove(&request.transfer_id);
+                        state.bookmarks.set_transfer_job_status(
+                            &request.transfer_id,
+                            "Failed",
+                            &error.to_string(),
+                        )?;
+                        return Err(error.to_string());
+                    }
                 }
                 completed_files += 1;
                 let _ = app.emit(
@@ -2140,14 +3458,17 @@ pub async fn transfer_upload_directory(
         },
     );
     state.transfer_controls.lock().await.remove(&request.transfer_id);
+    state.bookmarks.delete_transfer_job(&request.transfer_id)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        content_hash, parse_remote_modified, reject_symlink_ancestors, remote_child_path,
-        remote_parent_and_name, remote_replace_target, safe_relative_path, Protocol, TransferControl,
+        atomic_upload_path, content_hash, effective_transfer_limits, is_retryable_transfer_error,
+        parse_remote_modified, reject_symlink_ancestors, remote_child_path, remote_parent_and_name,
+        remote_replace_target, reserve_bandwidth, retry_backoff, safe_relative_path, Protocol,
+        TransferControl, TransferScheduler,
     };
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
@@ -2160,6 +3481,121 @@ mod tests {
         let before = content_hash(&file).expect("initial hash");
         std::fs::write(&file, b"after").expect("edited cache");
         assert_ne!(before, content_hash(&file).expect("edited hash"));
+    }
+
+    #[test]
+    fn transfer_retry_policy_uses_bounded_exponential_backoff() {
+        assert_eq!(retry_backoff(0), std::time::Duration::from_millis(500));
+        assert_eq!(retry_backoff(1), std::time::Duration::from_secs(1));
+        assert_eq!(retry_backoff(2), std::time::Duration::from_secs(2));
+        assert_eq!(retry_backoff(3), std::time::Duration::from_secs(4));
+        assert_eq!(retry_backoff(30), std::time::Duration::from_secs(4));
+    }
+
+    #[test]
+    fn transfer_limits_are_bounded_and_allow_disabling_retry_and_bandwidth() {
+        let limits = effective_transfer_limits(99, Some(0), u64::MAX, Some(0), Some(0));
+        assert_eq!(limits.global_concurrency, 16);
+        assert_eq!(limits.connection_concurrency, 1);
+        assert_eq!(limits.global_bandwidth_bps, 10 * 1024 * 1024 * 1024);
+        assert_eq!(limits.connection_bandwidth_bps, 0);
+        assert_eq!(limits.automatic_retries, 0);
+    }
+
+    #[test]
+    fn aggregate_bandwidth_reservations_share_one_schedule() {
+        let now = std::time::Instant::now();
+        let mut next = None;
+        let first = reserve_bandwidth(&mut next, now, 1024, 1024);
+        let second = reserve_bandwidth(&mut next, now, 1024, 1024);
+        assert_eq!(first.duration_since(now), std::time::Duration::from_secs(1));
+        assert_eq!(second.duration_since(now), std::time::Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn transfer_scheduler_releases_queued_work_when_capacity_returns() {
+        let scheduler = TransferScheduler::new();
+        let first = scheduler.acquire("bookmark-a", 1, 1).await;
+        let waiting_scheduler = scheduler.clone();
+        let mut waiting = tokio::spawn(async move { waiting_scheduler.acquire("bookmark-b", 1, 1).await });
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiting).await.is_err());
+        drop(first);
+        let second = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .expect("queued transfer should start")
+            .expect("scheduler task should not panic");
+        drop(second);
+    }
+
+    #[tokio::test]
+    async fn transfer_scheduler_applies_connection_limits_independently() {
+        let scheduler = TransferScheduler::new();
+        let first = scheduler.acquire("bookmark-a", 2, 1).await;
+        let other = scheduler.acquire("bookmark-b", 2, 1).await;
+        let waiting_scheduler = scheduler.clone();
+        let mut same_bookmark =
+            tokio::spawn(async move { waiting_scheduler.acquire("bookmark-a", 2, 1).await });
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(20), &mut same_bookmark)
+            .await
+            .is_err());
+        drop(first);
+        let resumed = tokio::time::timeout(std::time::Duration::from_secs(1), same_bookmark)
+            .await
+            .expect("connection capacity should be released")
+            .expect("scheduler task should not panic");
+        drop(resumed);
+        drop(other);
+    }
+
+    #[tokio::test]
+    async fn queued_transfer_can_be_cancelled_without_waiting_for_capacity() {
+        let scheduler = TransferScheduler::new();
+        let first = scheduler.acquire("bookmark-a", 1, 1).await;
+        let control = Arc::new(TransferControl::new());
+        let waiting_scheduler = scheduler.clone();
+        let waiting_control = control.clone();
+        let waiting = tokio::spawn(async move {
+            waiting_scheduler.acquire_cancellable("bookmark-b", 1, 1, &waiting_control).await
+        });
+        tokio::task::yield_now().await;
+        control.cancelled.store(true, Ordering::Release);
+        scheduler.changed.notify_waiters();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .expect("cancelled queue wait should finish")
+            .expect("scheduler task should not panic");
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("cancelled transfer must not get a permit"),
+        };
+        assert_eq!(error, "Transfer cancelled.");
+        drop(first);
+    }
+
+    #[test]
+    fn transfer_retry_policy_separates_transient_and_permanent_failures() {
+        for message in [
+            "operation timed out",
+            "connection reset by peer",
+            "HTTP 503 Service Unavailable",
+            "429 too many requests",
+            "unexpected EOF",
+        ] {
+            assert!(is_retryable_transfer_error(&anyhow::anyhow!(message)), "{message}");
+        }
+        let wrapped = anyhow::anyhow!("connection reset by peer").context("upload failed");
+        assert!(is_retryable_transfer_error(&wrapped));
+        for message in [
+            "authentication failed",
+            "HTTP 403 Forbidden",
+            "permission denied",
+            "file not found",
+            "checksum verification failed",
+            "transfer cancelled",
+            "connection not found",
+        ] {
+            assert!(!is_retryable_transfer_error(&anyhow::anyhow!(message)), "{message}");
+        }
     }
 
     #[tokio::test]
@@ -2211,6 +3647,18 @@ mod tests {
         assert_eq!(remote_child_path("/uploads", "港便り").unwrap(), "/uploads/港便り");
         assert!(remote_child_path("/uploads", "../private").is_err());
         assert!(remote_child_path("/uploads", "nested/file.txt").is_err());
+    }
+
+    #[test]
+    fn atomic_upload_paths_are_hidden_stable_and_colocated() {
+        let first = atomic_upload_path("/docs/港便り.txt", "transfer-42").unwrap();
+        let second = atomic_upload_path("/docs/港便り.txt", "transfer-42").unwrap();
+        assert_eq!(first, second);
+        assert!(first.starts_with("/docs/.harbor-upload-"));
+        assert!(first.ends_with(".part"));
+        assert_ne!(first, atomic_upload_path("/docs/港便り.txt", "different-transfer").unwrap());
+        assert_ne!(first, atomic_upload_path("/docs/別のファイル.txt", "transfer-42").unwrap());
+        assert!(atomic_upload_path("relative.txt", "transfer-42").is_err());
     }
 
     #[test]

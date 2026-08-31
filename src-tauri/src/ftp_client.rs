@@ -1,13 +1,14 @@
 use anyhow::Result;
 use rustls_platform_verifier::ConfigVerifierExt;
 use serde::Deserialize;
+use std::future::Future;
 use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 use suppaftp::tokio::{AsyncFtpStream, AsyncRustlsConnector, AsyncRustlsFtpStream};
 use suppaftp::types::Mode;
 use suppaftp::Status;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 
 use crate::sftp_client::{FileEntry, FileEntryType};
 
@@ -42,12 +43,13 @@ macro_rules! ftp_stream {
 /// FTP/FTPS client using `suppaftp` with async support.
 pub struct FtpClient {
     stream: Option<FtpStreamKind>,
+    config: Option<FtpConfig>,
 }
 
 impl FtpClient {
     #[cfg(test)]
     pub fn new() -> Self {
-        Self { stream: None }
+        Self { stream: None, config: None }
     }
 
     /// Connect to an FTP server, authenticate, and switch to binary transfer mode.
@@ -199,7 +201,7 @@ impl FtpClient {
 
         tracing::info!("FTP connection fully established to {}", addr);
 
-        Ok(Self { stream: Some(stream_kind) })
+        Ok(Self { stream: Some(stream_kind), config: Some(config.clone()) })
     }
 
     #[cfg(test)]
@@ -219,6 +221,20 @@ impl FtpClient {
             }
         }
         Ok(())
+    }
+
+    pub async fn reconnect(&mut self) -> Result<()> {
+        let config =
+            self.config.clone().ok_or_else(|| anyhow::anyhow!("FTP reconnect settings are unavailable."))?;
+        let _ = self.disconnect().await;
+        *self = Self::connect(&config).await?;
+        Ok(())
+    }
+
+    pub async fn duplicate(&self) -> Result<Self> {
+        let config =
+            self.config.clone().ok_or_else(|| anyhow::anyhow!("FTP transfer settings are unavailable."))?;
+        Self::connect(&config).await
     }
 
     // ===== File Operations =====
@@ -270,6 +286,119 @@ impl FtpClient {
         let total_bytes = data.len() as u64;
         tokio::fs::write(local_path, data).await?;
         Ok(total_bytes)
+    }
+
+    pub async fn download_file_resumable_with_progress<F, Fut>(
+        &mut self,
+        remote_path: &str,
+        local_path: &str,
+        requested_offset: u64,
+        mut on_progress: F,
+    ) -> Result<u64>
+    where
+        F: FnMut(u64, u64) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        let total = ftp_stream!(self, s => {
+            s.size(remote_path).await.map_err(|error| {
+                anyhow::anyhow!("Failed to inspect remote file '{}': {}", remote_path, error)
+            })? as u64
+        });
+        let local_size = tokio::fs::metadata(local_path).await.map(|value| value.len()).unwrap_or(0);
+        let requested_offset = requested_offset.min(local_size).min(total);
+        let offset = if requested_offset > 0 {
+            ftp_stream!(self, s => {
+                if s.resume_transfer(requested_offset as usize).await.is_ok() {
+                    requested_offset
+                } else {
+                    0
+                }
+            })
+        } else {
+            0
+        };
+        let mut output = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(offset == 0)
+            .open(local_path)
+            .await?;
+        output.set_len(offset).await?;
+        output.seek(SeekFrom::Start(offset)).await?;
+        let mut transferred = offset;
+        on_progress(transferred, total).await?;
+        ftp_stream!(self, s => {
+            let mut data_stream = s.retr_as_stream(remote_path).await.map_err(|error| {
+                anyhow::anyhow!("Failed to resume download '{}': {}", remote_path, error)
+            })?;
+            let mut buffer = vec![0u8; 64 * 1024];
+            loop {
+                let count = data_stream.read(&mut buffer).await?;
+                if count == 0 { break; }
+                output.write_all(&buffer[..count]).await?;
+                transferred += count as u64;
+                on_progress(transferred, total).await?;
+            }
+            output.flush().await?;
+            s.finalize_retr_stream(data_stream).await.map_err(|error| {
+                anyhow::anyhow!("Failed to finalize resumed download '{}': {}", remote_path, error)
+            })?;
+        });
+        Ok(transferred)
+    }
+
+    pub async fn upload_file_resumable(
+        &mut self,
+        local_path: &str,
+        remote_path: &str,
+        requested_offset: u64,
+    ) -> Result<u64> {
+        let data = tokio::fs::read(local_path)
+            .await
+            .map_err(|error| anyhow::anyhow!("Failed to read local file '{}': {}", local_path, error))?;
+        let total = data.len() as u64;
+        let remote_size = ftp_stream!(self, s => { s.size(remote_path).await.ok().unwrap_or(0) as u64 });
+        let offset = if requested_offset > 0 && remote_size >= requested_offset && remote_size <= total {
+            remote_size
+        } else {
+            0
+        };
+        if offset == 0 {
+            return self.upload_file(local_path, remote_path).await;
+        }
+        let resume_supported = ftp_stream!(self, s => { s.resume_transfer(offset as usize).await.is_ok() });
+        if !resume_supported {
+            return self.upload_file(local_path, remote_path).await;
+        }
+        let stream = self.stream.as_mut().ok_or_else(|| anyhow::anyhow!("FTP session not connected"))?;
+        let mut reader = Cursor::new(&data[offset as usize..]);
+        match stream {
+            FtpStreamKind::Plain(stream) => {
+                stream.put_file(remote_path, &mut reader).await.map_err(|error| {
+                    anyhow::anyhow!("Failed to resume upload '{}': {}", remote_path, error)
+                })?;
+            }
+            FtpStreamKind::Secure(stream) => {
+                let mut data_stream = stream.put_with_stream(remote_path).await.map_err(|error| {
+                    anyhow::anyhow!("Failed to resume upload '{}': {}", remote_path, error)
+                })?;
+                tokio::io::copy(&mut reader, &mut data_stream).await?;
+                data_stream.shutdown().await?;
+                let mut tcp_stream = data_stream.into_tcp_stream()?;
+                tcp_stream.shutdown().await?;
+                let mut shutdown_response = Vec::new();
+                tokio::time::timeout(Duration::from_secs(10), tcp_stream.read_to_end(&mut shutdown_response))
+                    .await
+                    .map_err(|_| {
+                        anyhow::anyhow!("FTPS server did not close resumed upload data connection")
+                    })??;
+                drop(tcp_stream);
+                tokio::time::timeout(Duration::from_secs(30), stream.finalize_put_stream(tokio::io::sink()))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("FTPS server did not confirm resumed upload"))??;
+            }
+        }
+        Ok(total)
     }
 
     /// Upload a local file to a remote path. Returns bytes uploaded.
@@ -676,10 +805,12 @@ mod tests {
         client.disconnect().await.expect("disconnect should succeed");
         assert!(!client.is_connected(), "client should be disconnected");
 
-        let mut recovered =
-            FtpClient::connect(&cfg).await.expect("reconnect after disconnect should succeed");
-        recovered.list_dir("/").await.expect("list after reconnect");
-        recovered.disconnect().await.expect("disconnect recovered session");
+        client.reconnect().await.expect("reconnect after disconnect should succeed");
+        client.list_dir("/").await.expect("list after reconnect");
+        let mut parallel = client.duplicate().await.expect("open parallel FTP transfer session");
+        parallel.list_dir("/").await.expect("list through parallel FTP session");
+        parallel.disconnect().await.expect("disconnect parallel FTP session");
+        client.disconnect().await.expect("disconnect recovered session");
     }
 
     // ---- 2. Connect with wrong credentials --------------------------------
@@ -753,13 +884,22 @@ mod tests {
 
         // 4b. Upload a file
         let tmp_upload = std::env::temp_dir().join("harbor_e2e_upload.txt");
+        let tmp_partial_upload = std::env::temp_dir().join("harbor_e2e_partial_upload.txt");
         let upload_content = vec![b'H'; 2 * 1024 * 1024 + 17];
+        let resume_offset = 512 * 1024;
         tokio::fs::write(&tmp_upload, &upload_content).await.expect("write temp file");
-
-        let uploaded_bytes = client
-            .upload_file(tmp_upload.to_str().unwrap(), &test_file_remote)
+        tokio::fs::write(&tmp_partial_upload, &upload_content[..resume_offset])
             .await
-            .expect("upload_file should succeed");
+            .expect("write partial temp file");
+
+        client
+            .upload_file(tmp_partial_upload.to_str().unwrap(), &test_file_remote)
+            .await
+            .expect("partial upload should succeed");
+        let uploaded_bytes = client
+            .upload_file_resumable(tmp_upload.to_str().unwrap(), &test_file_remote, resume_offset as u64)
+            .await
+            .expect("resumable upload should succeed");
         assert_eq!(uploaded_bytes, upload_content.len() as u64);
         eprintln!("Uploaded {} bytes to {}", uploaded_bytes, test_file_remote);
         client
@@ -782,10 +922,18 @@ mod tests {
 
         // 4d. Download the file and verify contents
         let tmp_download = std::env::temp_dir().join("harbor_e2e_download.txt");
-        let downloaded_bytes = client
-            .download_file(&test_file_remote, tmp_download.to_str().unwrap())
+        tokio::fs::write(&tmp_download, &upload_content[..resume_offset])
             .await
-            .expect("download_file should succeed");
+            .expect("write partial download");
+        let downloaded_bytes = client
+            .download_file_resumable_with_progress(
+                &test_file_remote,
+                tmp_download.to_str().unwrap(),
+                resume_offset as u64,
+                |_, _| async { Ok(()) },
+            )
+            .await
+            .expect("resumable download should succeed");
         assert_eq!(downloaded_bytes, upload_content.len() as u64);
 
         let downloaded_data = tokio::fs::read(&tmp_download).await.expect("read downloaded");
@@ -819,6 +967,7 @@ mod tests {
 
         // Cleanup temp files
         let _ = tokio::fs::remove_file(&tmp_upload).await;
+        let _ = tokio::fs::remove_file(&tmp_partial_upload).await;
         let _ = tokio::fs::remove_file(&tmp_download).await;
 
         client.disconnect().await.ok();

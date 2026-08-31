@@ -5,6 +5,8 @@ project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 compose_file="$project_dir/tests/integration/docker-compose.yml"
 ci_compose_file="$project_dir/tests/integration/docker-compose.ci.yml"
 cert_dir="$project_dir/tests/integration/.certs"
+s3_host_port=${S3_TEST_HOST_PORT:-19000}
+export S3_TEST_HOST_PORT="$s3_host_port"
 
 compose() {
   if [ "${CI:-}" = "true" ]; then
@@ -74,7 +76,7 @@ WEBDAV_TEST_CA_CERT="$cert_dir/ca.crt" WEBDAV_TEST_HOST=127.0.0.1 WEBDAV_TEST_PO
 compose stop webdav nextcloud-https nextcloud
 compose up --wait s3
 
-S3_TEST_ENDPOINT=http://127.0.0.1:9000 S3_TEST_ACCESS_KEY=harboraccess S3_TEST_SECRET_KEY=harborsecret123 \
+S3_TEST_ENDPOINT="http://127.0.0.1:$s3_host_port" S3_TEST_ACCESS_KEY=harboraccess S3_TEST_SECRET_KEY=harborsecret123 \
   cargo test --manifest-path "$project_dir/src-tauri/Cargo.toml" s3_client::tests::live_s3_ -- --test-threads=1
 
 compose stop s3

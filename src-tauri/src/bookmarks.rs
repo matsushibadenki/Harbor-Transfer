@@ -38,6 +38,16 @@ pub struct Bookmark {
     pub smb_domain: Option<String>,
     #[serde(default)]
     pub smb_guest: bool,
+    #[serde(default)]
+    pub google_drive_location_kind: Option<String>,
+    #[serde(default)]
+    pub google_drive_location_id: Option<String>,
+    #[serde(default)]
+    pub transfer_max_concurrent: Option<u32>,
+    #[serde(default)]
+    pub transfer_bandwidth_limit_kbps: Option<u64>,
+    #[serde(default)]
+    pub transfer_retry_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,6 +77,25 @@ pub struct TransferHistory {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TransferJob {
+    pub id: String,
+    pub connection_id: String,
+    pub name: String,
+    pub direction: String,
+    pub local_path: String,
+    pub remote_path: String,
+    pub status: String,
+    pub detail: String,
+    pub transferred_bytes: u64,
+    pub total_bytes: u64,
+    pub retry_count: u32,
+    pub conflict_policy: String,
+    pub is_directory: bool,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SyncHistory {
     pub id: String,
     pub direction: String,
@@ -81,6 +110,7 @@ pub struct SyncHistory {
     pub completed_at: String,
 }
 
+#[derive(Clone)]
 pub struct BookmarkStore {
     database_path: PathBuf,
 }
@@ -114,6 +144,8 @@ impl BookmarkStore {
                     smb_share TEXT,
                     smb_domain TEXT,
                     smb_guest INTEGER NOT NULL DEFAULT 0,
+                    google_drive_location_kind TEXT,
+                    google_drive_location_id TEXT,
                     sort_order INTEGER NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
@@ -135,6 +167,28 @@ impl BookmarkStore {
                     detail TEXT NOT NULL DEFAULT '',
                     bytes INTEGER NOT NULL DEFAULT 0,
                     completed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS transfer_jobs (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    connection_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    local_path TEXT NOT NULL,
+                    remote_path TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    detail TEXT NOT NULL DEFAULT '',
+                    transferred_bytes INTEGER NOT NULL DEFAULT 0,
+                    total_bytes INTEGER NOT NULL DEFAULT 0,
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    conflict_policy TEXT NOT NULL DEFAULT 'ask',
+                    is_directory INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS s3_multipart_uploads (
+                    transfer_id TEXT PRIMARY KEY NOT NULL,
+                    state_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(transfer_id) REFERENCES transfer_jobs(id) ON DELETE CASCADE
                 );
                 CREATE TABLE IF NOT EXISTS sync_history (
                     id TEXT PRIMARY KEY NOT NULL,
@@ -170,6 +224,14 @@ impl BookmarkStore {
             let _ = connection.execute("ALTER TABLE bookmarks ADD COLUMN smb_domain TEXT", []);
             let _ = connection
                 .execute("ALTER TABLE bookmarks ADD COLUMN smb_guest INTEGER NOT NULL DEFAULT 0", []);
+            let _ =
+                connection.execute("ALTER TABLE bookmarks ADD COLUMN google_drive_location_kind TEXT", []);
+            let _ = connection.execute("ALTER TABLE bookmarks ADD COLUMN google_drive_location_id TEXT", []);
+            let _ =
+                connection.execute("ALTER TABLE bookmarks ADD COLUMN transfer_max_concurrent INTEGER", []);
+            let _ = connection
+                .execute("ALTER TABLE bookmarks ADD COLUMN transfer_bandwidth_limit_kbps INTEGER", []);
+            let _ = connection.execute("ALTER TABLE bookmarks ADD COLUMN transfer_retry_count INTEGER", []);
             let has_sort_order = connection.query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('bookmarks') WHERE name = 'sort_order'",
                 [],
@@ -214,7 +276,8 @@ impl BookmarkStore {
             let mut statement = connection.prepare(
                 "SELECT id, name, protocol, host, port, username, initial_path, key_path, key_passphrase_not_required, host_key, local_directory, tags,
                         s3_region, s3_endpoint, s3_force_path_style, s3_preserve_empty_directories,
-                        smb_share, smb_domain, smb_guest
+                        smb_share, smb_domain, smb_guest, google_drive_location_kind, google_drive_location_id,
+                        transfer_max_concurrent, transfer_bandwidth_limit_kbps, transfer_retry_count
                  FROM bookmarks ORDER BY sort_order ASC, name COLLATE NOCASE, id",
             )?;
             let bookmarks = statement
@@ -239,6 +302,11 @@ impl BookmarkStore {
                         smb_share: row.get(16)?,
                         smb_domain: row.get(17)?,
                         smb_guest: row.get(18)?,
+                        google_drive_location_kind: row.get(19)?,
+                        google_drive_location_id: row.get(20)?,
+                        transfer_max_concurrent: row.get(21)?,
+                        transfer_bandwidth_limit_kbps: row.get(22)?,
+                        transfer_retry_count: row.get(23)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -258,8 +326,8 @@ impl BookmarkStore {
                 transaction.execute("UPDATE bookmarks SET sort_order = sort_order + 1", [])?;
             }
             transaction.execute(
-                "INSERT INTO bookmarks (id, name, protocol, host, port, username, initial_path, key_path, key_passphrase_not_required, host_key, local_directory, tags, s3_region, s3_endpoint, s3_force_path_style, s3_preserve_empty_directories, smb_share, smb_domain, smb_guest, sort_order, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, 0, CURRENT_TIMESTAMP)
+                "INSERT INTO bookmarks (id, name, protocol, host, port, username, initial_path, key_path, key_passphrase_not_required, host_key, local_directory, tags, s3_region, s3_endpoint, s3_force_path_style, s3_preserve_empty_directories, smb_share, smb_domain, smb_guest, google_drive_location_kind, google_drive_location_id, transfer_max_concurrent, transfer_bandwidth_limit_kbps, transfer_retry_count, sort_order, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, 0, CURRENT_TIMESTAMP)
                  ON CONFLICT(id) DO UPDATE SET name=excluded.name, protocol=excluded.protocol,
                  host=excluded.host, port=excluded.port, username=excluded.username,
                  initial_path=excluded.initial_path, key_path=excluded.key_path,
@@ -270,13 +338,21 @@ impl BookmarkStore {
                  s3_preserve_empty_directories=excluded.s3_preserve_empty_directories,
                  smb_share=excluded.smb_share, smb_domain=excluded.smb_domain,
                  smb_guest=excluded.smb_guest,
+                 google_drive_location_kind=excluded.google_drive_location_kind,
+                 google_drive_location_id=excluded.google_drive_location_id,
+                 transfer_max_concurrent=excluded.transfer_max_concurrent,
+                 transfer_bandwidth_limit_kbps=excluded.transfer_bandwidth_limit_kbps,
+                 transfer_retry_count=excluded.transfer_retry_count,
                  updated_at=CURRENT_TIMESTAMP",
                 params![bookmark.id, bookmark.name, bookmark.protocol, bookmark.host, bookmark.port,
                     bookmark.username, bookmark.initial_path, bookmark.key_path,
                     bookmark.key_passphrase_not_required, bookmark.host_key, bookmark.local_directory,
                     bookmark.tags, bookmark.s3_region, bookmark.s3_endpoint,
                     bookmark.s3_force_path_style, bookmark.s3_preserve_empty_directories,
-                    bookmark.smb_share, bookmark.smb_domain, bookmark.smb_guest],
+                    bookmark.smb_share, bookmark.smb_domain, bookmark.smb_guest,
+                    bookmark.google_drive_location_kind, bookmark.google_drive_location_id,
+                    bookmark.transfer_max_concurrent, bookmark.transfer_bandwidth_limit_kbps,
+                    bookmark.transfer_retry_count],
             )?;
             transaction.commit()?;
             Ok(())
@@ -423,6 +499,157 @@ impl BookmarkStore {
         })
     }
 
+    pub fn save_transfer_job(&self, job: &TransferJob) -> Result<(), String> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO transfer_jobs (id, connection_id, name, direction, local_path, remote_path, status, detail, transferred_bytes, total_bytes, retry_count, conflict_policy, is_directory, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, CURRENT_TIMESTAMP)
+                 ON CONFLICT(id) DO UPDATE SET connection_id=excluded.connection_id,
+                 name=excluded.name, direction=excluded.direction, local_path=excluded.local_path,
+                 remote_path=excluded.remote_path, status=excluded.status, detail=excluded.detail,
+                 transferred_bytes=excluded.transferred_bytes, total_bytes=excluded.total_bytes,
+                 retry_count=transfer_jobs.retry_count + 1, conflict_policy=excluded.conflict_policy,
+                 is_directory=excluded.is_directory, updated_at=CURRENT_TIMESTAMP",
+                params![job.id, job.connection_id, job.name, job.direction, job.local_path,
+                    job.remote_path, job.status, job.detail, job.transferred_bytes, job.total_bytes,
+                    job.retry_count, job.conflict_policy, job.is_directory],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn update_transfer_job_progress(&self, id: &str, transferred: u64, total: u64) -> Result<(), String> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "UPDATE transfer_jobs SET transferred_bytes=?2, total_bytes=?3, updated_at=CURRENT_TIMESTAMP WHERE id=?1",
+                params![id, transferred, total],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn transfer_job_checkpoint(&self, id: &str) -> Result<Option<(u64, u64, u32)>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT transferred_bytes, total_bytes, retry_count FROM transfer_jobs WHERE id=?1",
+            )?;
+            let mut rows = statement.query(params![id])?;
+            rows.next()?.map(|row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).transpose()
+        })
+    }
+
+    pub fn set_transfer_job_status(&self, id: &str, status: &str, detail: &str) -> Result<(), String> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "UPDATE transfer_jobs SET status=?2, detail=?3,
+                 updated_at=CURRENT_TIMESTAMP WHERE id=?1",
+                params![id, status, detail],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn set_transfer_job_retry(&self, id: &str, retry_count: u32, detail: &str) -> Result<(), String> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "UPDATE transfer_jobs SET status='Running', retry_count=?2, detail=?3, updated_at=CURRENT_TIMESTAMP WHERE id=?1",
+                params![id, retry_count, detail],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn delete_transfer_job(&self, id: &str) -> Result<(), String> {
+        self.with_connection(|connection| {
+            connection.execute("DELETE FROM s3_multipart_uploads WHERE transfer_id=?1", params![id])?;
+            connection.execute("DELETE FROM transfer_jobs WHERE id=?1", params![id])?;
+            Ok(())
+        })
+    }
+
+    pub fn save_s3_multipart_state(&self, transfer_id: &str, state_json: &str) -> Result<(), String> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO s3_multipart_uploads (transfer_id, state_json, updated_at)
+                 VALUES (?1, ?2, CURRENT_TIMESTAMP)
+                 ON CONFLICT(transfer_id) DO UPDATE SET state_json=excluded.state_json,
+                 updated_at=CURRENT_TIMESTAMP",
+                params![transfer_id, state_json],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn s3_multipart_state(&self, transfer_id: &str) -> Result<Option<String>, String> {
+        self.with_connection(|connection| {
+            let mut statement =
+                connection.prepare("SELECT state_json FROM s3_multipart_uploads WHERE transfer_id=?1")?;
+            let mut rows = statement.query(params![transfer_id])?;
+            rows.next()?.map(|row| row.get(0)).transpose()
+        })
+    }
+
+    pub fn delete_s3_multipart_state(&self, transfer_id: &str) -> Result<(), String> {
+        self.with_connection(|connection| {
+            connection
+                .execute("DELETE FROM s3_multipart_uploads WHERE transfer_id=?1", params![transfer_id])?;
+            Ok(())
+        })
+    }
+
+    pub fn transfer_jobs(&self) -> Result<Vec<TransferJob>, String> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "UPDATE transfer_jobs SET status='Failed',
+                 detail='Transfer was interrupted when Harbor Transfer closed.',
+                 updated_at=CURRENT_TIMESTAMP WHERE status IN ('Running', 'Queued', 'Paused')",
+                [],
+            )?;
+            let mut statement = connection.prepare(
+                "SELECT id, connection_id, name, direction, local_path, remote_path, status,
+                        detail, transferred_bytes, total_bytes, retry_count, conflict_policy,
+                        is_directory, updated_at
+                 FROM transfer_jobs ORDER BY updated_at DESC LIMIT 1000",
+            )?;
+            let jobs = statement
+                .query_map([], |row| {
+                    Ok(TransferJob {
+                        id: row.get(0)?,
+                        connection_id: row.get(1)?,
+                        name: row.get(2)?,
+                        direction: row.get(3)?,
+                        local_path: row.get(4)?,
+                        remote_path: row.get(5)?,
+                        status: row.get(6)?,
+                        detail: row.get(7)?,
+                        transferred_bytes: row.get(8)?,
+                        total_bytes: row.get(9)?,
+                        retry_count: row.get(10)?,
+                        conflict_policy: row.get(11)?,
+                        is_directory: row.get(12)?,
+                        updated_at: row.get(13)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(jobs)
+        })
+    }
+
+    pub fn clear_transfer_jobs(&self) -> Result<(), String> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "DELETE FROM s3_multipart_uploads WHERE transfer_id IN
+                 (SELECT id FROM transfer_jobs WHERE status NOT IN ('Running', 'Paused', 'Queued'))",
+                [],
+            )?;
+            connection.execute(
+                "DELETE FROM transfer_jobs WHERE status NOT IN ('Running', 'Paused', 'Queued')",
+                [],
+            )?;
+            Ok(())
+        })
+    }
+
     pub fn record_sync_history(&self, sync: &SyncHistory) -> Result<(), String> {
         self.with_connection(|connection| {
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -498,7 +725,7 @@ impl BookmarkStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{Bookmark, BookmarkStore, SyncHistory, TransferHistory};
+    use super::{Bookmark, BookmarkStore, SyncHistory, TransferHistory, TransferJob};
 
     fn sample_bookmark() -> Bookmark {
         Bookmark {
@@ -521,6 +748,11 @@ mod tests {
             smb_share: None,
             smb_domain: None,
             smb_guest: false,
+            google_drive_location_kind: None,
+            google_drive_location_id: None,
+            transfer_max_concurrent: None,
+            transfer_bandwidth_limit_kbps: None,
+            transfer_retry_count: None,
         }
     }
 
@@ -538,6 +770,11 @@ mod tests {
         bookmark.smb_share = Some("Documents".to_string());
         bookmark.smb_domain = Some("WORKGROUP".to_string());
         bookmark.smb_guest = true;
+        bookmark.google_drive_location_kind = Some("sharedDrive".to_string());
+        bookmark.google_drive_location_id = Some("drive-123".to_string());
+        bookmark.transfer_max_concurrent = Some(2);
+        bookmark.transfer_bandwidth_limit_kbps = Some(2048);
+        bookmark.transfer_retry_count = Some(5);
         store.save(&bookmark).expect("update bookmark");
         let bookmarks = store.list().expect("list bookmarks");
 
@@ -550,6 +787,11 @@ mod tests {
         assert_eq!(bookmarks[0].smb_share.as_deref(), Some("Documents"));
         assert_eq!(bookmarks[0].smb_domain.as_deref(), Some("WORKGROUP"));
         assert!(bookmarks[0].smb_guest);
+        assert_eq!(bookmarks[0].google_drive_location_kind.as_deref(), Some("sharedDrive"));
+        assert_eq!(bookmarks[0].google_drive_location_id.as_deref(), Some("drive-123"));
+        assert_eq!(bookmarks[0].transfer_max_concurrent, Some(2));
+        assert_eq!(bookmarks[0].transfer_bandwidth_limit_kbps, Some(2048));
+        assert_eq!(bookmarks[0].transfer_retry_count, Some(5));
     }
 
     #[test]
@@ -689,6 +931,53 @@ mod tests {
         assert_eq!(history[0].bytes, 42);
         store.clear_transfer_history().expect("clear transfer history");
         assert!(store.transfer_history().expect("list cleared transfer history").is_empty());
+    }
+
+    #[test]
+    fn restores_interrupted_transfer_jobs_with_retry_context() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = BookmarkStore::new(directory.path()).expect("bookmark store");
+        let job = TransferJob {
+            id: "transfer-1".to_string(),
+            connection_id: "bookmark-1".to_string(),
+            name: "archive.zip".to_string(),
+            direction: "Upload".to_string(),
+            local_path: "/tmp/archive.zip".to_string(),
+            remote_path: "/uploads/archive.zip".to_string(),
+            status: "Running".to_string(),
+            detail: String::new(),
+            transferred_bytes: 4_194_304,
+            total_bytes: 16_777_216,
+            retry_count: 0,
+            conflict_policy: "overwrite".to_string(),
+            is_directory: false,
+            updated_at: String::new(),
+        };
+        store.save_transfer_job(&job).expect("save running job");
+        let multipart = r#"{"uploadId":"upload-1","parts":[1]}"#;
+        store.save_s3_multipart_state(&job.id, multipart).expect("save multipart state");
+        store.update_transfer_job_progress(&job.id, 8_388_608, job.total_bytes).expect("persist progress");
+        store
+            .set_transfer_job_retry(&job.id, 2, "Temporary connection failure; reconnecting")
+            .expect("persist automatic retry context");
+        assert_eq!(
+            store.transfer_job_checkpoint(&job.id).expect("read checkpoint"),
+            Some((8_388_608, job.total_bytes, 2))
+        );
+
+        let restored = store.transfer_jobs().expect("restore transfer jobs");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].status, "Failed");
+        assert!(restored[0].detail.contains("interrupted"));
+        assert_eq!(restored[0].transferred_bytes, 8_388_608);
+        assert_eq!(restored[0].retry_count, 2);
+        assert_eq!(restored[0].connection_id, "bookmark-1");
+        assert_eq!(restored[0].conflict_policy, "overwrite");
+        assert_eq!(store.s3_multipart_state(&job.id).unwrap().as_deref(), Some(multipart));
+
+        store.clear_transfer_jobs().expect("clear restored jobs");
+        assert!(store.transfer_jobs().expect("list cleared jobs").is_empty());
+        assert!(store.s3_multipart_state(&job.id).unwrap().is_none());
     }
 
     #[test]

@@ -38,7 +38,7 @@
 - [Done] Rust全ターゲットへClippy警告ゼロ検査を実施し、Samba接続保持による列挙型肥大化を解消
 - [Done] Samba（SMB 2/3）を既存の閲覧・ファイル操作・転送・同期機能へ統合し、Phase 8を完了
 - [Done] ユーザー所有のGCPプロジェクトとOAuth Client IDを使うGoogle Drive認証、Keychain保存、My Drive基本操作を統合
-- [Next] Google Driveの共有ドライブ、ネイティブGoogle文書の書き出し、レート制限への再試行を実装
+- [Done] Google Driveの共有アイテム／共有ドライブ、ネイティブGoogle文書の書き出し形式選択、レート制限への再試行を実装し、Phase 9を完了
 - [Next] アプリ再起動や通信切断後も安全に継続できる転送再開、永続キュー、チェックサム検証を実装
 - [Later] デュアルペイン、サーバー間転送、高度なSSH認証、再帰検索、Quick Look、追加クラウド、自動化を段階的に実装
 
@@ -174,18 +174,18 @@
 - [Done] Docker Samba共有でUnicode名、空フォルダ、2 MiB超転送、取消時の部分ファイル削除、権限拒否、切断後の再接続を統合検証
 - [Later] Kerberos、DFS、Bonjourによる共有検出、macOS Keychainのネットワークパスワードとの連携を評価
 
-## Phase 9 — Google Drive [Next]
+## Phase 9 — Google Drive [Done]
 
 **完了条件:** Google Drive APIへ安全に認証し、マイドライブと共有ドライブで閲覧・転送・基本ファイル操作を利用できる。
 
 - [Done] OAuth 2.0 Authorization Code + PKCE（S256）、ランダムな`state`、loopback redirectの認証設計を実装
 - [Done] Access TokenとRefresh TokenをmacOS Keychainへ保存し、ブックマークと書き出しデータから除外
 - [Done] ユーザー自身によるGCPプロジェクト作成、Drive API有効化、同意画面、Desktop Client ID発行を支援する環境設定UIを3言語で追加
-- [Next] マイドライブに加えて共有アイテムと共有ドライブを選択できる接続設定を追加
+- [Done] マイドライブに加えて共有アイテムと共有ドライブを選択できる接続設定を追加
 - [Done] Google Driveのfile IDを基準にしたアダプタを`RemoteFileSystem`へ統合し、同一フォルダの同名項目を表示名を変えず個別に選択・操作できるパス変換を実装
 - [Done] 一覧のページネーション、フォルダ作成、改名、移動、ゴミ箱への削除、通常ファイルのダウンロードを実装
 - [Done] resumable uploadと既存の転送キューへの基本統合を実装
-- [Next] 転送の停止・取消、APIレート制限の指数バックオフ、再開可能なchunk uploadをGoogle Drive向けに追加
+- [Done] 転送の停止・取消、APIレート制限の上限付き指数バックオフ、8 MiB単位の再開可能なchunk uploadをGoogle Drive向けに追加
 - [Done] Google Docs／Sheets／SlidesをDOCX／XLSX／PPTXへ、DrawingsをPDFへ安全にエクスポートしてダウンロード可能にする
 - [Done] Google Driveの一覧取得済みファイルIDを再利用し、深いフォルダを開く際の階層ごとのAPI再照会を削減
 - [Done] Google Drive内部IDを含む実パスと表示・編集用パスを分離し、フォルダ移動後も親階層を保持して表示
@@ -193,7 +193,7 @@
 - [Done] Tauriのファイルドロップと競合するHTML5方式を廃止し、Pointer Eventsによるブックマーク順序入れ替えとSQLite保存を実装
 - [Done] サイドメニューとファイル領域の区切りをドラッグして幅を変更し、設定をウインドウ間で保存可能にする
 - [Done] ファイル選択だけではFinderドラッグ用キャッシュを作らず、実際のドラッグ開始時だけ転送準備を行う
-- [Next] Googleネイティブ文書のエクスポート形式選択と、再アップロード時に別ファイルになる制約の詳細UIを追加
+- [Done] Google Docs／Sheets／Slides／Drawingsのエクスポート形式選択と、再アップロード時に別ファイルになる制約の詳細UIを3言語で追加
 - [Later] 共有ドライブ権限、ショートカット、容量制限、変更競合を含む実アカウント統合テストを追加
 - [Later] 一方向同期へ統合し、自動削除を行わず、実行前プレビューと競合保護を維持
 
@@ -228,14 +228,14 @@ Cyberduck、Transmit、ForkLift、FileZilla Pro、WinSCPとの比較では、Har
 
 **完了条件:** 通信切断やアプリ再起動が発生しても転送状態を失わず、対応プロトコルでは転送済み範囲から安全に再開し、転送結果を検証できる。
 
-- [Next] 実行中・待機中・失敗中の転送ジョブ、競合方針、再試行情報をSQLiteへ保存し、アプリ再起動後に復元
-- [Next] FTP、SFTP、WebDAVのrange／append対応を能力判定し、中断位置からアップロード・ダウンロードを再開
-- [Next] S3 multipart upload IDと完了済みpartを安全に保持し、再起動後の継続または明示的abortを実装
-- [Next] Google Drive resumable upload sessionを復元し、期限切れsessionは新規sessionへ安全に切り替え
-- [Next] 一時名称へアップロードし、サイズ・チェックサム確認後にrenameするAtomic Uploadを対応可能なプロトコルへ実装
-- [Next] SHA-256を既定とする転送後検証を追加し、サーバー側checksum拡張、S3 checksum metadata、ローカル計算を能力に応じて使い分け
-- [Next] 一時的な通信障害、レート制限、サーバー切断に対する上限付き指数バックオフと自動再接続を実装
-- [Next] アプリ全体およびブックマーク単位で同時転送数、帯域上限、再試行回数を設定可能にする
+- [Done] 実行中・停止中・失敗中のファイル／フォルダ転送、競合方針、4 MiB単位の進捗、再試行情報をSQLiteへ保存し、アプリ再起動後に中断理由付きで復元
+- [Done] FTP／FTPSのREST、SFTPのseek、WebDAVのRange対応を能力判定し、保存済み位置から転送を再開。非対応のFTP／WebDAV操作は破損を避けて先頭から安全に再実行
+- [Done] S3 multipart upload ID、partサイズ、ローカル更新時刻、完了済みpartとETagをSQLiteへ保存。再起動後はListPartsでS3側の状態を照合して継続し、入力変更・期限切れsessionは安全に再作成、明示的キャンセル時はabort
+- [Done] Google Drive resumable upload session URLをmacOS Keychain Vaultへ、進捗をSQLiteへ保存。再起動後は308 Rangeで実offsetを照合し、完了済み・410 Gone・入力変更を判定して安全に継続または新規sessionへ切り替え
+- [Done] WebDAVは同一collectionの隠し一時resourceへPUTし、PROPFINDのサーバー報告サイズを検証して`MOVE Overwrite`で原子的に置換。単一ファイルとフォルダ内ファイルの両経路へ適用し、失敗時は元ファイルを維持。S3 multipartとGoogle Drive resumableはサービス側の完了操作まで新内容を非公開にする方式を継続（SFTP v3、FTP／FTPS、現行SMBライブラリは既存ファイルの原子的置換を保証できないため従来動作を維持）
+- [Done] S3アップロードはローカルSHA-256をresumable sessionとobject metadataへ保存し、完了後にリモートobjectをストリーミング再読込して独立計算・照合。S3ダウンロードも一時ファイルとリモート再読込のSHA-256一致後だけ置換。その他のプロトコルはサーバー報告サイズ（取得不能時は転送APIの確定byte数）を必須検証する能力別フォールバックとし、検証方式を英語・日本語・简体中文の転送履歴へ記録
+- [Done] 一時的な通信障害、HTTP 429／5xx、サーバー切断を判別し、単一ファイルのアップロード／ダウンロードとフォルダアップロードを最大3回（500 ms、1 s、2 s）の指数バックオフで自動再試行。FTP／FTPS、SFTP、WebDAV、SMBは保存済みの接続設定から再接続し、S3／Google DriveはSDK・HTTP clientの接続poolとresumable stateを継続利用。認証、権限、パス不正、容量、取消、サイズ／checksum不一致は再試行せず即時停止し、累積再試行回数・理由・再開位置をSQLiteへ保存。再接続中の状態を英語・日本語・简体中文の転送キューへ表示
+- [Done] 環境設定でアプリ全体の同時転送数（1〜16）、集約帯域上限（KB/s、0は無制限）、自動再試行回数（0〜10）を指定し、ブックマークごとに継承または上書き可能にする。待機ジョブをSQLiteへ`Queued`として保存し、英語・日本語・简体中文の転送キューへ表示。共通／接続別カウンターを持つ上限制御と、全転送・接続単位で予約を共有するleaky-bucket型帯域制御をバックエンドで再検証し、FTP／FTPS、SFTP、SMBは転送ごとの独立session、WebDAV、S3、Google Driveはclone可能なHTTP／SDK clientを使って別ブックマーク間および同一ブックマーク内の安全な並行転送に対応
 - [Next] 失敗理由、再接続、再開位置、検証結果を含む秘密情報除外済み転送ログを表示・書き出し可能にする
 - [Next] 大容量、通信切断、アプリ強制終了、容量不足、部分ファイル、checksum不一致を統合テストへ追加
 
