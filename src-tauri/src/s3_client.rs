@@ -1082,6 +1082,25 @@ mod tests {
             .expect("list incomplete uploads");
         assert!(pending.uploads().is_empty(), "cancelled multipart upload was not aborted");
 
+        let checksum_destination = workspace.path().join("checksum-destination.bin");
+        tokio::fs::write(&checksum_destination, b"existing destination").await.unwrap();
+        s3.client
+            .put_object()
+            .bucket(&bucket)
+            .key("checksum-mismatch.bin")
+            .metadata("harbor-sha256", "0000000000000000000000000000000000000000000000000000000000000000")
+            .body(ByteStream::from_static(b"corrupted payload"))
+            .send()
+            .await
+            .expect("create checksum mismatch fixture");
+        let checksum_error = s3
+            .download_file("/checksum-mismatch.bin", &checksum_destination.to_string_lossy())
+            .await
+            .expect_err("checksum mismatch must fail the download");
+        assert!(checksum_error.to_string().contains("SHA-256 verification failed"));
+        assert_eq!(tokio::fs::read(&checksum_destination).await.unwrap(), b"existing destination");
+        s3.delete_file("/checksum-mismatch.bin").await.expect("delete checksum fixture");
+
         for key in ["source-prefix/a.txt", "source-prefix/nested/b.txt"] {
             s3.client
                 .put_object()

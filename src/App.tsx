@@ -9,7 +9,7 @@ import { check, type DownloadEvent, type Update } from '@tauri-apps/plugin-updat
 import { emitTo, listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { getCurrentWebviewWindow, WebviewWindow } from '@tauri-apps/api/webviewWindow';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AppWindow, ArrowUpToLine, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Cloud, Columns3, Copy, File, FileCog, Folder, FolderPlus, Grid2X2, HardDrive,
   ClipboardPaste, Download, FileArchive, FileAudio, FileCode2, FileDown, FileImage, FileJson, FileSpreadsheet, FileText, FileUp, FileVideo, FolderSync, FolderUp, GripVertical, KeyRound, Link2, List, LoaderCircle, LockKeyhole, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Plus, RefreshCw, Scissors, Search, Settings, Share2, Trash2, Upload,
@@ -27,8 +27,12 @@ type DirectoryProgress = { transferId: string; completedFiles: number; totalFile
 type FileProgress = { transferId: string; transferredBytes: number; totalBytes: number; elapsedMs: number; status: string };
 type TransferOutcome = { bytes: number; verification: 'sha256' | 'size' };
 type LocalPathInfo = { name: string; isDirectory: boolean };
+type LocalDirectoryEntry = { name: string; path: string; size: number; modifiedUnix: number; kind: 'File' | 'Directory' | 'Symlink' };
+type LocalDirectoryListing = { path: string; parent?: string; entries: LocalDirectoryEntry[] };
+type PaneKind = 'local' | 'remote';
 type TransferHistory = { id: string; name: string; direction: 'Upload' | 'Download'; status: 'Completed' | 'Failed' | 'Cancelled'; detail: string; bytes: number; completedAt: string };
 type TransferJob = { id: string; connectionId: string; name: string; direction: 'Upload' | 'Download'; localPath: string; remotePath: string; status: 'Failed'; detail: string; transferredBytes: number; totalBytes: number; retryCount: number; conflictPolicy: string; isDirectory: boolean; updatedAt: string };
+type TransferLogEvent = { id: number; transferId: string; name: string; direction: 'Upload' | 'Download'; event: string; status: string; detail: string; transferredBytes: number; totalBytes: number; retryCount: number; createdAt: string };
 type Language = 'ja' | 'en' | 'zh-CN';
 type Preferences = { language: Language; theme: 'system' | 'light' | 'dark'; fileNameFontSize: number; fileNameFontWeight: 'normal' | 'bold'; fileRowDensity: 'extraCompact' | 'compact' | 'standard' | 'comfortable'; showHiddenFiles: boolean; googleClientId: string; googleDocsExport: 'docx' | 'pdf' | 'odt' | 'txt'; googleSheetsExport: 'xlsx' | 'pdf' | 'csv'; googleSlidesExport: 'pptx' | 'pdf'; googleDrawingsExport: 'pdf' | 'png' | 'svg'; defaultProtocol: Protocol; conflictPolicy: 'ask' | 'overwrite' | 'skip'; maxConcurrentTransfers: number; bandwidthLimitKbps: number; automaticRetryCount: number; confirmDelete: boolean; transferNotifications: boolean; editorPath: string; autoCheckUpdates: boolean };
 type GoogleExportPreferences = Pick<Preferences, 'googleDocsExport' | 'googleSheetsExport' | 'googleSlidesExport' | 'googleDrawingsExport'>;
@@ -265,6 +269,18 @@ const queueCopy = {
   'zh-CN': { collapse: '折叠传输队列', expand: '展开传输队列', hideSidebar: '隐藏侧边栏', showSidebar: '显示侧边栏', resizeSidebar: '调整侧边栏宽度', clearConnectionHistory: '清除连接历史记录', clearTransferHistory: '清除已完成和失败的传输', confirmConnection: '清除所有连接历史记录吗？', confirmTransfer: '清除所有已完成、失败和取消的传输历史记录吗？', interrupted: '应用关闭时传输已中断。重新连接后可以重试。', reconnectToRetry: '连接到原始目标后即可重试', queued: '正在等待开始传输…', reconnecting: '发生临时网络故障，正在重新连接…' },
 } as const;
 
+const transferLogCopy = {
+  ja: { title: '転送ログ', detail: '再接続、再開位置、検証結果を記録します。認証情報などの秘密情報は書き出されません。', show: '転送ログを表示', export: 'ログを書き出す', exported: '転送ログを書き出しました', empty: '転送ログはまだありません', close: '閉じる', event: 'イベント', progress: '進捗', retries: '再試行', queued: '待機', started: '開始', resumed: '再開', reconnecting: '再接続', paused: '停止', interrupted: '中断', completed: '完了', failed: '失敗', cancelled: '取消', status: '状態変更' },
+  en: { title: 'Transfer Log', detail: 'Records reconnects, resume offsets, and verification results. Exported logs never contain credentials or other secrets.', show: 'Show transfer log', export: 'Export Log', exported: 'Transfer log exported', empty: 'No transfer events have been recorded', close: 'Close', event: 'Event', progress: 'Progress', retries: 'Retries', queued: 'Queued', started: 'Started', resumed: 'Resumed', reconnecting: 'Reconnecting', paused: 'Paused', interrupted: 'Interrupted', completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled', status: 'Status changed' },
+  'zh-CN': { title: '传输日志', detail: '记录重新连接、续传位置和验证结果。导出的日志不会包含凭据或其他秘密信息。', show: '显示传输日志', export: '导出日志', exported: '传输日志已导出', empty: '尚未记录传输事件', close: '关闭', event: '事件', progress: '进度', retries: '重试', queued: '等待', started: '开始', resumed: '续传', reconnecting: '重新连接', paused: '暂停', interrupted: '中断', completed: '完成', failed: '失败', cancelled: '取消', status: '状态变更' },
+} as const;
+
+const dualPaneCopy = {
+  ja: { show: 'デュアルペインを表示', hide: 'デュアルペインを閉じる', local: 'ローカル', remote: '接続先', choose: 'ローカルフォルダを選択', up: '親フォルダへ移動', refresh: 'ローカルを更新', empty: '項目がありません', unavailable: 'ローカルフォルダを表示できません' },
+  en: { show: 'Show dual pane', hide: 'Close dual pane', local: 'Local', remote: 'Connection', choose: 'Choose local folder', up: 'Go to parent folder', refresh: 'Refresh local folder', empty: 'No items', unavailable: 'The local folder could not be displayed' },
+  'zh-CN': { show: '显示双栏', hide: '关闭双栏', local: '本地', remote: '连接', choose: '选择本地文件夹', up: '前往上级文件夹', refresh: '刷新本地文件夹', empty: '没有项目', unavailable: '无法显示本地文件夹' },
+} as const;
+
 const columnCopy = {
   ja: { permissions: 'パーミッション', owner: 'オーナー', group: 'グループ', type: '種類', file: 'ファイル', directory: 'フォルダ', symlink: 'シンボリックリンク', resize: '列幅を変更', displayColumns: '表示する項目', ascending: '昇順', descending: '降順' },
   en: { permissions: 'Permissions', owner: 'Owner', group: 'Group', type: 'Kind', file: 'File', directory: 'Folder', symlink: 'Symbolic link', resize: 'Resize column', displayColumns: 'Show Columns', ascending: 'Ascending', descending: 'Descending' },
@@ -446,6 +462,71 @@ function upsertConnectionInOrder(current: Connection[], connection: Connection):
   return next;
 }
 
+function LocalFilePane({ language, initialPath, showHiddenFiles, onSwitch }: { language: Language; initialPath?: string; showHiddenFiles: boolean; onSwitch: () => void }) {
+  const text = dualPaneCopy[language];
+  const common = copy[language];
+  const [listing, setListing] = useState<LocalDirectoryListing | null>(null);
+  const [pathDraft, setPathDraft] = useState(initialPath ?? '');
+  const [query, setQuery] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const loadLocalDirectory = useCallback(async (requestedPath: string) => {
+    if (!requestedPath) return;
+    setBusy(true);
+    setError('');
+    try {
+      const next = await invoke<LocalDirectoryListing>('local_directory_list', { path: requestedPath });
+      setListing(next);
+      setPathDraft(next.path);
+    } catch (reason) { setError(invokeErrorMessage(reason)); }
+    finally { setBusy(false); }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const requested = initialPath || await invoke<string>('local_default_directory');
+        if (!cancelled) await loadLocalDirectory(requested);
+      } catch (reason) { if (!cancelled) setError(invokeErrorMessage(reason)); }
+    })();
+    return () => { cancelled = true; };
+  }, [initialPath, loadLocalDirectory]);
+
+  const visibleEntries = useMemo(() => {
+    const normalized = query.toLocaleLowerCase(language);
+    return (listing?.entries ?? []).filter((entry) => (showHiddenFiles || !entry.name.startsWith('.')) && entry.name.toLocaleLowerCase(language).includes(normalized));
+  }, [language, listing?.entries, query, showHiddenFiles]);
+
+  async function chooseLocalDirectory() {
+    const selected = await open({ multiple: false, directory: true, defaultPath: listing?.path });
+    if (typeof selected === 'string') await loadLocalDirectory(selected);
+  }
+
+  return <section className="local-file-pane" aria-label={text.local}>
+    <div className="pane-heading">
+      <label className="pane-source"><HardDrive size={15}/><select aria-label={text.local} value="local" onChange={(event) => { if (event.target.value === 'remote') onSwitch(); }}><option value="local">{text.local}</option><option value="remote">{text.remote}</option></select></label>
+      <button aria-label={text.refresh} title={text.refresh} disabled={!listing || busy} onClick={() => listing && void loadLocalDirectory(listing.path)}><RefreshCw className={busy ? 'spinning' : ''} size={16}/></button>
+      <button aria-label={text.choose} title={text.choose} onClick={() => void chooseLocalDirectory()}><Folder size={16}/></button>
+      <div className="search local-search"><Search size={15}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={common.search}/></div>
+    </div>
+    <div className="local-path-toolbar">
+      <button aria-label={text.up} title={text.up} disabled={!listing?.parent} onClick={() => listing?.parent && void loadLocalDirectory(listing.parent)}><ArrowUpToLine size={17}/></button>
+      <div className="path-field"><span>{common.path}</span><input value={pathDraft} title={listing?.path} onChange={(event) => setPathDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void loadLocalDirectory(pathDraft); if (event.key === 'Escape') setPathDraft(listing?.path ?? ''); }}/></div>
+    </div>
+    {error && <div className="error-banner"><strong>{text.unavailable}:</strong> {error}</div>}
+    <div className="local-file-list" role="table">
+      <div className="local-file-header" role="row"><span>{common.name}</span><span>{common.size}</span><span>{common.modified}</span></div>
+      {visibleEntries.length === 0 ? <p className="view-empty">{text.empty}</p> : visibleEntries.map((entry) => {
+        const fileEntry: FileEntry = { name: entry.name, size: entry.size, file_type: entry.kind };
+        return <button className="local-file-row" role="row" key={entry.path} title={entry.path} onDoubleClick={() => { if (entry.kind === 'Directory') void loadLocalDirectory(entry.path); }} onKeyDown={(event) => { if (event.key === 'Enter' && entry.kind === 'Directory') void loadLocalDirectory(entry.path); }}>
+          <span className="local-file-name" role="cell"><RemoteEntryIcon entry={fileEntry} size={17}/><span>{entry.name}</span></span><span role="cell">{entry.kind === 'Directory' ? '—' : formatBytes(entry.size)}</span><time role="cell">{entry.modifiedUnix ? new Date(entry.modifiedUnix * 1000).toLocaleString(language) : '—'}</time>
+        </button>;
+      })}
+    </div>
+  </section>;
+}
+
 export default function App() {
   const [preferences, setPreferences] = useState<Preferences>(loadPreferences);
   const language = preferences.language;
@@ -454,6 +535,8 @@ export default function App() {
   const bookmarkLocalText = bookmarkLocalCopy[language];
   const p2 = phaseTwoCopy[language];
   const queueText = queueCopy[language];
+  const transferLogText = transferLogCopy[language];
+  const dualPaneText = dualPaneCopy[language];
   const columnsText = columnCopy[language];
   const viewsText = viewCopy[language];
   const syncText = syncUiCopy[language];
@@ -485,9 +568,13 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [transfers, setTransfers] = useState<Transfer[]>([]);
+  const [transferLog, setTransferLog] = useState<TransferLogEvent[]>([]);
+  const [showTransferLog, setShowTransferLog] = useState(false);
   const [directoryProgress, setDirectoryProgress] = useState<DirectoryProgress | null>(null);
   const [directoryPaused, setDirectoryPaused] = useState(false);
   const [transferPanelCollapsed, setTransferPanelCollapsed] = useState(true);
+  const [dualPane, setDualPane] = useState(() => localStorage.getItem('harbor-transfer.dual-pane') === 'true');
+  const [leftPaneKind, setLeftPaneKind] = useState<PaneKind>(() => localStorage.getItem('harbor-transfer.left-pane') === 'remote' ? 'remote' : 'local');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('harbor-transfer.sidebar-collapsed') === 'true');
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const [columnWidths, setColumnWidths] = useState<ColumnWidths>(loadColumnWidths);
@@ -682,6 +769,11 @@ export default function App() {
     localStorage.setItem('harbor-transfer.preferences', JSON.stringify(preferences));
     document.documentElement.dataset.theme = preferences.theme;
   }, [preferences]);
+
+  useEffect(() => {
+    localStorage.setItem('harbor-transfer.dual-pane', String(dualPane));
+    localStorage.setItem('harbor-transfer.left-pane', leftPaneKind);
+  }, [dualPane, leftPaneKind]);
 
   useEffect(() => {
     if (preferences.showHiddenFiles) return;
@@ -1531,7 +1623,32 @@ export default function App() {
     try {
       await invoke('transfer_history_clear');
       await invoke('transfer_jobs_clear');
+      await invoke('transfer_log_clear');
       setTransfers((current) => current.filter((item) => item.status === 'Running'));
+      setTransferLog([]);
+    } catch (reason) { setError(String(reason)); }
+  }
+
+  async function openTransferLog() {
+    try {
+      const events = await invoke<TransferLogEvent[]>('transfer_log_list');
+      setTransferLog(events);
+      setShowTransferLog(true);
+    } catch (reason) { setError(String(reason)); }
+  }
+
+  async function exportTransferLog() {
+    try {
+      const events = await invoke<TransferLogEvent[]>('transfer_log_list');
+      setTransferLog(events);
+      const date = new Date().toISOString().slice(0, 10);
+      const selected = await save({
+        defaultPath: `Harbor-Transfer-Log-${date}.json`,
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+      });
+      if (!selected) return;
+      await writeTextFile(selected, `${JSON.stringify({ format: 'harbor-transfer-log', version: 1, exportedAt: new Date().toISOString(), events }, null, 2)}\n`);
+      setNotice(transferLogText.exported);
     } catch (reason) { setError(String(reason)); }
   }
 
@@ -1828,6 +1945,7 @@ export default function App() {
     <header className="toolbar" onPointerDown={startWindowDrag}>
       <div className="brand"><Cloud size={21}/><span>{t.title}</span></div>
       <button className="icon-button" aria-label={sidebarCollapsed ? queueText.showSidebar : queueText.hideSidebar} title={sidebarCollapsed ? queueText.showSidebar : queueText.hideSidebar} aria-expanded={!sidebarCollapsed} onClick={() => setSidebarCollapsed((current) => !current)}>{sidebarCollapsed ? <PanelLeftOpen size={17}/> : <PanelLeftClose size={17}/>}</button>
+      <button className={`icon-button ${dualPane ? 'active' : ''}`} aria-label={dualPane ? dualPaneText.hide : dualPaneText.show} title={dualPane ? dualPaneText.hide : dualPaneText.show} aria-pressed={dualPane} onClick={() => setDualPane((current) => !current)}><Columns3 size={17}/></button>
       <button className="toolbar-action" aria-label={`${windowCopy[language].newWindow} (⌘N)`} title={`${windowCopy[language].newWindow} (⌘N)`} onClick={() => void openNewWindow()}><AppWindow size={16}/><span className="toolbar-action-label">{windowCopy[language].newWindow}</span></button>
       <button className="primary toolbar-action" aria-label={t.connect} title={t.connect} onClick={() => { setConnectingBookmark(null); setSelectedKeyPath(''); setConnectSheetMode('connect'); setShowConnect(true); }}><Plus size={16}/><span className="toolbar-action-label">{t.connect}</span></button>
       <button className="toolbar-action" aria-label={t.keys} title={t.keys} onClick={() => void openKeyManagerWindow()}><KeyRound size={16}/><span className="toolbar-action-label">{t.keys}</span></button>
@@ -1872,10 +1990,13 @@ export default function App() {
         {history.length === 0 ? <p className="muted">{p1.noHistory}</p> : history.slice(0, 6).map((item, index) => <button className="bookmark history-item" key={`${item.bookmarkId}-${item.connectedAt}-${index}`} onClick={() => { const saved = connections.find((connection) => connection.id === item.bookmarkId); const connection = saved ?? { id: item.bookmarkId, name: item.name, protocol: item.protocol, host: item.host, port: item.port, username: item.username, initialPath: '/', tags: '' }; setConnectingBookmark(connection); setSelectedKeyPath(connection.keyPath ?? ''); setConnectSheetMode('connect'); setShowConnect(true); }}><HardDrive size={14}/><span>{item.name}</span><small>{item.connectedAt.slice(5, 16)}</small></button>)}
       </aside>
       <div className="sidebar-resizer" role="separator" aria-label={queueText.resizeSidebar} title={queueText.resizeSidebar} aria-orientation="vertical" aria-valuemin={minimumSidebarWidth} aria-valuemax={maximumSidebarWidth} aria-valuenow={sidebarWidth} tabIndex={0} onPointerDown={startSidebarResize} onDoubleClick={() => setSidebarWidth(defaultSidebarWidth)} onKeyDown={(event) => { if (event.key === 'ArrowLeft') { event.preventDefault(); adjustSidebarWidth(-10); } if (event.key === 'ArrowRight') { event.preventDefault(); adjustSidebarWidth(10); } if (event.key === 'Home') { event.preventDefault(); setSidebarWidth(defaultSidebarWidth); } }}/>
+      <div className={`browser-workspace ${dualPane ? 'dual-pane' : 'single-pane'}`}>
+      {dualPane && leftPaneKind === 'local' && <LocalFilePane language={language} initialPath={active?.localDirectory} showHiddenFiles={preferences.showHiddenFiles} onSwitch={() => setLeftPaneKind('remote')}/>}
       <section className={`browser ${isDragOver ? 'drag-over' : ''}`} ref={browserZoneRef}>
         {notice && <div className="notice-banner" role="status" aria-live="polite">{notice}</div>}
         {active ? <>
           <div className="browser-toolbar">
+            {dualPane && <label className="pane-source"><Cloud size={15}/><select aria-label={dualPaneText.remote} value="remote" onChange={(event) => { if (event.target.value === 'local') setLeftPaneKind(leftPaneKind === 'local' ? 'remote' : 'local'); }}><option value="remote">{active.name}</option><option value="local">{dualPaneText.local}</option></select></label>}
             <button aria-label={t.refresh} onClick={() => void loadDirectory()}><RefreshCw size={17} className={busy ? 'spinning' : ''}/></button>
             <div className="search"><Search size={16}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t.search}/></div>
             <div className="view-switcher" role="group" aria-label={t.name}>
@@ -1944,9 +2065,11 @@ export default function App() {
           </nav>
         </> : <div className="welcome"><Cloud size={46}/><h1>{t.empty}</h1><p>{t.emptyDetail}</p><button className="primary" onClick={() => { setConnectingBookmark(null); setSelectedKeyPath(''); setConnectSheetMode('connect'); setShowConnect(true); }}>{t.connect}</button></div>}
       </section>
+      {dualPane && leftPaneKind === 'remote' && <LocalFilePane language={language} initialPath={active?.localDirectory} showHiddenFiles={preferences.showHiddenFiles} onSwitch={() => setLeftPaneKind('local')}/>}
+      </div>
     </section>
     <section className={`transfer-panel ${transferPanelCollapsed ? 'collapsed' : ''}`}>
-      <div className="transfer-heading"><span>{t.status}</span><small>{transfers.filter((item) => item.status === 'Running').length + remoteEdits.length + (dragPreparingPath ? 1 : 0)} active</small><span className="transfer-heading-spacer"/>{transfers.some((item) => item.status !== 'Running') && <button className="icon-button" aria-label={queueText.clearTransferHistory} title={queueText.clearTransferHistory} onClick={() => void clearTransferHistory()}><Trash2 size={15}/></button>}<button className="icon-button" aria-label={transferPanelCollapsed ? queueText.expand : queueText.collapse} title={transferPanelCollapsed ? queueText.expand : queueText.collapse} aria-expanded={!transferPanelCollapsed} onClick={toggleTransferPanel}>{transferPanelCollapsed ? <ChevronUp size={17}/> : <ChevronDown size={17}/>}</button></div>
+      <div className="transfer-heading"><span>{t.status}</span><small>{transfers.filter((item) => item.status === 'Running').length + remoteEdits.length + (dragPreparingPath ? 1 : 0)} active</small><span className="transfer-heading-spacer"/><button className="icon-button" aria-label={transferLogText.show} title={transferLogText.show} onClick={() => void openTransferLog()}><FileText size={15}/></button>{transfers.some((item) => item.status !== 'Running') && <button className="icon-button" aria-label={queueText.clearTransferHistory} title={queueText.clearTransferHistory} onClick={() => void clearTransferHistory()}><Trash2 size={15}/></button>}<button className="icon-button" aria-label={transferPanelCollapsed ? queueText.expand : queueText.collapse} title={transferPanelCollapsed ? queueText.expand : queueText.collapse} aria-expanded={!transferPanelCollapsed} onClick={toggleTransferPanel}>{transferPanelCollapsed ? <ChevronUp size={17}/> : <ChevronDown size={17}/>}</button></div>
       <div className="transfer-list">
         {directoryProgress && directoryProgress.status !== 'completed' && <div className="directory-progress"><span>{directoryProgress.completedFiles} / {directoryProgress.totalFiles || '…'}</span><strong>{directoryProgress.status === 'reconnecting' ? queueText.reconnecting : directoryProgress.status === 'queued' ? queueText.queued : directoryProgress.currentPath}</strong><button onClick={() => void controlDirectoryTransfer(directoryPaused ? 'resume' : 'pause')}>{directoryPaused ? t.resume : t.pause}</button><button onClick={() => void controlDirectoryTransfer('cancel')}>{t.cancel}</button></div>}
         {dragPreparingPath && <div className="drag-export-progress"><LoaderCircle className="spinning" size={15}/><strong>{dragPreparingPath.split('/').pop()}</strong><span>{dragText.preparing}</span></div>}
@@ -1962,6 +2085,18 @@ export default function App() {
         </div>)}
       </div>
     </section>
+    {showTransferLog && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowTransferLog(false); }}><section className="connect-sheet transfer-log-sheet" role="dialog" aria-modal="true" aria-labelledby="transfer-log-title">
+      <div className="sheet-title"><div><h2 id="transfer-log-title">{transferLogText.title}</h2><p>{transferLogText.detail}</p></div><button className="icon-button" aria-label={transferLogText.close} title={transferLogText.close} onClick={() => setShowTransferLog(false)}>×</button></div>
+      <div className="transfer-log-toolbar"><span>{transferLog.length}</span><button className="primary" disabled={transferLog.length === 0} onClick={() => void exportTransferLog()}><FileDown size={15}/>{transferLogText.export}</button></div>
+      <div className="transfer-log-list">
+        {transferLog.length === 0 ? <p className="muted">{transferLogText.empty}</p> : transferLog.map((item) => <article className={`transfer-log-event ${item.event}`} key={item.id}>
+          <span className={`transfer-status ${item.status.toLowerCase()}`}/>
+          <div className="transfer-log-main"><strong>{item.name}</strong><span>{(transferLogText as Record<string, string>)[item.event] ?? item.event} · {item.direction}</span><p>{item.detail}</p></div>
+          <div className="transfer-log-metrics"><time>{item.createdAt}</time><span>{transferLogText.progress}: {formatBytes(item.transferredBytes)}{item.totalBytes ? ` / ${formatBytes(item.totalBytes)}` : ''}</span>{item.retryCount > 0 && <span>{transferLogText.retries}: {item.retryCount}</span>}</div>
+        </article>)}
+      </div>
+      <div className="form-actions"><button onClick={() => setShowTransferLog(false)}>{transferLogText.close}</button></div>
+    </section></div>}
     {columnMenu && <div className="column-visibility-menu" role="menu" style={{ left: columnMenu.x, top: columnMenu.y }} onContextMenu={(event) => event.preventDefault()}>
       <div className="context-menu-heading">{columnsText.displayColumns}</div>
       <button type="button" role="menuitemcheckbox" aria-checked="true" disabled><Check size={14}/>{t.name}</button>

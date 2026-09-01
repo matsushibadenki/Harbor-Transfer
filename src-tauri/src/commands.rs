@@ -1,5 +1,5 @@
 use crate::bookmarks::{
-    Bookmark, BookmarkStore, ConnectionHistory, SyncHistory, TransferHistory, TransferJob,
+    Bookmark, BookmarkStore, ConnectionHistory, SyncHistory, TransferHistory, TransferJob, TransferLogEvent,
 };
 use crate::ftp_client::{FtpClient, FtpConfig};
 use crate::google_drive::{
@@ -626,6 +626,24 @@ pub struct LocalPathInfo {
     pub is_directory: bool,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalDirectoryEntry {
+    pub name: String,
+    pub path: String,
+    pub size: u64,
+    pub modified_unix: u64,
+    pub kind: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalDirectoryListing {
+    pub path: String,
+    pub parent: Option<String>,
+    pub entries: Vec<LocalDirectoryEntry>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteEditOpenRequest {
@@ -1067,6 +1085,63 @@ pub async fn local_path_info(path: String) -> Result<LocalPathInfo, String> {
         name: path.file_name().and_then(|name| name.to_str()).unwrap_or("item").to_string(),
         is_directory: metadata.is_dir(),
     })
+}
+
+#[tauri::command]
+pub async fn local_default_directory() -> Result<String, String> {
+    let home = std::env::var_os("HOME").ok_or("The local home directory is unavailable.")?;
+    std::fs::canonicalize(home)
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn local_directory_list(path: String) -> Result<LocalDirectoryListing, String> {
+    let directory =
+        std::fs::canonicalize(&path).map_err(|error| format!("Could not open '{path}': {error}"))?;
+    if !directory.is_dir() {
+        return Err(format!("The local path is not a directory: {}", directory.display()));
+    }
+    let mut entries = std::fs::read_dir(&directory)
+        .map_err(|error| format!("Could not read '{}': {error}", directory.display()))?
+        .map(|entry| {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+            let file_type = metadata.file_type();
+            let kind = if file_type.is_symlink() {
+                "Symlink"
+            } else if metadata.is_dir() {
+                "Directory"
+            } else {
+                "File"
+            };
+            let modified_unix = metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |value| value.as_secs());
+            Ok(LocalDirectoryEntry {
+                name: entry.file_name().to_string_lossy().into_owned(),
+                path: path.to_string_lossy().into_owned(),
+                size: if metadata.is_file() { metadata.len() } else { 0 },
+                modified_unix,
+                kind: kind.to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    entries.sort_by(|left, right| {
+        let left_directory = left.kind == "Directory";
+        let right_directory = right.kind == "Directory";
+        right_directory.cmp(&left_directory).then_with(|| {
+            left.name
+                .to_ascii_lowercase()
+                .cmp(&right.name.to_ascii_lowercase())
+                .then_with(|| left.name.cmp(&right.name))
+        })
+    });
+    let parent = directory.parent().map(|value| value.to_string_lossy().into_owned());
+    Ok(LocalDirectoryListing { path: directory.to_string_lossy().into_owned(), parent, entries })
 }
 
 fn legacy_credential_entry(bookmark_id: &str) -> Result<keyring::Entry, String> {
@@ -1558,6 +1633,16 @@ pub async fn transfer_history_clear(state: State<'_, Arc<AppState>>) -> Result<(
 #[tauri::command]
 pub async fn transfer_jobs_list(state: State<'_, Arc<AppState>>) -> Result<Vec<TransferJob>, String> {
     state.bookmarks.transfer_jobs()
+}
+
+#[tauri::command]
+pub async fn transfer_log_list(state: State<'_, Arc<AppState>>) -> Result<Vec<TransferLogEvent>, String> {
+    state.bookmarks.transfer_log()
+}
+
+#[tauri::command]
+pub async fn transfer_log_clear(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.bookmarks.clear_transfer_log()
 }
 
 #[tauri::command]
@@ -2110,6 +2195,39 @@ fn atomic_upload_path(destination: &str, transfer_id: &str) -> Result<String, St
     destination.hash(&mut hasher);
     let temporary_name = format!(".harbor-upload-{:016x}.part", hasher.finish());
     Ok(remote_child(&parent, &temporary_name))
+}
+
+fn local_download_staging_path(destination: &Path, transfer_id: &str) -> Result<PathBuf, String> {
+    let parent = destination.parent().ok_or("The download destination must have a parent directory.")?;
+    let name = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .ok_or("The download destination must have a valid file name.")?;
+    let mut hasher = DefaultHasher::new();
+    transfer_id.hash(&mut hasher);
+    destination.hash(&mut hasher);
+    Ok(parent.join(format!(".{name}.harbor-transfer-{:016x}.part", hasher.finish())))
+}
+
+async fn commit_local_download(
+    staging: &Path,
+    destination: &Path,
+    expected_bytes: u64,
+) -> anyhow::Result<()> {
+    let actual_bytes = tokio::fs::metadata(staging)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("Download verification could not inspect '{}': {error}", staging.display())
+        })?
+        .len();
+    anyhow::ensure!(
+        actual_bytes == expected_bytes,
+        "Download size verification failed: the transfer reported {expected_bytes} bytes, but the staged file contains {actual_bytes} bytes. The original destination was not changed."
+    );
+    tokio::fs::rename(staging, destination).await.map_err(|error| {
+        anyhow::anyhow!("The verified download could not replace '{}': {error}", destination.display())
+    })
 }
 
 fn verify_uploaded_size(protocol: &str, path: &str, actual: u64, expected: u64) -> anyhow::Result<()> {
@@ -2727,8 +2845,12 @@ pub async fn transfer_download(
     state: State<'_, Arc<AppState>>,
 ) -> Result<TransferOutcome, String> {
     let limits = request.limits();
-    let resume_from = request.resume_from.unwrap_or(0);
     let transfer_id = request.transfer_id.unwrap_or_else(|| "single-download".to_string());
+    let destination_path = PathBuf::from(&request.local_path);
+    let staging_path = local_download_staging_path(&destination_path, &transfer_id)?;
+    let staging_path_text = staging_path.to_string_lossy().into_owned();
+    let staged_bytes = tokio::fs::metadata(&staging_path).await.map(|metadata| metadata.len()).unwrap_or(0);
+    let resume_from = request.resume_from.unwrap_or(0).min(staged_bytes);
     let started = std::time::Instant::now();
     let conflict_policy = request.conflict_policy.as_deref().unwrap_or("ask");
     if !matches!(conflict_policy, "ask" | "overwrite" | "skip" | "rename") {
@@ -2827,7 +2949,7 @@ pub async fn transfer_download(
                 client
                     .download_file_resumable_with_progress(
                         &request.remote_path,
-                        &request.local_path,
+                        &staging_path_text,
                         attempt_resume_from,
                         move |done, total| {
                             let event_app = event_app.clone();
@@ -2868,7 +2990,7 @@ pub async fn transfer_download(
                 client
                     .download_file_resumable_with_progress(
                         &request.remote_path,
-                        &request.local_path,
+                        &staging_path_text,
                         attempt_resume_from,
                         move |done, total| {
                             let event_app = event_app.clone();
@@ -2909,7 +3031,7 @@ pub async fn transfer_download(
                 client
                     .download_file_resumable_with_progress(
                         &request.remote_path,
-                        &request.local_path,
+                        &staging_path_text,
                         attempt_resume_from,
                         move |done, total| {
                             let event_app = event_app.clone();
@@ -2950,7 +3072,7 @@ pub async fn transfer_download(
                 client
                     .download_file_with_progress(
                         &request.remote_path,
-                        &request.local_path,
+                        &staging_path_text,
                         move |done, total| {
                             let event_app = event_app.clone();
                             let event_id = event_id.clone();
@@ -2990,7 +3112,7 @@ pub async fn transfer_download(
                 client
                     .download_file_with_progress(
                         &request.remote_path,
-                        &request.local_path,
+                        &staging_path_text,
                         move |done, total| {
                             let event_app = event_app.clone();
                             let event_id = event_id.clone();
@@ -3030,7 +3152,7 @@ pub async fn transfer_download(
                 client
                     .download_file_with_progress(
                         &request.remote_path,
-                        &request.local_path,
+                        &staging_path_text,
                         move |done, total| {
                             let event_app = event_app.clone();
                             let event_id = event_id.clone();
@@ -3069,25 +3191,15 @@ pub async fn transfer_download(
             completion_bandwidth.progress(*bytes).await;
         }
         let result = match result {
-            Ok(bytes) => match tokio::fs::metadata(&request.local_path).await {
-                Ok(metadata) if metadata.len() == bytes => Ok(bytes),
-                Ok(metadata) => Err(anyhow::anyhow!(
-                    "Download size verification failed: the transfer reported {bytes} bytes, but the local file contains {} bytes.",
-                    metadata.len()
-                )),
-                Err(error) => Err(anyhow::anyhow!(
-                    "Download verification could not inspect '{}': {error}",
-                    request.local_path
-                )),
-            },
-            other => other,
-        };
-        let result = match result {
             Ok(bytes) if !is_google_drive_download => {
                 verify_remote_file_size(connection.file_system(), &request.remote_path, bytes)
                     .await
                     .map(|_| bytes)
             }
+            other => other,
+        };
+        let result = match result {
+            Ok(bytes) => commit_local_download(&staging_path, &destination_path, bytes).await.map(|_| bytes),
             other => other,
         };
         match result {
@@ -3465,7 +3577,8 @@ pub async fn transfer_upload_directory(
 #[cfg(test)]
 mod tests {
     use super::{
-        atomic_upload_path, content_hash, effective_transfer_limits, is_retryable_transfer_error,
+        atomic_upload_path, commit_local_download, content_hash, effective_transfer_limits,
+        is_retryable_transfer_error, local_directory_list, local_download_staging_path,
         parse_remote_modified, reject_symlink_ancestors, remote_child_path, remote_parent_and_name,
         remote_replace_target, reserve_bandwidth, retry_backoff, safe_relative_path, Protocol,
         TransferControl, TransferScheduler,
@@ -3659,6 +3772,62 @@ mod tests {
         assert_ne!(first, atomic_upload_path("/docs/港便り.txt", "different-transfer").unwrap());
         assert_ne!(first, atomic_upload_path("/docs/別のファイル.txt", "transfer-42").unwrap());
         assert!(atomic_upload_path("relative.txt", "transfer-42").is_err());
+    }
+
+    #[tokio::test]
+    async fn verified_download_replaces_destination_only_after_size_validation() {
+        let workspace = tempfile::tempdir().unwrap();
+        let destination = workspace.path().join("report.txt");
+        let staging = local_download_staging_path(&destination, "transfer-42").unwrap();
+        assert_eq!(staging.parent(), destination.parent());
+        assert!(staging.file_name().unwrap().to_string_lossy().ends_with(".part"));
+        assert_eq!(staging, local_download_staging_path(&destination, "transfer-42").unwrap());
+
+        tokio::fs::write(&destination, b"original").await.unwrap();
+        tokio::fs::write(&staging, b"partial").await.unwrap();
+        let mismatch = commit_local_download(&staging, &destination, 99).await.unwrap_err();
+        assert!(mismatch.to_string().contains("original destination was not changed"));
+        assert_eq!(tokio::fs::read(&destination).await.unwrap(), b"original");
+        assert_eq!(tokio::fs::read(&staging).await.unwrap(), b"partial");
+
+        commit_local_download(&staging, &destination, 7).await.unwrap();
+        assert_eq!(tokio::fs::read(&destination).await.unwrap(), b"partial");
+        assert!(!staging.exists());
+    }
+
+    #[tokio::test]
+    async fn unavailable_staging_file_preserves_existing_destination() {
+        let workspace = tempfile::tempdir().unwrap();
+        let destination = workspace.path().join("important.txt");
+        let staging = local_download_staging_path(&destination, "disk-full-transfer").unwrap();
+        tokio::fs::write(&destination, b"keep me").await.unwrap();
+
+        let error = commit_local_download(&staging, &destination, 1024).await.unwrap_err();
+        assert!(error.to_string().contains("could not inspect"));
+        assert_eq!(tokio::fs::read(&destination).await.unwrap(), b"keep me");
+    }
+
+    #[tokio::test]
+    async fn lists_local_directories_with_stable_paths_and_directory_first_order() {
+        let workspace = tempfile::tempdir().unwrap();
+        let child = workspace.path().join("Folder");
+        std::fs::create_dir(&child).unwrap();
+        std::fs::write(workspace.path().join("document.txt"), b"hello").unwrap();
+
+        let listing = local_directory_list(workspace.path().to_string_lossy().into_owned()).await.unwrap();
+        assert_eq!(listing.path, workspace.path().canonicalize().unwrap().to_string_lossy());
+        assert_eq!(listing.entries.len(), 2);
+        assert_eq!(listing.entries[0].name, "Folder");
+        assert_eq!(listing.entries[0].kind, "Directory");
+        assert_eq!(listing.entries[1].name, "document.txt");
+        assert_eq!(listing.entries[1].size, 5);
+        assert!(listing.parent.is_some());
+
+        let error =
+            local_directory_list(workspace.path().join("document.txt").to_string_lossy().into_owned())
+                .await
+                .unwrap_err();
+        assert!(error.contains("not a directory"));
     }
 
     #[test]

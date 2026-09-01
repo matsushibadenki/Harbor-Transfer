@@ -109,7 +109,8 @@ button, a { -webkit-tap-highlight-color: transparent; }
   background: var(--mint-deep);
   transition: right .2s ease;
 }
-.site-nav > a:hover::after, .site-nav > a:focus-visible::after { right: 0; }
+.site-nav > a:hover::after, .site-nav > a:focus-visible::after, .site-nav > a[aria-current="location"]::after { right: 0; }
+.site-nav > a[aria-current="location"] { color: var(--mint-deep); }
 .language-switcher { display: flex; align-items: center; gap: 7px; color: #74807f; font-size: 12px; font-weight: 700; white-space: nowrap; }
 .language-switcher a { padding: 8px 0; transition: color .2s ease; }
 .language-switcher a:hover, .language-switcher a:focus-visible { color: var(--mint-deep); }

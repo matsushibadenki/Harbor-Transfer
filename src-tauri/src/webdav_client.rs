@@ -399,7 +399,7 @@ mod tests {
 
         let upload = std::env::temp_dir().join("harbor_webdav_upload.bin");
         let download = std::env::temp_dir().join("harbor_webdav_download.bin");
-        let content = vec![0x57; 2 * 1024 * 1024 + 17];
+        let content = vec![0x57; 8 * 1024 * 1024 + 17];
         tokio::fs::write(&upload, &content).await.unwrap();
         tokio::fs::write(&download, b"old destination").await.unwrap();
         client
@@ -410,12 +410,29 @@ mod tests {
         assert_eq!(client.file_size(&remote).await.expect("uploaded size"), content.len() as u64);
         client.atomic_replace(&remote, &renamed).await.expect("atomic overwrite move");
         let resume_offset = 512 * 1024;
-        tokio::fs::write(&download, &content[..resume_offset]).await.unwrap();
+        let interrupted = client
+            .download_file_resumable_with_progress(
+                &renamed,
+                download.to_str().unwrap(),
+                0,
+                |done, _| async move {
+                    if done >= resume_offset as u64 {
+                        Err(anyhow!("simulated connection interruption"))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .await;
+        assert!(interrupted.is_err(), "the injected interruption must stop the first download");
+        let saved_offset = tokio::fs::metadata(&download).await.unwrap().len();
+        assert!(saved_offset >= resume_offset as u64 && saved_offset < content.len() as u64);
+        client.reconnect().await.expect("reconnect after injected interruption");
         client
             .download_file_resumable_with_progress(
                 &renamed,
                 download.to_str().unwrap(),
-                resume_offset as u64,
+                saved_offset,
                 |_, _| async { Ok(()) },
             )
             .await

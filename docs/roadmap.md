@@ -39,8 +39,11 @@
 - [Done] Samba（SMB 2/3）を既存の閲覧・ファイル操作・転送・同期機能へ統合し、Phase 8を完了
 - [Done] ユーザー所有のGCPプロジェクトとOAuth Client IDを使うGoogle Drive認証、Keychain保存、My Drive基本操作を統合
 - [Done] Google Driveの共有アイテム／共有ドライブ、ネイティブGoogle文書の書き出し形式選択、レート制限への再試行を実装し、Phase 9を完了
-- [Next] アプリ再起動や通信切断後も安全に継続できる転送再開、永続キュー、チェックサム検証を実装
-- [Later] デュアルペイン、サーバー間転送、高度なSSH認証、再帰検索、Quick Look、追加クラウド、自動化を段階的に実装
+- [Done] 再接続、再開位置、検証結果、失敗理由を秘密情報除外済みの転送ログへ永続化し、アプリ内表示とJSON書き出しを実装
+- [Done] Phase 11の永続キュー、転送再開、検証、再試行、転送ログ、耐障害統合テストを完了
+- [Done] 現在の接続先とローカルファイルを左右で参照し、ペインを入れ替えられるデュアルペイン作業領域の基礎を実装
+- [Next] 各ペインから別のブックマーク接続を独立して開けるようにする
+- [Later] サーバー間転送、高度なSSH認証、再帰検索、Quick Look、追加クラウド、自動化を段階的に実装
 
 ## Phase 0 — プロジェクト基盤 [Done]
 
@@ -224,7 +227,7 @@ Cyberduck、Transmit、ForkLift、FileZilla Pro、WinSCPとの比較では、Har
 - [WinSCP Synchronize](https://winscp.net/eng/docs/ui_synchronize)
 - [FileZilla Pro Protocols](https://filezillapro.com/docs/v3/basic-usage-instructions/filezilla-pro-supported-protocols/)
 
-## Phase 11 — Reliable Transfers [Next]
+## Phase 11 — Reliable Transfers [Done]
 
 **完了条件:** 通信切断やアプリ再起動が発生しても転送状態を失わず、対応プロトコルでは転送済み範囲から安全に再開し、転送結果を検証できる。
 
@@ -236,21 +239,22 @@ Cyberduck、Transmit、ForkLift、FileZilla Pro、WinSCPとの比較では、Har
 - [Done] S3アップロードはローカルSHA-256をresumable sessionとobject metadataへ保存し、完了後にリモートobjectをストリーミング再読込して独立計算・照合。S3ダウンロードも一時ファイルとリモート再読込のSHA-256一致後だけ置換。その他のプロトコルはサーバー報告サイズ（取得不能時は転送APIの確定byte数）を必須検証する能力別フォールバックとし、検証方式を英語・日本語・简体中文の転送履歴へ記録
 - [Done] 一時的な通信障害、HTTP 429／5xx、サーバー切断を判別し、単一ファイルのアップロード／ダウンロードとフォルダアップロードを最大3回（500 ms、1 s、2 s）の指数バックオフで自動再試行。FTP／FTPS、SFTP、WebDAV、SMBは保存済みの接続設定から再接続し、S3／Google DriveはSDK・HTTP clientの接続poolとresumable stateを継続利用。認証、権限、パス不正、容量、取消、サイズ／checksum不一致は再試行せず即時停止し、累積再試行回数・理由・再開位置をSQLiteへ保存。再接続中の状態を英語・日本語・简体中文の転送キューへ表示
 - [Done] 環境設定でアプリ全体の同時転送数（1〜16）、集約帯域上限（KB/s、0は無制限）、自動再試行回数（0〜10）を指定し、ブックマークごとに継承または上書き可能にする。待機ジョブをSQLiteへ`Queued`として保存し、英語・日本語・简体中文の転送キューへ表示。共通／接続別カウンターを持つ上限制御と、全転送・接続単位で予約を共有するleaky-bucket型帯域制御をバックエンドで再検証し、FTP／FTPS、SFTP、SMBは転送ごとの独立session、WebDAV、S3、Google Driveはclone可能なHTTP／SDK clientを使って別ブックマーク間および同一ブックマーク内の安全な並行転送に対応
-- [Next] 失敗理由、再接続、再開位置、検証結果を含む秘密情報除外済み転送ログを表示・書き出し可能にする
-- [Next] 大容量、通信切断、アプリ強制終了、容量不足、部分ファイル、checksum不一致を統合テストへ追加
+- [Done] 失敗理由、再接続、再開位置、検証結果を含む秘密情報除外済み転送ログを表示・JSON書き出し可能にする。URL userinfo、パスワード／パスフレーズ、OAuth token、Client Secret、S3署名、Authorization値はSQLite保存前に伏せ、最大5,000イベントを保持
+- [Done] SFTP 16 MiB／WebDAV 8 MiB／S3 multipartの大容量転送、通信中断後の再接続と部分再開、SQLiteを閉じて再度開くアプリ強制終了相当、書き込み失敗・サイズ不一致時の既存保存先維持、S3 SHA-256不一致を統合／障害注入テストへ追加。FTP、Explicit FTPS、SFTP、HTTPS WebDAV、Nextcloud、S3、SMBのDocker実サーバー試験を通過
 
-## Phase 12 — Dual-Pane Workspace [Later]
+## Phase 12 — Dual-Pane Workspace [Next]
 
 **完了条件:** 左右のペインをローカルまたは任意の接続先として開き、比較しながら安全に転送できる。
 
-- [Later] 左右それぞれをローカル、現在のリモート、別のブックマーク接続へ切り替えられるデュアルペインを実装
+- [Done] 現在のリモートとローカルを左右に並べ、各ペインの接続種別を切り替えて左右を入れ替え可能にする。ローカル側はホーム／ブックマーク指定フォルダを起点に、パス入力、親階層、フォルダ選択、検索、不可視ファイル設定、独立スクロールへ対応
+- [Done] 狭いウインドウではデュアルペインを上下配置へ切り替え、各ペインの最低操作領域を維持
+- [Next] 左右それぞれから別のブックマーク接続を独立して開き、接続状態とパスを保持できるようにする
 - [Later] ローカル↔リモート、ローカル↔ローカル、リモート↔リモートのドラッグ、コピー、移動を共通操作へ統合
 - [Later] 異なる接続先間の転送を一時キャッシュ経由で行い、将来は対応プロトコルでserver-side copyへ最適化
 - [Later] 左右の同名フォルダをサイズ、更新日時、checksumで比較し、差分だけを選択して転送可能にする
 - [Later] 共通の相対パスを維持する連動ナビゲーションを追加
 - [Later] 複数タブ、タブ名、接続状態、パス、表示方式、列幅をワークスペースとして復元
 - [Later] ローカルとリモートのよく使う場所を登録するPlacesバーを追加
-- [Later] 狭いウインドウでは単一ペインへ切り替え、既存レイアウトの最低幅と操作性を維持
 
 ## Phase 13 — Search, Preview and Batch Tools [Later]
 

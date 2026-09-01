@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(8);
+type TransferLogContext = (String, String, u64, u64, u32);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -92,6 +93,22 @@ pub struct TransferJob {
     pub conflict_policy: String,
     pub is_directory: bool,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferLogEvent {
+    pub id: i64,
+    pub transfer_id: String,
+    pub name: String,
+    pub direction: String,
+    pub event: String,
+    pub status: String,
+    pub detail: String,
+    pub transferred_bytes: u64,
+    pub total_bytes: u64,
+    pub retry_count: u32,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,6 +201,21 @@ impl BookmarkStore {
                     is_directory INTEGER NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+                CREATE TABLE IF NOT EXISTS transfer_log_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    transfer_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    event TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    detail TEXT NOT NULL DEFAULT '',
+                    transferred_bytes INTEGER NOT NULL DEFAULT 0,
+                    total_bytes INTEGER NOT NULL DEFAULT 0,
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS transfer_log_events_created_at
+                    ON transfer_log_events(created_at DESC, id DESC);
                 CREATE TABLE IF NOT EXISTS s3_multipart_uploads (
                     transfer_id TEXT PRIMARY KEY NOT NULL,
                     state_json TEXT NOT NULL,
@@ -459,6 +491,18 @@ impl BookmarkStore {
                     transfer.bytes
                 ],
             )?;
+            insert_transfer_log_event(
+                &transaction,
+                &transfer.id,
+                &transfer.name,
+                &transfer.direction,
+                transfer.status.to_ascii_lowercase().as_str(),
+                &transfer.status,
+                &transfer.detail,
+                transfer.bytes,
+                transfer.bytes,
+                0,
+            )?;
             transaction.execute(
                 "DELETE FROM transfer_history WHERE id NOT IN
                  (SELECT id FROM transfer_history ORDER BY completed_at DESC LIMIT 100)",
@@ -501,6 +545,11 @@ impl BookmarkStore {
 
     pub fn save_transfer_job(&self, job: &TransferJob) -> Result<(), String> {
         self.with_connection(|connection| {
+            let is_new = connection.query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM transfer_jobs WHERE id=?1)",
+                params![job.id],
+                |row| row.get::<_, bool>(0),
+            )?;
             connection.execute(
                 "INSERT INTO transfer_jobs (id, connection_id, name, direction, local_path, remote_path, status, detail, transferred_bytes, total_bytes, retry_count, conflict_policy, is_directory, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, CURRENT_TIMESTAMP)
@@ -514,6 +563,20 @@ impl BookmarkStore {
                     job.remote_path, job.status, job.detail, job.transferred_bytes, job.total_bytes,
                     job.retry_count, job.conflict_policy, job.is_directory],
             )?;
+            if is_new {
+                insert_transfer_log_event(
+                    connection,
+                    &job.id,
+                    &job.name,
+                    &job.direction,
+                    "queued",
+                    &job.status,
+                    if job.transferred_bytes > 0 { "Transfer queued from a saved checkpoint." } else { "Transfer queued." },
+                    job.transferred_bytes,
+                    job.total_bytes,
+                    job.retry_count,
+                )?;
+            }
             Ok(())
         })
     }
@@ -540,21 +603,102 @@ impl BookmarkStore {
 
     pub fn set_transfer_job_status(&self, id: &str, status: &str, detail: &str) -> Result<(), String> {
         self.with_connection(|connection| {
+            let context = transfer_log_context(connection, id)?;
             connection.execute(
                 "UPDATE transfer_jobs SET status=?2, detail=?3,
                  updated_at=CURRENT_TIMESTAMP WHERE id=?1",
                 params![id, status, detail],
             )?;
+            if let Some((name, direction, transferred, total, retry_count)) = context {
+                let event = match status {
+                    "Running" if transferred > 0 => "resumed",
+                    "Running" => "started",
+                    "Paused" => "paused",
+                    "Cancelled" => "cancelled",
+                    "Failed" => "failed",
+                    _ => "status",
+                };
+                let fallback = match event {
+                    "resumed" => "Transfer resumed from a saved checkpoint.",
+                    "started" => "Transfer started.",
+                    "paused" => "Transfer paused.",
+                    "cancelled" => "Transfer cancelled.",
+                    "failed" => "Transfer failed.",
+                    _ => "Transfer status changed.",
+                };
+                insert_transfer_log_event(
+                    connection,
+                    id,
+                    &name,
+                    &direction,
+                    event,
+                    status,
+                    if detail.is_empty() { fallback } else { detail },
+                    transferred,
+                    total,
+                    retry_count,
+                )?;
+            }
             Ok(())
         })
     }
 
     pub fn set_transfer_job_retry(&self, id: &str, retry_count: u32, detail: &str) -> Result<(), String> {
         self.with_connection(|connection| {
+            let context = transfer_log_context(connection, id)?;
             connection.execute(
                 "UPDATE transfer_jobs SET status='Running', retry_count=?2, detail=?3, updated_at=CURRENT_TIMESTAMP WHERE id=?1",
                 params![id, retry_count, detail],
             )?;
+            if let Some((name, direction, transferred, total, _)) = context {
+                insert_transfer_log_event(
+                    connection,
+                    id,
+                    &name,
+                    &direction,
+                    "reconnecting",
+                    "Running",
+                    detail,
+                    transferred,
+                    total,
+                    retry_count,
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn transfer_log(&self) -> Result<Vec<TransferLogEvent>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT id, transfer_id, name, direction, event, status, detail,
+                        transferred_bytes, total_bytes, retry_count, created_at
+                 FROM transfer_log_events ORDER BY id DESC LIMIT 1000",
+            )?;
+            let events = statement
+                .query_map([], |row| {
+                    Ok(TransferLogEvent {
+                        id: row.get(0)?,
+                        transfer_id: row.get(1)?,
+                        name: row.get(2)?,
+                        direction: row.get(3)?,
+                        event: row.get(4)?,
+                        status: row.get(5)?,
+                        detail: row.get(6)?,
+                        transferred_bytes: row.get(7)?,
+                        total_bytes: row.get(8)?,
+                        retry_count: row.get(9)?,
+                        created_at: row.get(10)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(events)
+        })
+    }
+
+    pub fn clear_transfer_log(&self) -> Result<(), String> {
+        self.with_connection(|connection| {
+            connection.execute("DELETE FROM transfer_log_events", [])?;
             Ok(())
         })
     }
@@ -599,12 +743,45 @@ impl BookmarkStore {
 
     pub fn transfer_jobs(&self) -> Result<Vec<TransferJob>, String> {
         self.with_connection(|connection| {
+            let interrupted = {
+                let mut statement = connection.prepare(
+                    "SELECT id, name, direction, transferred_bytes, total_bytes, retry_count
+                     FROM transfer_jobs WHERE status IN ('Running', 'Queued', 'Paused')",
+                )?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, u64>(3)?,
+                            row.get::<_, u64>(4)?,
+                            row.get::<_, u32>(5)?,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                rows
+            };
             connection.execute(
                 "UPDATE transfer_jobs SET status='Failed',
                  detail='Transfer was interrupted when Harbor Transfer closed.',
                  updated_at=CURRENT_TIMESTAMP WHERE status IN ('Running', 'Queued', 'Paused')",
                 [],
             )?;
+            for (id, name, direction, transferred, total, retry_count) in interrupted {
+                insert_transfer_log_event(
+                    connection,
+                    &id,
+                    &name,
+                    &direction,
+                    "interrupted",
+                    "Failed",
+                    "Transfer was interrupted when Harbor Transfer closed.",
+                    transferred,
+                    total,
+                    retry_count,
+                )?;
+            }
             let mut statement = connection.prepare(
                 "SELECT id, connection_id, name, direction, local_path, remote_path, status,
                         detail, transferred_bytes, total_bytes, retry_count, conflict_policy,
@@ -721,6 +898,119 @@ impl BookmarkStore {
             Ok(())
         })
     }
+}
+
+fn transfer_log_context(
+    connection: &Connection,
+    transfer_id: &str,
+) -> rusqlite::Result<Option<TransferLogContext>> {
+    let mut statement = connection.prepare(
+        "SELECT name, direction, transferred_bytes, total_bytes, retry_count
+         FROM transfer_jobs WHERE id=?1",
+    )?;
+    let mut rows = statement.query(params![transfer_id])?;
+    rows.next()?.map(|row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))).transpose()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_transfer_log_event(
+    connection: &Connection,
+    transfer_id: &str,
+    name: &str,
+    direction: &str,
+    event: &str,
+    status: &str,
+    detail: &str,
+    transferred_bytes: u64,
+    total_bytes: u64,
+    retry_count: u32,
+) -> rusqlite::Result<()> {
+    connection.execute(
+        "INSERT INTO transfer_log_events
+         (transfer_id, name, direction, event, status, detail, transferred_bytes,
+          total_bytes, retry_count, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, CURRENT_TIMESTAMP)",
+        params![
+            transfer_id,
+            name,
+            direction,
+            event,
+            status,
+            redact_transfer_log_detail(detail),
+            transferred_bytes,
+            total_bytes,
+            retry_count
+        ],
+    )?;
+    connection.execute(
+        "DELETE FROM transfer_log_events WHERE id NOT IN
+         (SELECT id FROM transfer_log_events ORDER BY id DESC LIMIT 5000)",
+        [],
+    )?;
+    Ok(())
+}
+
+fn redact_transfer_log_detail(detail: &str) -> String {
+    let mut value = detail.to_string();
+    for marker in [
+        "password=",
+        "passphrase=",
+        "access_token=",
+        "refresh_token=",
+        "client_secret=",
+        "secret_access_key=",
+        "x-amz-signature=",
+        "authorization: bearer ",
+        "authorization: basic ",
+    ] {
+        value = redact_assignment(value, marker);
+    }
+    value = redact_url_userinfo(value);
+    value.chars().take(4096).collect()
+}
+
+fn redact_assignment(mut value: String, marker: &str) -> String {
+    let mut cursor = 0;
+    loop {
+        let lower = value.to_ascii_lowercase();
+        let Some(relative) = lower[cursor..].find(marker) else { break };
+        let secret_start = cursor + relative + marker.len();
+        let secret_end = value[secret_start..]
+            .char_indices()
+            .find_map(|(offset, character)| {
+                character
+                    .is_whitespace()
+                    .then_some(offset)
+                    .or_else(|| matches!(character, '&' | ',' | ';' | '"' | '\'').then_some(offset))
+            })
+            .map_or(value.len(), |offset| secret_start + offset);
+        value.replace_range(secret_start..secret_end, "<redacted>");
+        cursor = secret_start + "<redacted>".len();
+    }
+    value
+}
+
+fn redact_url_userinfo(mut value: String) -> String {
+    let mut cursor = 0;
+    while let Some(scheme_offset) = value[cursor..].find("://") {
+        let authority_start = cursor + scheme_offset + 3;
+        let authority_end = value[authority_start..]
+            .char_indices()
+            .find_map(|(offset, character)| {
+                matches!(character, '/' | '?' | '#' | ' ' | '\n' | '\r' | '\t').then_some(offset)
+            })
+            .map_or(value.len(), |offset| authority_start + offset);
+        let authority = &value[authority_start..authority_end];
+        if let Some(at) = authority.find('@') {
+            if authority[..at].contains(':') {
+                value.replace_range(authority_start..authority_start + at, "<redacted>");
+                cursor = authority_start + "<redacted>@".len();
+                continue;
+            }
+        }
+        cursor = authority_end;
+    }
+    value
 }
 
 #[cfg(test)]
@@ -929,8 +1219,50 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].status, "Failed");
         assert_eq!(history[0].bytes, 42);
+        let log = store.transfer_log().expect("list transfer log");
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].event, "failed");
         store.clear_transfer_history().expect("clear transfer history");
         assert!(store.transfer_history().expect("list cleared transfer history").is_empty());
+    }
+
+    #[test]
+    fn transfer_log_redacts_credentials_and_keeps_resume_context() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = BookmarkStore::new(directory.path()).expect("bookmark store");
+        let job = TransferJob {
+            id: "transfer-secret".to_string(),
+            connection_id: "bookmark-1".to_string(),
+            name: "archive.zip".to_string(),
+            direction: "Upload".to_string(),
+            local_path: "/tmp/archive.zip".to_string(),
+            remote_path: "/archive.zip".to_string(),
+            status: "Queued".to_string(),
+            detail: String::new(),
+            transferred_bytes: 4_194_304,
+            total_bytes: 8_388_608,
+            retry_count: 0,
+            conflict_policy: "overwrite".to_string(),
+            is_directory: false,
+            updated_at: String::new(),
+        };
+        store.save_transfer_job(&job).expect("save job");
+        store
+            .set_transfer_job_retry(
+                &job.id,
+                1,
+                "retry https://alice:secret@example.com/file?access_token=token-123 password=hunter2",
+            )
+            .expect("record retry");
+
+        let log = store.transfer_log().expect("list transfer log");
+        assert_eq!(log[0].event, "reconnecting");
+        assert_eq!(log[0].transferred_bytes, 4_194_304);
+        assert_eq!(log[0].retry_count, 1);
+        assert!(!log[0].detail.contains("secret"));
+        assert!(!log[0].detail.contains("token-123"));
+        assert!(!log[0].detail.contains("hunter2"));
+        assert!(log[0].detail.contains("<redacted>"));
     }
 
     #[test]
@@ -965,6 +1297,9 @@ mod tests {
             Some((8_388_608, job.total_bytes, 2))
         );
 
+        drop(store);
+        let store =
+            BookmarkStore::new(directory.path()).expect("reopen bookmark store after simulated app exit");
         let restored = store.transfer_jobs().expect("restore transfer jobs");
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].status, "Failed");

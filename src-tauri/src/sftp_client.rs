@@ -786,7 +786,7 @@ mod tests {
         let upload = std::env::temp_dir().join("harbor_sftp_large_upload.bin");
         let partial_upload = std::env::temp_dir().join("harbor_sftp_partial_upload.bin");
         let download = std::env::temp_dir().join("harbor_sftp_large_download.bin");
-        let content = vec![0x5a; 2 * 1024 * 1024 + 17];
+        let content = vec![0x5a; 16 * 1024 * 1024 + 17];
         let resume_offset = 512 * 1024;
         tokio::fs::write(&upload, &content).await.expect("write upload fixture");
         tokio::fs::write(&partial_upload, &content[..resume_offset])
@@ -816,12 +816,30 @@ mod tests {
         assert_eq!(metadata_entry.permissions.as_deref(), Some("rw-r-----"));
         assert_eq!(metadata_entry.modified.as_deref(), Some("2026-08-26 01:02:03"));
         client.rename(&remote, &renamed).await.expect("rename Unicode path");
-        tokio::fs::write(&download, &content[..resume_offset]).await.expect("write partial download fixture");
+        let interrupted = client
+            .download_file_resumable_with_progress(
+                &renamed,
+                download.to_str().unwrap(),
+                0,
+                |done, _| async move {
+                    if done >= resume_offset as u64 {
+                        Err(anyhow::anyhow!("simulated connection interruption"))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .await;
+        assert!(interrupted.is_err(), "the injected interruption must stop the first download");
+        let saved_offset = tokio::fs::metadata(&download).await.expect("partial download metadata").len();
+        assert!(saved_offset >= resume_offset as u64 && saved_offset < content.len() as u64);
+        client.disconnect().await.expect("disconnect interrupted session");
+        client.reconnect().await.expect("reconnect interrupted session");
         client
             .download_file_resumable_with_progress(
                 &renamed,
                 download.to_str().unwrap(),
-                resume_offset as u64,
+                saved_offset,
                 |_, _| async { Ok(()) },
             )
             .await
