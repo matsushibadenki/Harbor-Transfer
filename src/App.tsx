@@ -288,9 +288,9 @@ const columnCopy = {
 } as const;
 
 const viewCopy = {
-  ja: { list: 'リスト表示', icons: 'アイコン表示', columns: 'カラム表示', empty: '項目がありません' },
-  en: { list: 'List view', icons: 'Icon view', columns: 'Column view', empty: 'No items' },
-  'zh-CN': { list: '列表视图', icons: '图标视图', columns: '分栏视图', empty: '没有项目' },
+  ja: { list: 'リスト表示', icons: 'アイコン表示', columns: 'カラム表示', empty: '項目がありません', items: '{{count}}項目', selected: '{{count}}項目を選択', preview: 'プレビュー' },
+  en: { list: 'List view', icons: 'Icon view', columns: 'Column view', empty: 'No items', items: '{{count}} items', selected: '{{count}} selected', preview: 'Preview' },
+  'zh-CN': { list: '列表视图', icons: '图标视图', columns: '分栏视图', empty: '没有项目', items: '{{count}}个项目', selected: '已选择{{count}}个项目', preview: '预览' },
 } as const;
 
 const syncCopy = {
@@ -656,6 +656,16 @@ export default function App() {
       .filter((entry) => (preferences.showHiddenFiles || !entry.name.startsWith('.')) && entry.name.toLowerCase().includes(normalizedQuery))
       .sort(compare);
   }, [entries, language, preferences.showHiddenFiles, query, sortColumn, sortDirection]);
+  const columnPreview = useMemo(() => {
+    for (let index = columnLevels.length - 1; index >= 0; index -= 1) {
+      const level = columnLevels[index];
+      if (!level?.selectedName) continue;
+      const entry = level.entries.find((candidate) => entryIdentity(candidate) === level.selectedName);
+      if (entry && entry.file_type !== 'Directory') return { entry, basePath: level.path };
+    }
+    return null;
+  }, [columnLevels]);
+  const selectedCount = selectedRemoteItems.filter((item) => item.connectionId === active?.id).length;
   const hasActiveTransfer = transfers.some((item) => item.status === 'Running') || Boolean(dragPreparingPath) || Boolean(directoryProgress && directoryProgress.status !== 'completed' && directoryProgress.status !== 'cancelled' && directoryProgress.status !== 'failed');
   const breadcrumbs = useMemo(() => {
     const segments = path.split('/').filter(Boolean);
@@ -2028,15 +2038,15 @@ export default function App() {
               {visibleColumns.map((column) => <span className={`list-cell ${column}-column`} role="cell" key={column}>{renderListCell(entry, column, path, selected)}</span>)}<span className="file-grid-spacer" aria-hidden="true"/><button aria-label={menuText.information} title={menuText.information} onClick={(event) => openFileInformation(event, entry)}><MoreHorizontal size={18}/></button>
             </div>; })}
           </div>}
-          {viewMode === 'icons' && <div className="icon-grid" role="grid">
+          {viewMode === 'icons' && <div className="icon-grid" role="grid" aria-label={viewsText.icons}>
             {filteredEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
             {filteredEntries.map((entry) => { const remotePath = entryRemotePath(path, entry); const selected = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const renaming = isInlineRenaming(entry, path); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`icon-entry ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} role="gridcell" aria-selected={selected} key={entryIdentity(entry)} draggable={entry.file_type !== 'Symlink' && !renaming} onContextMenu={(event) => openEntryContext(event, entry)} onDragStart={(event) => startRemoteDrag(event, entry)}>
               {renaming ? <div className="icon-entry-main inline-renaming">
                 <RemoteEntryIcon entry={entry} className="entry-art" size={entry.file_type === 'Directory' ? 46 : 44}/>
                 {inlineRenameInput('icons')}<small>{entry.file_type === 'Directory' ? entry.permissions ?? '—' : formatBytes(entry.size)}</small>
-              </div> : <button className="icon-entry-main" title={selected ? menuText.rename : entry.name} onClick={(event) => { if (selected) beginInlineRename(event, entry, path); else scheduleRemoteDragPreparation(event, entry); }} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); }} onKeyDown={(event) => { if (event.key === 'F2') { beginInlineRename(event, entry, path); return; } if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(event, entry); } if (event.key !== 'Enter') return; event.preventDefault(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); }}>
+              </div> : <button className="icon-entry-main" title={entry.name} onClick={(event) => scheduleRemoteDragPreparation(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); }} onKeyDown={(event) => { if (event.key === 'F2') { beginInlineRename(event, entry, path); return; } if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(event, entry); } if (event.key !== 'Enter') return; event.preventDefault(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); }}>
                 <RemoteEntryIcon entry={entry} className="entry-art" size={entry.file_type === 'Directory' ? 46 : 44}/>
-                <strong>{entry.name}</strong><small>{entry.file_type === 'Directory' ? entry.permissions ?? '—' : formatBytes(entry.size)}</small>
+                <strong><span title={selected ? menuText.rename : entry.name} onClick={(event) => { if (selected) beginInlineRename(event, entry, path); }}>{entry.name}</span></strong><small>{entry.file_type === 'Directory' ? entry.permissions ?? '—' : formatBytes(entry.size)}</small>
               </button>}
               <button className="icon-entry-more" aria-label={menuText.information} title={menuText.information} onClick={(event) => openFileInformation(event, entry)}><MoreHorizontal size={16}/></button>
             </div>; })}
@@ -2048,16 +2058,28 @@ export default function App() {
                 <div className="directory-column-title" title={visibleRemotePath(level.path)}>{visibleRemotePath(level.path)}</div>
                 {visibleLevelEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
                 {visibleLevelEntries.map((entry) => { const remotePath = entryRemotePath(level.path, entry); const selectedForAction = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const selected = level.selectedName === entryIdentity(entry) || selectedForAction; const renaming = isInlineRenaming(entry, level.path); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`column-entry ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entryIdentity(entry)} role="option" aria-selected={selected} draggable={entry.file_type !== 'Symlink' && !renaming} onContextMenu={(event) => openEntryContext(event, entry, level.path)} onDragStart={(event) => startRemoteDrag(event, entry, level.path)}>
-                  {renaming ? <div className="column-entry-main inline-renaming"><RemoteEntryIcon entry={entry} size={entry.file_type === 'Directory' ? 17 : 16}/>{inlineRenameInput('columns')}</div> : <button className="column-entry-main" title={selectedForAction ? menuText.rename : entry.name} onClick={(event) => { if (selectedForAction) { beginInlineRename(event, entry, level.path); return; } if (event.detail <= 1) { cancelScheduledDragPreparation(); selectRemoteEntry(event, entry, level.path, visibleLevelEntries); if (!event.metaKey && !event.ctrlKey && !event.shiftKey) void openColumnEntry(levelIndex, entry); } }} onDoubleClick={() => { cancelScheduledDragPreparation(); if (entry.file_type !== 'Directory') void editRemoteFile(entry, level.path); }} onKeyDown={(event) => { if (event.key === 'F2') { beginInlineRename(event, entry, level.path); return; } if (event.key !== 'Enter') return; event.preventDefault(); entry.file_type === 'Directory' ? void openColumnEntry(levelIndex, entry) : void editRemoteFile(entry, level.path); }}>
-                    <RemoteEntryIcon entry={entry} size={entry.file_type === 'Directory' ? 17 : 16}/><span>{entry.name}</span>{entry.file_type === 'Directory' ? <ChevronRight size={14}/> : <small>{formatBytes(entry.size)}</small>}
+                  {renaming ? <div className="column-entry-main inline-renaming"><RemoteEntryIcon entry={entry} size={entry.file_type === 'Directory' ? 17 : 16}/>{inlineRenameInput('columns')}</div> : <button className="column-entry-main" title={entry.name} onClick={(event) => { if (event.detail <= 1) { cancelScheduledDragPreparation(); selectRemoteEntry(event, entry, level.path, visibleLevelEntries); if (!event.metaKey && !event.ctrlKey && !event.shiftKey) void openColumnEntry(levelIndex, entry); } }} onDoubleClick={() => { cancelScheduledDragPreparation(); if (entry.file_type !== 'Directory') void editRemoteFile(entry, level.path); }} onKeyDown={(event) => { if (event.key === 'F2') { beginInlineRename(event, entry, level.path); return; } if (event.key !== 'Enter') return; event.preventDefault(); entry.file_type === 'Directory' ? void openColumnEntry(levelIndex, entry) : void editRemoteFile(entry, level.path); }}>
+                    <RemoteEntryIcon entry={entry} size={entry.file_type === 'Directory' ? 17 : 16}/><span title={selectedForAction ? menuText.rename : entry.name} onClick={(event) => { if (selectedForAction) beginInlineRename(event, entry, level.path); }}>{entry.name}</span>{entry.file_type === 'Directory' ? <ChevronRight size={14}/> : <small>{formatBytes(entry.size)}</small>}
                   </button>}
                   <button className="column-entry-more" aria-label={menuText.information} title={menuText.information} onClick={(event) => openFileInformation(event, entry, level.path)}><MoreHorizontal size={15}/></button>
                 </div>; })}
               </section>;
             })}
+            {columnPreview && <aside className="column-preview" aria-label={viewsText.preview}>
+              <div className="column-preview-art"><RemoteEntryIcon entry={columnPreview.entry} size={58}/></div>
+              <strong title={columnPreview.entry.name}>{columnPreview.entry.name}</strong>
+              <dl>
+                <div><dt>{columnCopy[language].type}</dt><dd>{entryKind(columnPreview.entry)}</dd></div>
+                <div><dt>{t.size}</dt><dd>{formatBytes(columnPreview.entry.size)}</dd></div>
+                <div><dt>{t.modified}</dt><dd>{columnPreview.entry.modified ?? '—'}</dd></div>
+                {columnPreview.entry.permissions && <div><dt>{columnCopy[language].permissions}</dt><dd className="permissions-cell">{columnPreview.entry.permissions}</dd></div>}
+              </dl>
+              <small title={entryRemotePath(columnPreview.basePath, columnPreview.entry)}>{visibleRemotePath(entryRemotePath(columnPreview.basePath, columnPreview.entry))}</small>
+            </aside>}
           </div>}
           </div>
           <nav className="breadcrumb-bar" aria-label={t.breadcrumbs}>
+            <span className="file-view-status" aria-live="polite">{(selectedCount ? viewsText.selected : viewsText.items).replace('{{count}}', String(selectedCount || filteredEntries.length))}</span>
             {breadcrumbs.map((crumb, index) => <span className="breadcrumb-item" key={crumb.path}>
               {index > 0 && <ChevronRight size={13} aria-hidden="true"/>}
               <button title={crumb.path} aria-current={index === breadcrumbs.length - 1 ? 'location' : undefined} onClick={() => void navigateDirectory(active, crumb.path)}>{crumb.label}</button>

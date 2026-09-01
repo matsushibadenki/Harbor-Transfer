@@ -1,0 +1,15 @@
+{
+  "date": "2026-09-01",
+  "scope": "file-workspace",
+  "framework": "React 19 with Tauri 2 and Vite",
+  "fontStack": "existing macOS system UI and SFMono roles",
+  "palette": "existing Harbor mint accent with neutral light and dark file canvases",
+  "motion": "motion-cut; short state transitions only",
+  "spacing": "existing compact desktop scale aligned to four-point increments",
+  "preserve": [
+    "application information architecture",
+    "Harbor Transfer palette",
+    "user-controlled filename typography and density",
+    "existing file operations and selection behavior"
+  ]
+}

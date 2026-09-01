@@ -1,4 +1,7 @@
-/* Hallmark · genre: modern-minimal · macrostructure: Workbench · dark-palette-audit */
+/* Hallmark · component: file-workspace · genre: modern-minimal · theme: Harbor neutral
+ * states: default · hover · focus · active · disabled · loading · error · success
+ * pre-emit critique: P5 H5 E4 S5 R5 V4 · contrast: pass (40–41) · tokens: pass (48) · responsive: pass (49)
+ */
 :root {
   --ht-file-name: #000;
   --ht-icon-image: #7c3aed;
@@ -3152,4 +3155,464 @@ html[data-resolved-theme='dark'] .file-display-region .column-entry.selected,
 html[data-resolved-theme='dark'] .file-display-region .icon-entry.selected {
   background: var(--ht-file-row-selected-neutral);
   box-shadow: none;
+}
+
+/* Finder-grade file workspace: one quiet canvas, precise selection, and
+   mode-specific density without card-like decoration. */
+:root {
+  --finder-canvas: oklch(98.2% 0.003 180);
+  --finder-canvas-alt: oklch(96.9% 0.003 180);
+  --finder-header: oklch(95.8% 0.004 180);
+  --finder-hover: oklch(93.9% 0.006 180);
+  --finder-selected: oklch(89.5% 0.015 180);
+  --finder-selected-strong: oklch(83% 0.035 180);
+  --finder-rule: oklch(86.5% 0.006 180);
+  --finder-ink: oklch(23% 0.012 180);
+  --finder-secondary: oklch(47% 0.012 180);
+  --finder-muted: oklch(46% 0.01 180);
+  --finder-focus: oklch(53% 0.13 177);
+  --finder-control: oklch(99% 0.002 180);
+  --finder-shadow: 0 1px 2px oklch(20% 0.01 180 / 7%);
+  --finder-header-highlight: 0 1px 0 oklch(100% 0.002 180 / 35%);
+  --finder-selection-ring: 0 0 0 1px oklch(48% 0.04 180 / 18%);
+  --finder-font-mono: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --finder-radius-sm: 5px;
+  --finder-radius-md: 8px;
+  --finder-space-2xs: 4px;
+  --finder-space-xs: 8px;
+  --finder-space-sm: 12px;
+  --finder-space-md: 16px;
+  --finder-dur-fast: 120ms;
+  --finder-dur-hover: 180ms;
+  --finder-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+html[data-resolved-theme='dark'] {
+  --finder-canvas: oklch(19% 0.006 180);
+  --finder-canvas-alt: oklch(20.5% 0.006 180);
+  --finder-header: oklch(23% 0.007 180);
+  --finder-hover: oklch(26% 0.01 180);
+  --finder-selected: oklch(31% 0.023 180);
+  --finder-selected-strong: oklch(38% 0.045 180);
+  --finder-rule: oklch(31% 0.008 180);
+  --finder-ink: oklch(94% 0.006 180);
+  --finder-secondary: oklch(75% 0.01 180);
+  --finder-muted: oklch(68% 0.01 180);
+  --finder-focus: oklch(72% 0.12 177);
+  --finder-control: oklch(24% 0.007 180);
+  --finder-shadow: 0 1px 2px oklch(5% 0.01 180 / 24%);
+  --finder-header-highlight: 0 1px 0 oklch(43% 0.006 180 / 18%);
+  --finder-selection-ring: 0 0 0 1px oklch(76% 0.05 180 / 22%);
+}
+
+.file-display-region,
+.file-display-region .file-table,
+.file-display-region .icon-grid,
+.file-display-region .column-browser,
+.file-display-region .directory-column {
+  color: var(--finder-secondary);
+  background: var(--finder-canvas);
+}
+
+/* List view */
+.file-display-region .file-table {
+  scrollbar-color: var(--finder-rule) transparent;
+}
+
+.file-display-region .file-header {
+  height: 32px;
+  border-block-end: 1px solid var(--finder-rule);
+  color: var(--finder-secondary);
+  background: var(--finder-header);
+  box-shadow: var(--finder-header-highlight);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.file-display-region .file-row {
+  position: relative;
+  border: 0;
+  color: var(--finder-secondary);
+  background: var(--finder-canvas);
+  transition: background-color var(--finder-dur-fast) var(--finder-ease-out);
+}
+
+.file-display-region .file-row:nth-child(odd) {
+  background: var(--finder-canvas-alt);
+}
+
+.file-display-region .file-row:nth-child(even) {
+  background: var(--finder-canvas);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .file-display-region .file-row:hover {
+    color: var(--finder-ink);
+    background: var(--finder-hover);
+  }
+}
+
+.file-display-region .file-row.selected,
+.file-display-region .file-row.selected:hover {
+  color: var(--finder-ink);
+  background: var(--finder-selected);
+  box-shadow: none;
+}
+
+.file-display-region .file-row:focus-visible {
+  z-index: 1;
+  outline: 2px solid var(--finder-focus);
+  outline-offset: -2px;
+}
+
+.file-display-region .file-row:active {
+  background: var(--finder-selected-strong);
+}
+
+.file-display-region .file-name {
+  gap: var(--finder-space-xs);
+}
+
+.file-display-region .file-name-text {
+  color: var(--finder-ink) !important;
+  line-height: 1.25;
+}
+
+.file-display-region .size-cell,
+.file-display-region .modified-cell,
+.file-display-region .permissions-cell,
+.file-display-region .owner-cell,
+.file-display-region .group-cell,
+.file-display-region .type-cell {
+  color: var(--finder-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.file-display-region .file-row.selected .size-cell,
+.file-display-region .file-row.selected .modified-cell,
+.file-display-region .file-row.selected .permissions-cell,
+.file-display-region .file-row.selected .owner-cell,
+.file-display-region .file-row.selected .group-cell,
+.file-display-region .file-row.selected .type-cell {
+  color: var(--finder-ink);
+}
+
+.file-header .column-sort-button {
+  border-radius: var(--finder-radius-sm);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .file-header .column-sort-button:hover {
+    color: var(--finder-ink);
+    background: var(--finder-hover);
+  }
+}
+
+.file-header .column-sort-button:focus-visible,
+.file-row > button:last-child:focus-visible,
+.icon-entry button:focus-visible,
+.column-entry button:focus-visible {
+  outline: 2px solid var(--finder-focus);
+  outline-offset: -2px;
+}
+
+.column-resizer::after {
+  background: var(--finder-rule);
+}
+
+.column-resizer:hover::after,
+.column-resizer:focus-visible::after {
+  background: var(--finder-focus);
+}
+
+/* Icon view: icons sit directly on the canvas. Selection is attached to the
+   name label, matching Finder instead of turning every item into a card. */
+.file-display-region .icon-grid {
+  grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
+  grid-auto-rows: minmax(var(--icon-row-height, 132px), auto);
+  gap: var(--finder-space-xs) var(--finder-space-sm);
+  padding: var(--finder-space-md) 20px 24px;
+  background: var(--finder-canvas);
+  scrollbar-color: var(--finder-rule) transparent;
+}
+
+.file-display-region .icon-entry,
+.file-display-region .icon-entry:hover,
+.file-display-region .icon-entry:focus-within,
+.file-display-region .icon-entry.selected {
+  border: 0;
+  border-radius: var(--finder-radius-md);
+  background: transparent;
+  box-shadow: none;
+}
+
+.file-display-region .icon-entry-main {
+  gap: 7px !important;
+  padding: 10px 6px 8px !important;
+  border-radius: var(--finder-radius-md);
+  color: var(--finder-secondary);
+}
+
+.file-display-region .icon-entry-main:hover:not(:disabled),
+.file-display-region .icon-entry-main:focus,
+.file-display-region .icon-entry.selected .icon-entry-main {
+  background: transparent;
+}
+
+.file-display-region .icon-entry-main .entry-art {
+  flex: 0 0 auto;
+  filter: drop-shadow(var(--finder-shadow));
+  transition: transform var(--finder-dur-hover) var(--finder-ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .file-display-region .icon-entry:hover .entry-art {
+    transform: translateY(-1px);
+  }
+}
+
+.file-display-region .icon-entry-main strong {
+  display: flex;
+  width: 100%;
+  min-height: 2.65em;
+  align-items: flex-start;
+  justify-content: center;
+  overflow: visible;
+  color: var(--finder-ink) !important;
+  line-height: 1.28;
+  white-space: normal;
+}
+
+.file-display-region .icon-entry-main strong > span {
+  display: -webkit-box;
+  max-width: 100%;
+  padding: 2px 5px;
+  overflow: hidden;
+  border-radius: var(--finder-radius-sm);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
+.file-display-region .icon-entry.selected .icon-entry-main strong > span {
+  color: var(--finder-ink);
+  background: var(--finder-selected-strong);
+  box-shadow: var(--finder-selection-ring);
+}
+
+.file-display-region .icon-entry-main small {
+  color: var(--finder-muted);
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.file-display-region .icon-entry-more {
+  top: 3px;
+  inset-inline-end: 3px;
+  border-radius: 50%;
+  color: var(--finder-secondary);
+  background: var(--finder-control);
+  box-shadow: var(--finder-shadow);
+}
+
+.file-display-region .icon-entry.drag-ready .entry-art {
+  transform: translateY(-2px);
+}
+
+.file-display-region .inline-rename-input.icons {
+  min-height: 27px;
+  background: var(--finder-control);
+}
+
+/* Column view */
+.file-display-region .column-browser {
+  align-items: stretch;
+  background: var(--finder-canvas);
+  scrollbar-color: var(--finder-rule) transparent;
+}
+
+.file-display-region .directory-column {
+  width: clamp(230px, 24vw, 310px);
+  min-width: 220px;
+  flex-basis: clamp(230px, 24vw, 310px);
+  border: 0;
+  border-inline-end: 1px solid var(--finder-rule);
+  background: var(--finder-canvas);
+  scrollbar-color: var(--finder-rule) transparent;
+}
+
+.file-display-region .directory-column-title {
+  height: 30px;
+  padding: 7px 11px 5px;
+  border: 0;
+  border-block-end: 1px solid var(--finder-rule);
+  color: var(--finder-muted);
+  background: var(--finder-header);
+  font-family: var(--finder-font-mono);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.file-display-region .column-entry,
+.file-display-region .column-entry:nth-child(odd),
+.file-display-region .column-entry:nth-child(even) {
+  border: 0;
+  color: var(--finder-secondary);
+  background: transparent;
+  transition: background-color var(--finder-dur-fast) var(--finder-ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .file-display-region .column-entry:hover {
+    color: var(--finder-ink);
+    background: var(--finder-hover);
+  }
+}
+
+.file-display-region .column-entry.selected,
+.file-display-region .column-entry.selected:hover {
+  color: var(--finder-ink);
+  background: var(--finder-selected-strong);
+}
+
+.file-display-region .column-entry-main {
+  gap: 7px !important;
+  padding-inline: 10px 4px !important;
+  color: inherit;
+}
+
+.file-display-region .column-entry-main > span {
+  color: var(--finder-ink) !important;
+}
+
+.file-display-region .column-entry-main small,
+.file-display-region .column-entry-more {
+  color: var(--finder-muted);
+}
+
+.file-display-region .column-entry.selected .column-entry-main small,
+.file-display-region .column-entry.selected .column-entry-more {
+  color: var(--finder-secondary);
+}
+
+.column-preview {
+  width: 250px;
+  min-width: 230px;
+  flex: 0 0 250px;
+  overflow: auto;
+  padding: 36px 20px 24px;
+  border-inline-start: 0;
+  color: var(--finder-secondary);
+  background: var(--finder-canvas);
+  text-align: center;
+}
+
+.column-preview-art {
+  display: grid;
+  min-height: 74px;
+  place-items: center;
+  color: var(--ht-icon-generic);
+}
+
+.column-preview-art svg {
+  filter: drop-shadow(var(--finder-shadow));
+}
+
+.column-preview > strong {
+  display: -webkit-box;
+  margin-block: 8px 22px;
+  overflow: hidden;
+  color: var(--finder-ink);
+  font-size: var(--file-name-font-size, 13px);
+  font-weight: var(--file-name-font-weight, 400);
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow-wrap: anywhere;
+}
+
+.column-preview dl {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  text-align: start;
+}
+
+.column-preview dl > div {
+  display: grid;
+  grid-template-columns: minmax(76px, auto) minmax(0, 1fr);
+  gap: var(--finder-space-xs);
+  padding-block: 7px;
+  border-block-start: 1px solid var(--finder-rule);
+}
+
+.column-preview dt {
+  color: var(--finder-muted);
+  font-size: 10px;
+}
+
+.column-preview dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--finder-secondary);
+  font-size: 10px;
+  text-align: end;
+}
+
+.column-preview > small {
+  display: block;
+  margin-block-start: 18px;
+  overflow: hidden;
+  color: var(--finder-muted);
+  font-family: var(--finder-font-mono);
+  font-size: 9px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  text-align: start;
+}
+
+.file-view-status {
+  flex: none;
+  margin-inline-end: 8px;
+  padding-inline-end: 12px;
+  border-inline-end: 1px solid var(--finder-rule);
+  color: var(--finder-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+@media (max-width: 52rem) {
+  .file-display-region .icon-grid {
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    padding-inline: 12px;
+  }
+
+  .column-preview {
+    display: none;
+  }
+}
+
+@media (pointer: coarse) {
+  .file-display-region .file-row,
+  .file-display-region .column-entry-main {
+    min-height: 44px !important;
+  }
+
+  .icon-entry-more,
+  .column-entry-more {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .file-display-region .file-row,
+  .file-display-region .column-entry,
+  .file-display-region .icon-entry-main .entry-art {
+    transition-duration: 0ms;
+  }
 }
