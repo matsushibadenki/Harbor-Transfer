@@ -470,6 +470,30 @@ pub struct RemotePasteRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum WorkspaceEndpoint {
+    Local { path: String },
+    Remote { connection_id: String, path: String },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceTransferRequest {
+    pub source: WorkspaceEndpoint,
+    pub destination: WorkspaceEndpoint,
+    pub is_directory: bool,
+    #[serde(default)]
+    pub move_item: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceTransferResult {
+    pub item_count: usize,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetMetadataRequest {
     pub connection_id: String,
@@ -2342,6 +2366,362 @@ pub async fn remote_paste(
     result
 }
 
+fn collect_workspace_local_entries(
+    root: &Path,
+    current: &Path,
+    entries: &mut Vec<LocalEntry>,
+) -> Result<(), String> {
+    for entry in std::fs::read_dir(current).map_err(|error| error.to_string())? {
+        if entries.len() >= 100_000 {
+            return Err("Workspace transfer stopped after 100,000 items.".to_string());
+        }
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        let relative = path.strip_prefix(root).map_err(|error| error.to_string())?.to_path_buf();
+        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        if file_type.is_symlink() {
+            return Err(format!("Workspace transfer does not follow symbolic links: {}", path.display()));
+        }
+        if file_type.is_dir() {
+            entries.push(LocalEntry::Directory(relative));
+            collect_workspace_local_entries(root, &path, entries)?;
+        } else if file_type.is_file() {
+            entries.push(LocalEntry::File(path, relative));
+        }
+    }
+    Ok(())
+}
+
+fn validate_workspace_local_source(path: &Path, is_directory: bool) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() {
+        return Err("Workspace transfer does not follow symbolic links.".to_string());
+    }
+    if metadata.is_dir() != is_directory || (!is_directory && !metadata.is_file()) {
+        return Err("The workspace source type changed before the transfer started.".to_string());
+    }
+    Ok(())
+}
+
+async fn materialize_remote_workspace_source(
+    file_system: &mut dyn RemoteFileSystem,
+    source: &str,
+    destination: &Path,
+    is_directory: bool,
+) -> Result<WorkspaceTransferResult, String> {
+    if !is_directory {
+        if let Some(parent) = destination.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|error| error.to_string())?;
+        }
+        let bytes = file_system
+            .download_file(source, &destination.to_string_lossy())
+            .await
+            .map_err(|error| error.to_string())?;
+        return Ok(WorkspaceTransferResult { item_count: 1, bytes });
+    }
+
+    tokio::fs::create_dir_all(destination).await.map_err(|error| error.to_string())?;
+    let entries = collect_remote_export_entries(file_system, source).await?;
+    let mut item_count = 1usize;
+    let mut bytes = 0u64;
+    for entry in entries {
+        item_count += 1;
+        match entry {
+            RemoteExportEntry::Directory(relative) => {
+                tokio::fs::create_dir_all(destination.join(relative))
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            RemoteExportEntry::File { remote_path, relative } => {
+                let local_path = destination.join(relative);
+                if let Some(parent) = local_path.parent() {
+                    tokio::fs::create_dir_all(parent).await.map_err(|error| error.to_string())?;
+                }
+                bytes += file_system
+                    .download_file(&remote_path, &local_path.to_string_lossy())
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+    }
+    Ok(WorkspaceTransferResult { item_count, bytes })
+}
+
+async fn write_local_workspace_destination(
+    source: &Path,
+    destination: &Path,
+    is_directory: bool,
+) -> Result<WorkspaceTransferResult, String> {
+    if std::fs::symlink_metadata(destination).is_ok() {
+        return Err(format!("An item named '{}' already exists at the destination.", destination.display()));
+    }
+    let parent = destination.parent().ok_or("The local destination must have a parent directory.")?;
+    if !parent.is_dir() {
+        return Err(format!("The local destination directory does not exist: {}", parent.display()));
+    }
+    let sequence = REMOTE_COPY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let name = destination.file_name().and_then(|value| value.to_str()).unwrap_or("item");
+    let staging = parent.join(format!(".{name}.harbor-workspace-{sequence}.part"));
+    let outcome = async {
+        if !is_directory {
+            let bytes = tokio::fs::copy(source, &staging).await.map_err(|error| error.to_string())?;
+            tokio::fs::rename(&staging, destination).await.map_err(|error| error.to_string())?;
+            return Ok(WorkspaceTransferResult { item_count: 1, bytes });
+        }
+        tokio::fs::create_dir(&staging).await.map_err(|error| error.to_string())?;
+        let mut entries = Vec::new();
+        collect_workspace_local_entries(source, source, &mut entries)?;
+        let mut bytes = 0u64;
+        for entry in &entries {
+            match entry {
+                LocalEntry::Directory(relative) => {
+                    tokio::fs::create_dir_all(staging.join(relative))
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+                LocalEntry::File(path, relative) => {
+                    let target = staging.join(relative);
+                    if let Some(parent) = target.parent() {
+                        tokio::fs::create_dir_all(parent).await.map_err(|error| error.to_string())?;
+                    }
+                    bytes += tokio::fs::copy(path, target).await.map_err(|error| error.to_string())?;
+                }
+            }
+        }
+        tokio::fs::rename(&staging, destination).await.map_err(|error| error.to_string())?;
+        Ok(WorkspaceTransferResult { item_count: entries.len() + 1, bytes })
+    }
+    .await;
+    if outcome.is_err() {
+        let _ = if staging.is_dir() {
+            tokio::fs::remove_dir_all(&staging).await
+        } else {
+            tokio::fs::remove_file(&staging).await
+        };
+    }
+    outcome
+}
+
+async fn delete_remote_workspace_source(
+    file_system: &mut dyn RemoteFileSystem,
+    path: &str,
+    is_directory: bool,
+) -> Result<(), String> {
+    if !is_directory {
+        return file_system.delete_file(path).await.map_err(|error| error.to_string());
+    }
+    let mut pending = vec![(path.to_string(), false)];
+    let mut visited = 0usize;
+    while let Some((directory, children_visited)) = pending.pop() {
+        visited += 1;
+        if visited > 100_000 {
+            return Err("Workspace move stopped while removing more than 100,000 items.".to_string());
+        }
+        if children_visited {
+            file_system.delete_dir(&directory).await.map_err(|error| error.to_string())?;
+            continue;
+        }
+        let children = file_system.list_dir(&directory).await.map_err(|error| error.to_string())?;
+        pending.push((directory.clone(), true));
+        for child in children.into_iter().rev() {
+            let child_path =
+                remote_child_path(&directory, child.path_component.as_deref().unwrap_or(&child.name))?;
+            if matches!(child.file_type, crate::sftp_client::FileEntryType::Directory) {
+                pending.push((child_path, false));
+            } else if matches!(child.file_type, crate::sftp_client::FileEntryType::Symlink) {
+                return Err(format!("Workspace move does not remove symbolic links: {child_path}"));
+            } else {
+                file_system.delete_file(&child_path).await.map_err(|error| error.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn write_remote_workspace_destination(
+    file_system: &mut dyn RemoteFileSystem,
+    source: &Path,
+    destination: &str,
+    is_directory: bool,
+) -> Result<WorkspaceTransferResult, String> {
+    let (destination_parent, destination_name) = remote_parent_and_name(destination)?;
+    let existing = file_system
+        .list_dir(&destination_parent)
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .any(|entry| entry.name == destination_name);
+    if existing {
+        return Err(format!("An item named '{destination_name}' already exists at the destination."));
+    }
+    if !is_directory {
+        let bytes = file_system
+            .upload_file(&source.to_string_lossy(), destination)
+            .await
+            .map_err(|error| error.to_string())?;
+        return Ok(WorkspaceTransferResult { item_count: 1, bytes });
+    }
+
+    file_system.create_dir(destination).await.map_err(|error| error.to_string())?;
+    let mut entries = Vec::new();
+    collect_workspace_local_entries(source, source, &mut entries)?;
+    let mut bytes = 0u64;
+    let result = async {
+        for entry in &entries {
+            match entry {
+                LocalEntry::Directory(relative) => file_system
+                    .create_dir(&remote_join(destination, relative))
+                    .await
+                    .map_err(|error| error.to_string())?,
+                LocalEntry::File(path, relative) => {
+                    bytes += file_system
+                        .upload_file(&path.to_string_lossy(), &remote_join(destination, relative))
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+        }
+        Ok(WorkspaceTransferResult { item_count: entries.len() + 1, bytes })
+    }
+    .await;
+    if result.is_err() {
+        let _ = delete_remote_workspace_source(file_system, destination, true).await;
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn workspace_transfer(
+    request: WorkspaceTransferRequest,
+    state: State<'_, Arc<AppState>>,
+) -> Result<WorkspaceTransferResult, String> {
+    let source_description = match &request.source {
+        WorkspaceEndpoint::Local { path } => path,
+        WorkspaceEndpoint::Remote { path, .. } => path,
+    };
+    let destination_description = match &request.destination {
+        WorkspaceEndpoint::Local { path } => path,
+        WorkspaceEndpoint::Remote { path, .. } => path,
+    };
+    if source_description.is_empty() || destination_description.is_empty() {
+        return Err("Workspace transfer paths cannot be empty.".to_string());
+    }
+    if source_description == destination_description
+        && matches!(
+            (&request.source, &request.destination),
+            (WorkspaceEndpoint::Local { .. }, WorkspaceEndpoint::Local { .. })
+        )
+    {
+        return Err("The source and destination are the same.".to_string());
+    }
+    if let (
+        WorkspaceEndpoint::Remote { connection_id: source_connection, path: source_path },
+        WorkspaceEndpoint::Remote { connection_id: destination_connection, path: destination_path },
+    ) = (&request.source, &request.destination)
+    {
+        remote_parent_and_name(source_path)?;
+        remote_parent_and_name(destination_path)?;
+        if source_connection == destination_connection {
+            if source_path == destination_path {
+                return Err("The source and destination are the same.".to_string());
+            }
+            if request.is_directory
+                && destination_path.starts_with(&format!("{}/", source_path.trim_end_matches('/')))
+            {
+                return Err("A directory cannot be transferred inside itself.".to_string());
+            }
+        }
+    }
+
+    let sequence = REMOTE_COPY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let staging_root = state.drag_cache_directory.join(format!("workspace-transfer-{sequence}"));
+    let staged_source = staging_root.join("payload");
+    let local_source = match &request.source {
+        WorkspaceEndpoint::Local { path } => {
+            let source = PathBuf::from(path);
+            validate_workspace_local_source(&source, request.is_directory)?;
+            if let WorkspaceEndpoint::Local { path: destination } = &request.destination {
+                let destination = PathBuf::from(destination);
+                if request.is_directory && destination.starts_with(&source) {
+                    return Err("A directory cannot be transferred inside itself.".to_string());
+                }
+            }
+            source
+        }
+        WorkspaceEndpoint::Remote { connection_id, path } => {
+            tokio::fs::create_dir_all(&staging_root).await.map_err(|error| error.to_string())?;
+            let Some(connection) = state.connection(connection_id).await else {
+                let _ = tokio::fs::remove_dir_all(&staging_root).await;
+                return Err("Source connection not found.".to_string());
+            };
+            let mut connection = connection.lock().await;
+            let prepared = materialize_remote_workspace_source(
+                connection.file_system(),
+                path,
+                &staged_source,
+                request.is_directory,
+            )
+            .await;
+            if let Err(error) = prepared {
+                drop(connection);
+                let _ = tokio::fs::remove_dir_all(&staging_root).await;
+                return Err(error);
+            }
+            staged_source.clone()
+        }
+    };
+
+    let result = match &request.destination {
+        WorkspaceEndpoint::Local { path } => {
+            write_local_workspace_destination(&local_source, Path::new(path), request.is_directory).await
+        }
+        WorkspaceEndpoint::Remote { connection_id, path } => match state.connection(connection_id).await {
+            Some(connection) => {
+                let mut connection = connection.lock().await;
+                write_remote_workspace_destination(
+                    connection.file_system(),
+                    &local_source,
+                    path,
+                    request.is_directory,
+                )
+                .await
+            }
+            None => Err("Destination connection not found.".to_string()),
+        },
+    };
+
+    let result = match result {
+        Ok(result) if request.move_item => {
+            let removed = match &request.source {
+                WorkspaceEndpoint::Local { path } => if request.is_directory {
+                    tokio::fs::remove_dir_all(path).await
+                } else {
+                    tokio::fs::remove_file(path).await
+                }
+                .map_err(|error| error.to_string()),
+                WorkspaceEndpoint::Remote { connection_id, path } => {
+                    match state.connection(connection_id).await {
+                        Some(connection) => {
+                            let mut connection = connection.lock().await;
+                            delete_remote_workspace_source(
+                                connection.file_system(),
+                                path,
+                                request.is_directory,
+                            )
+                            .await
+                        }
+                        None => Err("Source connection not found after copying the item.".to_string()),
+                    }
+                }
+            };
+            removed.map(|_| result)
+        }
+        other => other,
+    };
+    let _ = tokio::fs::remove_dir_all(&staging_root).await;
+    result
+}
+
 #[tauri::command]
 pub async fn remote_set_metadata(
     request: SetMetadataRequest,
@@ -3580,8 +3960,9 @@ mod tests {
         atomic_upload_path, commit_local_download, content_hash, effective_transfer_limits,
         is_retryable_transfer_error, local_directory_list, local_download_staging_path,
         parse_remote_modified, reject_symlink_ancestors, remote_child_path, remote_parent_and_name,
-        remote_replace_target, reserve_bandwidth, retry_backoff, safe_relative_path, Protocol,
-        TransferControl, TransferScheduler,
+        remote_replace_target, reserve_bandwidth, retry_backoff, safe_relative_path,
+        validate_workspace_local_source, write_local_workspace_destination, Protocol, TransferControl,
+        TransferScheduler,
     };
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
@@ -3828,6 +4209,54 @@ mod tests {
                 .await
                 .unwrap_err();
         assert!(error.contains("not a directory"));
+    }
+
+    #[tokio::test]
+    async fn workspace_local_copy_commits_complete_files_and_directories() {
+        let workspace = tempfile::tempdir().unwrap();
+        let source_file = workspace.path().join("source.txt");
+        let copied_file = workspace.path().join("copied.txt");
+        tokio::fs::write(&source_file, b"harbor").await.unwrap();
+        let file_result = write_local_workspace_destination(&source_file, &copied_file, false).await.unwrap();
+        assert_eq!(file_result.item_count, 1);
+        assert_eq!(file_result.bytes, 6);
+        assert_eq!(tokio::fs::read(&copied_file).await.unwrap(), b"harbor");
+
+        let source_directory = workspace.path().join("source-folder");
+        let nested = source_directory.join("nested");
+        tokio::fs::create_dir_all(&nested).await.unwrap();
+        tokio::fs::write(nested.join("港.txt"), b"transfer").await.unwrap();
+        let copied_directory = workspace.path().join("copied-folder");
+        let directory_result =
+            write_local_workspace_destination(&source_directory, &copied_directory, true).await.unwrap();
+        assert_eq!(directory_result.item_count, 3);
+        assert_eq!(directory_result.bytes, 8);
+        assert_eq!(tokio::fs::read(copied_directory.join("nested/港.txt")).await.unwrap(), b"transfer");
+    }
+
+    #[tokio::test]
+    async fn workspace_local_copy_refuses_existing_destinations() {
+        let workspace = tempfile::tempdir().unwrap();
+        let source = workspace.path().join("source.txt");
+        let destination = workspace.path().join("destination.txt");
+        tokio::fs::write(&source, b"new").await.unwrap();
+        tokio::fs::write(&destination, b"keep").await.unwrap();
+        let error = write_local_workspace_destination(&source, &destination, false).await.unwrap_err();
+        assert!(error.contains("already exists"));
+        assert_eq!(tokio::fs::read(&destination).await.unwrap(), b"keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_local_source_rejects_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let source = workspace.path().join("source.txt");
+        let link = workspace.path().join("link.txt");
+        std::fs::write(&source, b"source").unwrap();
+        symlink(&source, &link).unwrap();
+        assert!(validate_workspace_local_source(&link, false).is_err());
     }
 
     #[test]

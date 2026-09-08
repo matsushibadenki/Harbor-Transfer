@@ -72,6 +72,7 @@ pub fn run() {
             commands::remote_create_directory,
             commands::remote_rename,
             commands::remote_paste,
+            commands::workspace_transfer,
             commands::remote_set_metadata,
             commands::remote_delete,
             commands::remote_delete_tree,

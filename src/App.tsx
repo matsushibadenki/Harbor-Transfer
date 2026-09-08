@@ -11,7 +11,7 @@ import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { getCurrentWebviewWindow, WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AppWindow, ArrowUpToLine, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Cloud, Columns3, Copy, File, FileCog, Folder, FolderPlus, Grid2X2, HardDrive,
+  AppWindow, ArrowLeft, ArrowLeftRight, ArrowRight, ArrowUpToLine, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Cloud, Columns3, Copy, File, FileCog, Folder, FolderPlus, Grid2X2, HardDrive,
   ClipboardPaste, Download, FileArchive, FileAudio, FileCode2, FileDown, FileImage, FileJson, FileSpreadsheet, FileText, FileUp, FileVideo, FolderSync, FolderUp, GripVertical, KeyRound, Link2, List, LoaderCircle, LockKeyhole, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Plus, RefreshCw, Scissors, Search, Settings, Share2, Trash2, Upload,
 } from 'lucide-react';
 
@@ -30,6 +30,12 @@ type LocalPathInfo = { name: string; isDirectory: boolean };
 type LocalDirectoryEntry = { name: string; path: string; size: number; modifiedUnix: number; kind: 'File' | 'Directory' | 'Symlink' };
 type LocalDirectoryListing = { path: string; parent?: string; entries: LocalDirectoryEntry[] };
 type PaneKind = 'local' | 'remote';
+type ConnectTarget = 'primary' | 'secondary';
+type WorkspacePaneItem = { name: string; sourcePath: string; isDirectory: boolean };
+type WorkspacePaneState = { kind: PaneKind; directoryPath: string; connectionId?: string; entries: string[]; items: WorkspacePaneItem[] };
+type WorkspacePaneId = 'primary' | 'auxiliary';
+type WorkspaceEndpoint = { kind: 'local'; path: string } | { kind: 'remote'; connectionId: string; path: string };
+type WorkspaceTransferResult = { itemCount: number; bytes: number };
 type TransferHistory = { id: string; name: string; direction: 'Upload' | 'Download'; status: 'Completed' | 'Failed' | 'Cancelled'; detail: string; bytes: number; completedAt: string };
 type TransferJob = { id: string; connectionId: string; name: string; direction: 'Upload' | 'Download'; localPath: string; remotePath: string; status: 'Failed'; detail: string; transferredBytes: number; totalBytes: number; retryCount: number; conflictPolicy: string; isDirectory: boolean; updatedAt: string };
 type TransferLogEvent = { id: number; transferId: string; name: string; direction: 'Upload' | 'Download'; event: string; status: string; detail: string; transferredBytes: number; totalBytes: number; retryCount: number; createdAt: string };
@@ -276,9 +282,9 @@ const transferLogCopy = {
 } as const;
 
 const dualPaneCopy = {
-  ja: { show: 'デュアルペインを表示', hide: 'デュアルペインを閉じる', local: 'ローカル', remote: '接続先', choose: 'ローカルフォルダを選択', up: '親フォルダへ移動', refresh: 'ローカルを更新', empty: '項目がありません', unavailable: 'ローカルフォルダを表示できません' },
-  en: { show: 'Show dual pane', hide: 'Close dual pane', local: 'Local', remote: 'Connection', choose: 'Choose local folder', up: 'Go to parent folder', refresh: 'Refresh local folder', empty: 'No items', unavailable: 'The local folder could not be displayed' },
-  'zh-CN': { show: '显示双栏', hide: '关闭双栏', local: '本地', remote: '连接', choose: '选择本地文件夹', up: '前往上级文件夹', refresh: '刷新本地文件夹', empty: '没有项目', unavailable: '无法显示本地文件夹' },
+  ja: { show: 'デュアルペインを表示', hide: 'デュアルペインを閉じる', local: 'ローカル', remote: '接続先', source: 'ペインの接続先', swap: '左右のペインを入れ替える', choose: 'ローカルフォルダを選択', up: '親フォルダへ移動', refresh: '更新', empty: '項目がありません', unavailable: 'この場所を表示できません', connected: '接続済み', copyRight: '選択項目を右へコピー', copyLeft: '選択項目を左へコピー', moveRight: '選択項目を右へ移動', moveLeft: '選択項目を左へ移動', selectItems: '転送元の項目を選択してください', targetUnavailable: '転送先のフォルダを開いてください', transferring: 'ペイン間で転送しています…', copied: '{{count}}項目をコピーしました', moved: '{{count}}項目を移動しました', renamedConflict: '同名項目を避けるため「{{name}}」として転送します', dropCopy: 'ここへコピー', dropMove: 'ここへ移動', dragHint: 'Shiftキーを押しながらドロップすると移動します' },
+  en: { show: 'Show dual pane', hide: 'Close dual pane', local: 'Local', remote: 'Connection', source: 'Pane source', swap: 'Swap left and right panes', choose: 'Choose local folder', up: 'Go to parent folder', refresh: 'Refresh', empty: 'No items', unavailable: 'This location could not be displayed', connected: 'Connected', copyRight: 'Copy selected items right', copyLeft: 'Copy selected items left', moveRight: 'Move selected items right', moveLeft: 'Move selected items left', selectItems: 'Select items in the source pane', targetUnavailable: 'Open a destination folder first', transferring: 'Transferring between panes…', copied: 'Copied {{count}} items', moved: 'Moved {{count}} items', renamedConflict: 'Transferred as “{{name}}” to avoid a name conflict', dropCopy: 'Copy here', dropMove: 'Move here', dragHint: 'Hold Shift while dropping to move' },
+  'zh-CN': { show: '显示双栏', hide: '关闭双栏', local: '本地', remote: '连接', source: '窗格连接', swap: '交换左右窗格', choose: '选择本地文件夹', up: '前往上级文件夹', refresh: '刷新', empty: '没有项目', unavailable: '无法显示此位置', connected: '已连接', copyRight: '将所选项目复制到右侧', copyLeft: '将所选项目复制到左侧', moveRight: '将所选项目移动到右侧', moveLeft: '将所选项目移动到左侧', selectItems: '请在源窗格中选择项目', targetUnavailable: '请先打开目标文件夹', transferring: '正在窗格之间传输…', copied: '已复制{{count}}个项目', moved: '已移动{{count}}个项目', renamedConflict: '为避免名称冲突，已作为“{{name}}”传输', dropCopy: '复制到此处', dropMove: '移动到此处', dragHint: '按住Shift键拖放可移动' },
 } as const;
 
 const columnCopy = {
@@ -312,6 +318,7 @@ const syncUiCopy = {
 } as const;
 
 function joinPath(base: string, name: string) { return base === '/' ? `/${name}` : `${base.replace(/\/$/, '')}/${name}`; }
+function joinLocalPath(base: string, name: string) { return base === '/' ? `/${name}` : `${base.replace(/\/$/, '')}/${name}`; }
 function entryIdentity(entry: FileEntry) { return entry.path_component ?? entry.name; }
 function entryRemotePath(base: string, entry: FileEntry) { return joinPath(base, entryIdentity(entry)); }
 function visiblePathComponent(component: string) {
@@ -462,7 +469,7 @@ function upsertConnectionInOrder(current: Connection[], connection: Connection):
   return next;
 }
 
-function LocalFilePane({ language, initialPath, showHiddenFiles, onSwitch }: { language: Language; initialPath?: string; showHiddenFiles: boolean; onSwitch: () => void }) {
+function LocalFilePane({ language, initialPath, showHiddenFiles, connections, refreshToken, paneId, paneClassName = '', onSelectSource, onStateChange, onWorkspaceDragStart, onWorkspaceDrop }: { language: Language; initialPath?: string; showHiddenFiles: boolean; connections: Connection[]; refreshToken: number; paneId: WorkspacePaneId; paneClassName?: string; onSelectSource: (connection: Connection) => void; onStateChange: (state: WorkspacePaneState) => void; onWorkspaceDragStart: (paneId: WorkspacePaneId, state: WorkspacePaneState, event: React.DragEvent) => void; onWorkspaceDrop: (paneId: WorkspacePaneId, moveItem: boolean) => void }) {
   const text = dualPaneCopy[language];
   const common = copy[language];
   const [listing, setListing] = useState<LocalDirectoryListing | null>(null);
@@ -470,6 +477,8 @@ function LocalFilePane({ language, initialPath, showHiddenFiles, onSwitch }: { l
   const [query, setQuery] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  const currentPathRef = useRef(initialPath ?? '');
   const loadLocalDirectory = useCallback(async (requestedPath: string) => {
     if (!requestedPath) return;
     setBusy(true);
@@ -478,9 +487,12 @@ function LocalFilePane({ language, initialPath, showHiddenFiles, onSwitch }: { l
       const next = await invoke<LocalDirectoryListing>('local_directory_list', { path: requestedPath });
       setListing(next);
       setPathDraft(next.path);
+      currentPathRef.current = next.path;
+      setSelectedPaths(new Set());
+      onStateChange({ kind: 'local', directoryPath: next.path, entries: next.entries.map((entry) => entry.name), items: [] });
     } catch (reason) { setError(invokeErrorMessage(reason)); }
     finally { setBusy(false); }
-  }, []);
+  }, [onStateChange]);
 
   useEffect(() => {
     let cancelled = false;
@@ -493,6 +505,10 @@ function LocalFilePane({ language, initialPath, showHiddenFiles, onSwitch }: { l
     return () => { cancelled = true; };
   }, [initialPath, loadLocalDirectory]);
 
+  useEffect(() => {
+    if (refreshToken > 0 && currentPathRef.current) void loadLocalDirectory(currentPathRef.current);
+  }, [loadLocalDirectory, refreshToken]);
+
   const visibleEntries = useMemo(() => {
     const normalized = query.toLocaleLowerCase(language);
     return (listing?.entries ?? []).filter((entry) => (showHiddenFiles || !entry.name.startsWith('.')) && entry.name.toLocaleLowerCase(language).includes(normalized));
@@ -503,9 +519,9 @@ function LocalFilePane({ language, initialPath, showHiddenFiles, onSwitch }: { l
     if (typeof selected === 'string') await loadLocalDirectory(selected);
   }
 
-  return <section className="local-file-pane" aria-label={text.local}>
+  return <section className={`local-file-pane ${paneClassName}`} aria-label={text.local} onDragOver={(event) => { if (event.dataTransfer.types.includes('application/x-harbor-workspace')) { event.preventDefault(); event.currentTarget.classList.add('workspace-drag-over'); event.dataTransfer.dropEffect = event.shiftKey ? 'move' : 'copy'; } }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.classList.remove('workspace-drag-over'); }} onDrop={(event) => { event.currentTarget.classList.remove('workspace-drag-over'); if (!event.dataTransfer.types.includes('application/x-harbor-workspace')) return; event.preventDefault(); onWorkspaceDrop(paneId, event.shiftKey); }}>
     <div className="pane-heading">
-      <label className="pane-source"><HardDrive size={15}/><select aria-label={text.local} value="local" onChange={(event) => { if (event.target.value === 'remote') onSwitch(); }}><option value="local">{text.local}</option><option value="remote">{text.remote}</option></select></label>
+      <label className="pane-source"><HardDrive size={15}/><select aria-label={text.source} value="local" onChange={(event) => { const connection = connections.find((item) => item.id === event.target.value); if (connection) onSelectSource(connection); }}><option value="local">{text.local}</option>{connections.map((connection) => <option value={connection.id} key={connection.id}>{connection.name}</option>)}</select></label>
       <button aria-label={text.refresh} title={text.refresh} disabled={!listing || busy} onClick={() => listing && void loadLocalDirectory(listing.path)}><RefreshCw className={busy ? 'spinning' : ''} size={16}/></button>
       <button aria-label={text.choose} title={text.choose} onClick={() => void chooseLocalDirectory()}><Folder size={16}/></button>
       <div className="search local-search"><Search size={15}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={common.search}/></div>
@@ -519,11 +535,96 @@ function LocalFilePane({ language, initialPath, showHiddenFiles, onSwitch }: { l
       <div className="local-file-header" role="row"><span>{common.name}</span><span>{common.size}</span><span>{common.modified}</span></div>
       {visibleEntries.length === 0 ? <p className="view-empty">{text.empty}</p> : visibleEntries.map((entry) => {
         const fileEntry: FileEntry = { name: entry.name, size: entry.size, file_type: entry.kind };
-        return <button className="local-file-row" role="row" key={entry.path} title={entry.path} onDoubleClick={() => { if (entry.kind === 'Directory') void loadLocalDirectory(entry.path); }} onKeyDown={(event) => { if (event.key === 'Enter' && entry.kind === 'Directory') void loadLocalDirectory(entry.path); }}>
+        const selected = selectedPaths.has(entry.path);
+        return <button className={`local-file-row ${selected ? 'selected' : ''}`} role="row" aria-selected={selected} key={entry.path} title={`${entry.path}\n${text.dragHint}`} draggable={entry.kind !== 'Symlink'} onClick={(event) => {
+          const next = new Set(event.metaKey || event.ctrlKey ? selectedPaths : []);
+          if (next.has(entry.path)) next.delete(entry.path); else next.add(entry.path);
+          setSelectedPaths(next);
+          onStateChange({ kind: 'local', directoryPath: listing?.path ?? currentPathRef.current, entries: (listing?.entries ?? []).map((item) => item.name), items: (listing?.entries ?? []).filter((item) => next.has(item.path)).map((item) => ({ name: item.name, sourcePath: item.path, isDirectory: item.kind === 'Directory' })) });
+        }} onDragStart={(event) => { const paths = selected ? selectedPaths : new Set([entry.path]); const items = (listing?.entries ?? []).filter((item) => paths.has(item.path)).map((item) => ({ name: item.name, sourcePath: item.path, isDirectory: item.kind === 'Directory' })); onWorkspaceDragStart(paneId, { kind: 'local', directoryPath: listing?.path ?? currentPathRef.current, entries: (listing?.entries ?? []).map((item) => item.name), items }, event); }} onDoubleClick={() => { if (entry.kind === 'Directory') void loadLocalDirectory(entry.path); }} onKeyDown={(event) => { if (event.key === 'Enter' && entry.kind === 'Directory') void loadLocalDirectory(entry.path); }}>
           <span className="local-file-name" role="cell"><RemoteEntryIcon entry={fileEntry} size={17}/><span>{entry.name}</span></span><span role="cell">{entry.kind === 'Directory' ? '—' : formatBytes(entry.size)}</span><time role="cell">{entry.modifiedUnix ? new Date(entry.modifiedUnix * 1000).toLocaleString(language) : '—'}</time>
         </button>;
       })}
     </div>
+  </section>;
+}
+
+function RemoteFilePane({ language, connection, connections, showHiddenFiles, refreshToken, paneId, onSelectLocal, onSelectConnection, onStateChange, onWorkspaceDragStart, onWorkspaceDrop }: { language: Language; connection: Connection; connections: Connection[]; showHiddenFiles: boolean; refreshToken: number; paneId: WorkspacePaneId; onSelectLocal: () => void; onSelectConnection: (connection: Connection) => void; onStateChange: (state: WorkspacePaneState) => void; onWorkspaceDragStart: (paneId: WorkspacePaneId, state: WorkspacePaneState, event: React.DragEvent) => void; onWorkspaceDrop: (paneId: WorkspacePaneId, moveItem: boolean) => void }) {
+  const text = dualPaneCopy[language];
+  const common = copy[language];
+  const [path, setPath] = useState(connection.initialPath || '/');
+  const [pathDraft, setPathDraft] = useState(visibleRemotePath(connection.initialPath || '/'));
+  const [entries, setEntries] = useState<FileEntry[]>([]);
+  const [query, setQuery] = useState('');
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const connectionId = connection.id;
+  const initialPath = connection.initialPath || '/';
+  const currentPathRef = useRef(initialPath);
+
+  const loadRemoteDirectory = useCallback(async (requestedPath: string) => {
+    setBusy(true);
+    setError('');
+    try {
+      const next = await invoke<FileEntry[]>('remote_list', { request: { connectionId, path: requestedPath } });
+      setEntries(next);
+      setPath(requestedPath);
+      setPathDraft(visibleRemotePath(requestedPath));
+      currentPathRef.current = requestedPath;
+      setSelectedPaths(new Set());
+      onStateChange({ kind: 'remote', connectionId, directoryPath: requestedPath, entries: next.map((entry) => entry.name), items: [] });
+    } catch (reason) { setError(invokeErrorMessage(reason)); }
+    finally { setBusy(false); }
+  }, [connectionId, onStateChange]);
+
+  useEffect(() => {
+    setPath(initialPath);
+    setPathDraft(visibleRemotePath(initialPath));
+    void loadRemoteDirectory(initialPath);
+  }, [connectionId, initialPath, loadRemoteDirectory]);
+
+  useEffect(() => {
+    if (refreshToken > 0) void loadRemoteDirectory(currentPathRef.current);
+  }, [loadRemoteDirectory, refreshToken]);
+
+  const visibleEntries = useMemo(() => {
+    const normalized = query.toLocaleLowerCase(language);
+    return entries.filter((entry) => (showHiddenFiles || !entry.name.startsWith('.')) && entry.name.toLocaleLowerCase(language).includes(normalized));
+  }, [entries, language, query, showHiddenFiles]);
+
+  return <section className="local-file-pane remote-file-pane auxiliary-file-pane" aria-label={`${text.remote}: ${connection.name}`} onDragOver={(event) => { if (event.dataTransfer.types.includes('application/x-harbor-workspace')) { event.preventDefault(); event.currentTarget.classList.add('workspace-drag-over'); event.dataTransfer.dropEffect = event.shiftKey ? 'move' : 'copy'; } }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.classList.remove('workspace-drag-over'); }} onDrop={(event) => { event.currentTarget.classList.remove('workspace-drag-over'); if (!event.dataTransfer.types.includes('application/x-harbor-workspace')) return; event.preventDefault(); onWorkspaceDrop(paneId, event.shiftKey); }}>
+    <div className="pane-heading">
+      <label className="pane-source"><Cloud size={15}/><select aria-label={text.source} value={connection.id} onChange={(event) => {
+        if (event.target.value === 'local') { onSelectLocal(); return; }
+        const selected = connections.find((item) => item.id === event.target.value);
+        if (selected && selected.id !== connection.id) onSelectConnection(selected);
+      }}><option value="local">{text.local}</option>{connections.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
+      <button aria-label={text.refresh} title={text.refresh} disabled={busy} onClick={() => void loadRemoteDirectory(path)}><RefreshCw className={busy ? 'spinning' : ''} size={16}/></button>
+      <div className="search local-search"><Search size={15}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={common.search}/></div>
+    </div>
+    <div className="local-path-toolbar">
+      <button aria-label={text.up} title={text.up} disabled={path === '/'} onClick={() => void loadRemoteDirectory(parentPath(path))}><ArrowUpToLine size={17}/></button>
+      <div className="path-field"><span>{common.path}</span><input value={pathDraft} title={visibleRemotePath(path)} {...technicalInputProps} onChange={(event) => setPathDraft(event.target.value)} onBlur={() => setPathDraft(visibleRemotePath(path))} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void loadRemoteDirectory(pathDraft === visibleRemotePath(path) ? path : pathDraft); } if (event.key === 'Escape') { setPathDraft(visibleRemotePath(path)); event.currentTarget.blur(); } }}/></div>
+    </div>
+    {error && <div className="error-banner"><strong>{text.unavailable}:</strong> {error}</div>}
+    <div className="secondary-connection-strip"><span className="online-dot"/><strong>{connection.name}</strong><span>{connection.username ? `${connection.username}@` : ''}{connection.host}</span><small>{text.connected}</small></div>
+    <div className="local-file-list" role="table">
+      <div className="local-file-header" role="row"><span>{common.name}</span><span>{common.size}</span><span>{common.modified}</span></div>
+      {visibleEntries.length === 0 ? <p className="view-empty">{busy ? '…' : text.empty}</p> : visibleEntries.map((entry) => {
+        const remotePath = entryRemotePath(path, entry);
+        const selected = selectedPaths.has(remotePath);
+        return <button className={`local-file-row ${selected ? 'selected' : ''}`} role="row" aria-selected={selected} key={entryIdentity(entry)} title={`${entry.name}\n${text.dragHint}`} draggable={entry.file_type !== 'Symlink'} onClick={(event) => {
+          const next = new Set(event.metaKey || event.ctrlKey ? selectedPaths : []);
+          if (next.has(remotePath)) next.delete(remotePath); else next.add(remotePath);
+          setSelectedPaths(next);
+          onStateChange({ kind: 'remote', connectionId, directoryPath: path, entries: entries.map((item) => item.name), items: entries.map((item) => ({ item, itemPath: entryRemotePath(path, item) })).filter(({ itemPath }) => next.has(itemPath)).map(({ item, itemPath }) => ({ name: item.name, sourcePath: itemPath, isDirectory: item.file_type === 'Directory' })) });
+        }} onDragStart={(event) => { const paths = selected ? selectedPaths : new Set([remotePath]); const items = entries.map((item) => ({ item, itemPath: entryRemotePath(path, item) })).filter(({ itemPath }) => paths.has(itemPath)).map(({ item, itemPath }) => ({ name: localDownloadName(item), sourcePath: itemPath, isDirectory: item.file_type === 'Directory' })); onWorkspaceDragStart(paneId, { kind: 'remote', connectionId, directoryPath: path, entries: entries.map((item) => item.name), items }, event); }} onDoubleClick={() => { if (entry.file_type === 'Directory') void loadRemoteDirectory(remotePath); }} onKeyDown={(event) => { if (event.key === 'Enter' && entry.file_type === 'Directory') void loadRemoteDirectory(remotePath); }}>
+          <span className="local-file-name" role="cell"><RemoteEntryIcon entry={entry} size={17}/><span>{entry.name}</span></span><span role="cell">{entry.file_type === 'Directory' ? '—' : formatBytes(entry.size)}</span><span role="cell">{entry.modified ?? '—'}</span>
+        </button>;
+      })}
+    </div>
+    <div className="secondary-pane-status"><span>{visibleEntries.length}</span><span title={visibleRemotePath(path)}>{visibleRemotePath(path)}</span></div>
   </section>;
 }
 
@@ -552,6 +653,7 @@ export default function App() {
   const [draggedBookmarkId, setDraggedBookmarkId] = useState('');
   const [bookmarkDropTarget, setBookmarkDropTarget] = useState<{ id: string; edge: 'before' | 'after' } | null>(null);
   const [active, setActive] = useState<Connection | null>(null);
+  const [secondaryConnection, setSecondaryConnection] = useState<Connection | null>(null);
   const [path, setPath] = useState('/');
   const [pathDraft, setPathDraft] = useState('/');
   const [directoryHistory, setDirectoryHistory] = useState<string[]>([]);
@@ -565,6 +667,7 @@ export default function App() {
   const [selectedKeyPath, setSelectedKeyPath] = useState('');
   const [connectingBookmark, setConnectingBookmark] = useState<Connection | null>(null);
   const [connectSheetMode, setConnectSheetMode] = useState<'connect' | 'edit'>('connect');
+  const [connectTarget, setConnectTarget] = useState<ConnectTarget>('primary');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [transfers, setTransfers] = useState<Transfer[]>([]);
@@ -575,6 +678,8 @@ export default function App() {
   const [transferPanelCollapsed, setTransferPanelCollapsed] = useState(true);
   const [dualPane, setDualPane] = useState(() => localStorage.getItem('harbor-transfer.dual-pane') === 'true');
   const [leftPaneKind, setLeftPaneKind] = useState<PaneKind>(() => localStorage.getItem('harbor-transfer.left-pane') === 'remote' ? 'remote' : 'local');
+  const [primaryLocal, setPrimaryLocal] = useState(false);
+  const [primaryLocalPaneState, setPrimaryLocalPaneState] = useState<WorkspacePaneState | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('harbor-transfer.sidebar-collapsed') === 'true');
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const [columnWidths, setColumnWidths] = useState<ColumnWidths>(loadColumnWidths);
@@ -615,6 +720,9 @@ export default function App() {
   const [inlineRenameTarget, setInlineRenameTarget] = useState<InlineRenameTarget | null>(null);
   const [inlineRenameBusy, setInlineRenameBusy] = useState(false);
   const [dropConflict, setDropConflict] = useState<DropConflictPrompt | null>(null);
+  const [auxiliaryPaneState, setAuxiliaryPaneState] = useState<WorkspacePaneState | null>(null);
+  const [auxiliaryRefreshToken, setAuxiliaryRefreshToken] = useState(0);
+  const [workspaceTransferBusy, setWorkspaceTransferBusy] = useState(false);
   const availableUpdate = useRef<Update | null>(null);
   const automaticUpdateCheckStarted = useRef(false);
   const remoteEditPolling = useRef<Set<string>>(new Set());
@@ -624,6 +732,7 @@ export default function App() {
   const bookmarkDragIdRef = useRef('');
   const bookmarkPointerDragRef = useRef<{ sourceId: string; pointerId: number; startX: number; startY: number; active: boolean } | null>(null);
   const bookmarkDropTargetRef = useRef<{ id: string; edge: 'before' | 'after' } | null>(null);
+  const workspaceDragSourceRef = useRef<{ paneId: WorkspacePaneId; state: WorkspacePaneState } | null>(null);
   const inlineRenameCommitting = useRef(false);
   const selectionAnchor = useRef<{ basePath: string; index: number } | null>(null);
   const transferPanelUserControlled = useRef(false);
@@ -883,6 +992,7 @@ export default function App() {
     void listen<string>('ssh-key://selected', (event) => {
       setSelectedKeyPath(event.payload);
       setConnectingBookmark(null);
+      setConnectTarget('primary');
       setConnectSheetMode('connect');
       setShowConnect(true);
     }).then((dispose) => { unlisten = dispose; });
@@ -927,6 +1037,14 @@ export default function App() {
 
   const availableTags = useMemo(() => Array.from(new Set(connections.flatMap((connection) => connection.tags.split(',').map((tag) => tag.trim()).filter(Boolean)))).sort(), [connections]);
   const visibleConnections = useMemo(() => selectedTag ? connections.filter((connection) => connection.tags.split(',').map((tag) => tag.trim()).includes(selectedTag)) : connections, [connections, selectedTag]);
+
+  function openConnectionSheet(bookmark: Connection | null, target: ConnectTarget = 'primary') {
+    setConnectingBookmark(bookmark);
+    setSelectedKeyPath(bookmark?.keyPath ?? '');
+    setConnectTarget(target);
+    setConnectSheetMode('connect');
+    setShowConnect(true);
+  }
 
   useEffect(() => {
     setPathDraft(visibleRemotePath(path));
@@ -1950,14 +2068,104 @@ export default function App() {
     } catch (reason) { setError(String(reason)); }
   }
 
+  function workspaceEndpoint(state: WorkspacePaneState, path: string): WorkspaceEndpoint | null {
+    if (state.kind === 'local') return { kind: 'local', path };
+    return state.connectionId ? { kind: 'remote', connectionId: state.connectionId, path } : null;
+  }
+
+  async function transferBetweenPanes(source: WorkspacePaneState | null, destination: WorkspacePaneState | null, moveItem: boolean) {
+    if (!source?.items.length) { setNotice(dualPaneText.selectItems); return; }
+    if (!destination?.directoryPath) { setNotice(dualPaneText.targetUnavailable); return; }
+    setWorkspaceTransferBusy(true);
+    setError(null);
+    setNotice(dualPaneText.transferring);
+    const occupied = new Set(destination.entries);
+    let completed = 0;
+    try {
+      for (const item of source.items) {
+        let destinationName = item.name;
+        if (occupied.has(destinationName)) {
+          destinationName = nextCopyName(destinationName, item.isDirectory, occupied);
+          setNotice(dualPaneText.renamedConflict.replace('{{name}}', destinationName));
+        }
+        const sourceEndpoint = workspaceEndpoint(source, item.sourcePath);
+        const destinationPath = destination.kind === 'local'
+          ? joinLocalPath(destination.directoryPath, destinationName)
+          : joinPath(destination.directoryPath, destinationName);
+        const destinationEndpoint = workspaceEndpoint(destination, destinationPath);
+        if (!sourceEndpoint || !destinationEndpoint) throw new Error(dualPaneText.targetUnavailable);
+        await invoke<WorkspaceTransferResult>('workspace_transfer', {
+          request: { source: sourceEndpoint, destination: destinationEndpoint, isDirectory: item.isDirectory, moveItem },
+        });
+        occupied.add(destinationName);
+        completed += 1;
+      }
+      setSelectedRemoteItems([]);
+      setAuxiliaryRefreshToken((current) => current + 1);
+      if (active) await loadDirectory(active, path);
+      setNotice((moveItem ? dualPaneText.moved : dualPaneText.copied).replace('{{count}}', String(completed)));
+    } catch (reason) {
+      setError(invokeErrorMessage(reason));
+    } finally {
+      setWorkspaceTransferBusy(false);
+    }
+  }
+
   const densityMetrics = fileDensityMetrics[preferences.fileRowDensity];
+  const primaryRemotePaneState: WorkspacePaneState | null = active ? {
+    kind: 'remote',
+    connectionId: active.id,
+    directoryPath: path,
+    entries: entries.map((entry) => entry.name),
+    items: selectedRemoteItems
+      .filter((item) => item.connectionId === active.id)
+      .map((item) => ({ name: localDownloadName(item.entry), sourcePath: item.remotePath, isDirectory: item.entry.file_type === 'Directory' })),
+  } : null;
+  const primaryPaneState = primaryLocal ? primaryLocalPaneState : primaryRemotePaneState;
+  const leftPaneState = leftPaneKind === 'local' ? auxiliaryPaneState : primaryPaneState;
+  const rightPaneState = leftPaneKind === 'local' ? primaryPaneState : auxiliaryPaneState;
+  function beginWorkspaceDrag(paneId: WorkspacePaneId, state: WorkspacePaneState, event: React.DragEvent) {
+    workspaceDragSourceRef.current = { paneId, state };
+    event.dataTransfer.effectAllowed = 'copyMove';
+    event.dataTransfer.setData('application/x-harbor-workspace', paneId);
+    event.dataTransfer.setData('text/plain', state.items.map((item) => item.name).join('\n'));
+    event.currentTarget.addEventListener('dragend', () => {
+      workspaceDragSourceRef.current = null;
+      document.querySelectorAll('.workspace-drag-over').forEach((element) => element.classList.remove('workspace-drag-over'));
+    }, { once: true });
+  }
+  function beginPrimaryWorkspaceDrag(event: React.DragEvent, entry: FileEntry, basePath: string) {
+    if (!active) return;
+    const remotePath = entryRemotePath(basePath, entry);
+    const selected = selectedRemoteItems.filter((item) => item.connectionId === active.id);
+    const sourceItems = selected.some((item) => item.remotePath === remotePath)
+      ? selected
+      : [{ connectionId: active.id, remotePath, basePath, entry }];
+    beginWorkspaceDrag('primary', {
+      kind: 'remote',
+      connectionId: active.id,
+      directoryPath: path,
+      entries: entries.map((item) => item.name),
+      items: sourceItems.map((item) => ({ name: localDownloadName(item.entry), sourcePath: item.remotePath, isDirectory: item.entry.file_type === 'Directory' })),
+    }, event);
+  }
+  function dropWorkspaceItems(paneId: WorkspacePaneId, moveItem: boolean) {
+    const source = workspaceDragSourceRef.current;
+    workspaceDragSourceRef.current = null;
+    if (!source || source.paneId === paneId) return;
+    const destination = paneId === 'primary' ? primaryPaneState : auxiliaryPaneState;
+    void transferBetweenPanes(source.state, destination, moveItem);
+  }
+  const auxiliaryPane = secondaryConnection
+    ? <RemoteFilePane language={language} connection={secondaryConnection} connections={connections} showHiddenFiles={preferences.showHiddenFiles} refreshToken={auxiliaryRefreshToken} paneId="auxiliary" onSelectLocal={() => { setAuxiliaryPaneState(null); setSecondaryConnection(null); }} onSelectConnection={(connection) => { setAuxiliaryPaneState(null); openConnectionSheet(connection, 'secondary'); }} onStateChange={setAuxiliaryPaneState} onWorkspaceDragStart={beginWorkspaceDrag} onWorkspaceDrop={dropWorkspaceItems}/>
+    : <LocalFilePane language={language} initialPath={active?.localDirectory} showHiddenFiles={preferences.showHiddenFiles} connections={connections} refreshToken={auxiliaryRefreshToken} paneId="auxiliary" paneClassName="auxiliary-file-pane" onSelectSource={(connection) => { setAuxiliaryPaneState(null); openConnectionSheet(connection, 'secondary'); }} onStateChange={setAuxiliaryPaneState} onWorkspaceDragStart={beginWorkspaceDrag} onWorkspaceDrop={dropWorkspaceItems}/>;
   return <main className={`app-shell ${transferPanelCollapsed ? 'queue-collapsed' : ''}`} style={{ '--file-name-font-size': `${preferences.fileNameFontSize}px`, '--file-name-font-weight': preferences.fileNameFontWeight === 'normal' ? 400 : 650, '--file-row-height': `${densityMetrics.list}px`, '--column-row-height': `${densityMetrics.column}px`, '--icon-row-height': `${densityMetrics.icon}px` } as React.CSSProperties}>
     <header className="toolbar" onPointerDown={startWindowDrag}>
       <div className="brand"><Cloud size={21}/><span>{t.title}</span></div>
       <button className="icon-button" aria-label={sidebarCollapsed ? queueText.showSidebar : queueText.hideSidebar} title={sidebarCollapsed ? queueText.showSidebar : queueText.hideSidebar} aria-expanded={!sidebarCollapsed} onClick={() => setSidebarCollapsed((current) => !current)}>{sidebarCollapsed ? <PanelLeftOpen size={17}/> : <PanelLeftClose size={17}/>}</button>
       <button className={`icon-button ${dualPane ? 'active' : ''}`} aria-label={dualPane ? dualPaneText.hide : dualPaneText.show} title={dualPane ? dualPaneText.hide : dualPaneText.show} aria-pressed={dualPane} onClick={() => setDualPane((current) => !current)}><Columns3 size={17}/></button>
       <button className="toolbar-action" aria-label={`${windowCopy[language].newWindow} (⌘N)`} title={`${windowCopy[language].newWindow} (⌘N)`} onClick={() => void openNewWindow()}><AppWindow size={16}/><span className="toolbar-action-label">{windowCopy[language].newWindow}</span></button>
-      <button className="primary toolbar-action" aria-label={t.connect} title={t.connect} onClick={() => { setConnectingBookmark(null); setSelectedKeyPath(''); setConnectSheetMode('connect'); setShowConnect(true); }}><Plus size={16}/><span className="toolbar-action-label">{t.connect}</span></button>
+      <button className="primary toolbar-action" aria-label={t.connect} title={t.connect} onClick={() => openConnectionSheet(null)}><Plus size={16}/><span className="toolbar-action-label">{t.connect}</span></button>
       <button className="toolbar-action" aria-label={t.keys} title={t.keys} onClick={() => void openKeyManagerWindow()}><KeyRound size={16}/><span className="toolbar-action-label">{t.keys}</span></button>
       <button className="toolbar-action" aria-label={t.settings} title={t.settings} onClick={() => setShowPreferences(true)}><Settings size={16}/><span className="toolbar-action-label">{t.settings}</span></button>
       <div className="toolbar-spacer" />
@@ -1993,20 +2201,30 @@ export default function App() {
               if (event.key === 'ArrowDown') { event.preventDefault(); moveBookmarkWithKeyboard(connection.id, 1); }
             }}
           ><GripVertical size={14}/></button>
-          <button className={`bookmark bookmark-main ${active?.id === connection.id ? 'selected' : ''}`} onClick={() => { if (active?.id === connection.id) { void loadDirectory(connection, path); } else { setConnectingBookmark(connection); setSelectedKeyPath(connection.keyPath ?? ''); setConnectSheetMode('connect'); setShowConnect(true); } }}><HardDrive size={16}/><span>{connection.name}</span><small>{protocolLabel(connection.protocol)}</small></button>
-          <button className="bookmark-edit-button" aria-label={`${t.editBookmark}: ${connection.name}`} title={t.editBookmark} onClick={() => { setConnectingBookmark(connection); setSelectedKeyPath(connection.keyPath ?? ''); setConnectSheetMode('edit'); setShowConnect(true); }}><Pencil size={14}/></button>
+          <button className={`bookmark bookmark-main ${active?.id === connection.id ? 'selected' : ''}`} onClick={() => { if (active?.id === connection.id) { void loadDirectory(connection, path); } else openConnectionSheet(connection); }}><HardDrive size={16}/><span>{connection.name}</span><small>{protocolLabel(connection.protocol)}</small></button>
+          <button className="bookmark-edit-button" aria-label={`${t.editBookmark}: ${connection.name}`} title={t.editBookmark} onClick={() => { setConnectingBookmark(connection); setSelectedKeyPath(connection.keyPath ?? ''); setConnectTarget('primary'); setConnectSheetMode('edit'); setShowConnect(true); }}><Pencil size={14}/></button>
         </div>)}
         <div className="sidebar-section-heading history-label"><div className="sidebar-label">{t.history}</div>{history.length > 0 && <button className="icon-button" aria-label={queueText.clearConnectionHistory} title={queueText.clearConnectionHistory} onClick={() => void clearConnectionHistory()}><Trash2 size={14}/></button>}</div>
-        {history.length === 0 ? <p className="muted">{p1.noHistory}</p> : history.slice(0, 6).map((item, index) => <button className="bookmark history-item" key={`${item.bookmarkId}-${item.connectedAt}-${index}`} onClick={() => { const saved = connections.find((connection) => connection.id === item.bookmarkId); const connection = saved ?? { id: item.bookmarkId, name: item.name, protocol: item.protocol, host: item.host, port: item.port, username: item.username, initialPath: '/', tags: '' }; setConnectingBookmark(connection); setSelectedKeyPath(connection.keyPath ?? ''); setConnectSheetMode('connect'); setShowConnect(true); }}><HardDrive size={14}/><span>{item.name}</span><small>{item.connectedAt.slice(5, 16)}</small></button>)}
+        {history.length === 0 ? <p className="muted">{p1.noHistory}</p> : history.slice(0, 6).map((item, index) => <button className="bookmark history-item" key={`${item.bookmarkId}-${item.connectedAt}-${index}`} onClick={() => { const saved = connections.find((connection) => connection.id === item.bookmarkId); const connection = saved ?? { id: item.bookmarkId, name: item.name, protocol: item.protocol, host: item.host, port: item.port, username: item.username, initialPath: '/', tags: '' }; openConnectionSheet(connection); }}><HardDrive size={14}/><span>{item.name}</span><small>{item.connectedAt.slice(5, 16)}</small></button>)}
       </aside>
       <div className="sidebar-resizer" role="separator" aria-label={queueText.resizeSidebar} title={queueText.resizeSidebar} aria-orientation="vertical" aria-valuemin={minimumSidebarWidth} aria-valuemax={maximumSidebarWidth} aria-valuenow={sidebarWidth} tabIndex={0} onPointerDown={startSidebarResize} onDoubleClick={() => setSidebarWidth(defaultSidebarWidth)} onKeyDown={(event) => { if (event.key === 'ArrowLeft') { event.preventDefault(); adjustSidebarWidth(-10); } if (event.key === 'ArrowRight') { event.preventDefault(); adjustSidebarWidth(10); } if (event.key === 'Home') { event.preventDefault(); setSidebarWidth(defaultSidebarWidth); } }}/>
-      <div className={`browser-workspace ${dualPane ? 'dual-pane' : 'single-pane'}`}>
-      {dualPane && leftPaneKind === 'local' && <LocalFilePane language={language} initialPath={active?.localDirectory} showHiddenFiles={preferences.showHiddenFiles} onSwitch={() => setLeftPaneKind('remote')}/>}
-      <section className={`browser ${isDragOver ? 'drag-over' : ''}`} ref={browserZoneRef}>
+      <div className={`browser-workspace ${dualPane ? 'dual-pane' : 'single-pane'} ${leftPaneKind === 'remote' ? 'auxiliary-after' : ''}`}>
+      {dualPane && auxiliaryPane}
+      {dualPane && <div className="pane-transfer-controls" role="group" aria-label={dualPaneText.transferring}>
+        <button aria-label={dualPaneText.swap} title={dualPaneText.swap} onClick={() => setLeftPaneKind((current) => current === 'local' ? 'remote' : 'local')}><ArrowLeftRight size={16}/></button>
+        <span className="pane-transfer-divider"/>
+        <button disabled={workspaceTransferBusy || !leftPaneState?.items.length || !rightPaneState} aria-label={dualPaneText.copyRight} title={dualPaneText.copyRight} onClick={() => void transferBetweenPanes(leftPaneState, rightPaneState, false)}><Copy size={14}/><ArrowRight size={14}/></button>
+        <button disabled={workspaceTransferBusy || !rightPaneState?.items.length || !leftPaneState} aria-label={dualPaneText.copyLeft} title={dualPaneText.copyLeft} onClick={() => void transferBetweenPanes(rightPaneState, leftPaneState, false)}><ArrowLeft size={14}/><Copy size={14}/></button>
+        <span className="pane-transfer-divider"/>
+        <button disabled={workspaceTransferBusy || !leftPaneState?.items.length || !rightPaneState} aria-label={dualPaneText.moveRight} title={dualPaneText.moveRight} onClick={() => void transferBetweenPanes(leftPaneState, rightPaneState, true)}><Scissors size={14}/><ArrowRight size={14}/></button>
+        <button disabled={workspaceTransferBusy || !rightPaneState?.items.length || !leftPaneState} aria-label={dualPaneText.moveLeft} title={dualPaneText.moveLeft} onClick={() => void transferBetweenPanes(rightPaneState, leftPaneState, true)}><ArrowLeft size={14}/><Scissors size={14}/></button>
+        {workspaceTransferBusy && <LoaderCircle className="spinning pane-transfer-spinner" size={15} />}
+      </div>}
+      {primaryLocal ? <LocalFilePane language={language} initialPath={active?.localDirectory} showHiddenFiles={preferences.showHiddenFiles} connections={connections} refreshToken={auxiliaryRefreshToken} paneId="primary" paneClassName="primary-file-pane" onSelectSource={(connection) => { setPrimaryLocalPaneState(null); openConnectionSheet(connection, 'primary'); }} onStateChange={setPrimaryLocalPaneState} onWorkspaceDragStart={beginWorkspaceDrag} onWorkspaceDrop={dropWorkspaceItems}/> : <section className={`browser ${isDragOver ? 'drag-over' : ''}`} ref={browserZoneRef} onDragOver={(event) => { if (event.dataTransfer.types.includes('application/x-harbor-workspace')) { event.preventDefault(); event.currentTarget.classList.add('workspace-drag-over'); event.dataTransfer.dropEffect = event.shiftKey ? 'move' : 'copy'; } }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.classList.remove('workspace-drag-over'); }} onDrop={(event) => { event.currentTarget.classList.remove('workspace-drag-over'); if (!event.dataTransfer.types.includes('application/x-harbor-workspace')) return; event.preventDefault(); dropWorkspaceItems('primary', event.shiftKey); }}>
         {notice && <div className="notice-banner" role="status" aria-live="polite">{notice}</div>}
         {active ? <>
           <div className="browser-toolbar">
-            {dualPane && <label className="pane-source"><Cloud size={15}/><select aria-label={dualPaneText.remote} value="remote" onChange={(event) => { if (event.target.value === 'local') setLeftPaneKind(leftPaneKind === 'local' ? 'remote' : 'local'); }}><option value="remote">{active.name}</option><option value="local">{dualPaneText.local}</option></select></label>}
+            {dualPane && <label className="pane-source"><Cloud size={15}/><select aria-label={dualPaneText.source} value={active.id} onChange={(event) => { if (event.target.value === 'local') { setPrimaryLocalPaneState(null); setPrimaryLocal(true); return; } const connection = connections.find((item) => item.id === event.target.value); if (connection && connection.id !== active.id) openConnectionSheet(connection); }}><option value="local">{dualPaneText.local}</option>{connections.map((connection) => <option value={connection.id} key={connection.id}>{connection.name}</option>)}</select></label>}
             <button aria-label={t.refresh} onClick={() => void loadDirectory()}><RefreshCw size={17} className={busy ? 'spinning' : ''}/></button>
             <div className="search"><Search size={16}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t.search}/></div>
             <div className="view-switcher" role="group" aria-label={t.name}>
@@ -2034,13 +2252,13 @@ export default function App() {
             <div className="file-header" role="row" onContextMenu={openColumnVisibilityMenu}>
               {visibleColumns.map((column) => <ResizableColumnHeader key={column} label={columnLabel(column)} column={column} width={columnWidths[column]} resizeLabel={columnsText.resize} sorted={sortColumn === column} direction={sortDirection} onSort={sortByColumn} onStart={startColumnResize} onAdjust={adjustColumnWidth}/>)}<span className="file-grid-spacer" aria-hidden="true"/><span className="actions-column-heading" role="columnheader" />
             </div>
-            {filteredEntries.map((entry) => { const remotePath = entryRemotePath(path, entry); const selected = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const renaming = isInlineRenaming(entry, path); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`file-row interactive ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entryIdentity(entry)} role="row" aria-selected={selected} tabIndex={0} draggable={entry.file_type !== 'Symlink' && !renaming} onContextMenu={(event) => openEntryContext(event, entry)} onClick={(event) => scheduleRemoteDragPreparation(event, entry)} onKeyDown={(event) => { if (event.key === 'F2') { beginInlineRename(event, entry, path); return; } if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(event, entry); } if (event.key === 'Enter') { event.preventDefault(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); } }} onDragStart={(event) => startRemoteDrag(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); }}>
+            {filteredEntries.map((entry) => { const remotePath = entryRemotePath(path, entry); const selected = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const renaming = isInlineRenaming(entry, path); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`file-row interactive ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entryIdentity(entry)} role="row" aria-selected={selected} tabIndex={0} draggable={entry.file_type !== 'Symlink' && !renaming} onContextMenu={(event) => openEntryContext(event, entry)} onClick={(event) => scheduleRemoteDragPreparation(event, entry)} onKeyDown={(event) => { if (event.key === 'F2') { beginInlineRename(event, entry, path); return; } if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(event, entry); } if (event.key === 'Enter') { event.preventDefault(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); } }} onDragStart={(event) => { if (dualPane) beginPrimaryWorkspaceDrag(event, entry, path); else startRemoteDrag(event, entry); }} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); }}>
               {visibleColumns.map((column) => <span className={`list-cell ${column}-column`} role="cell" key={column}>{renderListCell(entry, column, path, selected)}</span>)}<span className="file-grid-spacer" aria-hidden="true"/><button aria-label={menuText.information} title={menuText.information} onClick={(event) => openFileInformation(event, entry)}><MoreHorizontal size={18}/></button>
             </div>; })}
           </div>}
           {viewMode === 'icons' && <div className="icon-grid" role="grid" aria-label={viewsText.icons}>
             {filteredEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
-            {filteredEntries.map((entry) => { const remotePath = entryRemotePath(path, entry); const selected = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const renaming = isInlineRenaming(entry, path); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`icon-entry ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} role="gridcell" aria-selected={selected} key={entryIdentity(entry)} draggable={entry.file_type !== 'Symlink' && !renaming} onContextMenu={(event) => openEntryContext(event, entry)} onDragStart={(event) => startRemoteDrag(event, entry)}>
+            {filteredEntries.map((entry) => { const remotePath = entryRemotePath(path, entry); const selected = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const renaming = isInlineRenaming(entry, path); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`icon-entry ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} role="gridcell" aria-selected={selected} key={entryIdentity(entry)} draggable={entry.file_type !== 'Symlink' && !renaming} onContextMenu={(event) => openEntryContext(event, entry)} onDragStart={(event) => { if (dualPane) beginPrimaryWorkspaceDrag(event, entry, path); else startRemoteDrag(event, entry); }}>
               {renaming ? <div className="icon-entry-main inline-renaming">
                 <RemoteEntryIcon entry={entry} className="entry-art" size={entry.file_type === 'Directory' ? 46 : 44}/>
                 {inlineRenameInput('icons')}<small>{entry.file_type === 'Directory' ? entry.permissions ?? '—' : formatBytes(entry.size)}</small>
@@ -2057,7 +2275,7 @@ export default function App() {
               return <section className="directory-column" key={`${level.path}-${levelIndex}`} aria-label={level.path} onContextMenu={(event) => openBrowserContext(event, level.path)}>
                 <div className="directory-column-title" title={visibleRemotePath(level.path)}>{visibleRemotePath(level.path)}</div>
                 {visibleLevelEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
-                {visibleLevelEntries.map((entry) => { const remotePath = entryRemotePath(level.path, entry); const selectedForAction = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const selected = level.selectedName === entryIdentity(entry) || selectedForAction; const renaming = isInlineRenaming(entry, level.path); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`column-entry ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entryIdentity(entry)} role="option" aria-selected={selected} draggable={entry.file_type !== 'Symlink' && !renaming} onContextMenu={(event) => openEntryContext(event, entry, level.path)} onDragStart={(event) => startRemoteDrag(event, entry, level.path)}>
+                {visibleLevelEntries.map((entry) => { const remotePath = entryRemotePath(level.path, entry); const selectedForAction = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const selected = level.selectedName === entryIdentity(entry) || selectedForAction; const renaming = isInlineRenaming(entry, level.path); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`column-entry ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entryIdentity(entry)} role="option" aria-selected={selected} draggable={entry.file_type !== 'Symlink' && !renaming} onContextMenu={(event) => openEntryContext(event, entry, level.path)} onDragStart={(event) => { if (dualPane) beginPrimaryWorkspaceDrag(event, entry, level.path); else startRemoteDrag(event, entry, level.path); }}>
                   {renaming ? <div className="column-entry-main inline-renaming"><RemoteEntryIcon entry={entry} size={entry.file_type === 'Directory' ? 17 : 16}/>{inlineRenameInput('columns')}</div> : <button className="column-entry-main" title={entry.name} onClick={(event) => { if (event.detail <= 1) { cancelScheduledDragPreparation(); selectRemoteEntry(event, entry, level.path, visibleLevelEntries); if (!event.metaKey && !event.ctrlKey && !event.shiftKey) void openColumnEntry(levelIndex, entry); } }} onDoubleClick={() => { cancelScheduledDragPreparation(); if (entry.file_type !== 'Directory') void editRemoteFile(entry, level.path); }} onKeyDown={(event) => { if (event.key === 'F2') { beginInlineRename(event, entry, level.path); return; } if (event.key !== 'Enter') return; event.preventDefault(); entry.file_type === 'Directory' ? void openColumnEntry(levelIndex, entry) : void editRemoteFile(entry, level.path); }}>
                     <RemoteEntryIcon entry={entry} size={entry.file_type === 'Directory' ? 17 : 16}/><span title={selectedForAction ? menuText.rename : entry.name} onClick={(event) => { if (selectedForAction) beginInlineRename(event, entry, level.path); }}>{entry.name}</span>{entry.file_type === 'Directory' ? <ChevronRight size={14}/> : <small>{formatBytes(entry.size)}</small>}
                   </button>}
@@ -2085,9 +2303,8 @@ export default function App() {
               <button title={crumb.path} aria-current={index === breadcrumbs.length - 1 ? 'location' : undefined} onClick={() => void navigateDirectory(active, crumb.path)}>{crumb.label}</button>
             </span>)}
           </nav>
-        </> : <div className="welcome"><Cloud size={46}/><h1>{t.empty}</h1><p>{t.emptyDetail}</p><button className="primary" onClick={() => { setConnectingBookmark(null); setSelectedKeyPath(''); setConnectSheetMode('connect'); setShowConnect(true); }}>{t.connect}</button></div>}
-      </section>
-      {dualPane && leftPaneKind === 'remote' && <LocalFilePane language={language} initialPath={active?.localDirectory} showHiddenFiles={preferences.showHiddenFiles} onSwitch={() => setLeftPaneKind('local')}/>}
+        </> : <div className="welcome"><Cloud size={46}/><h1>{t.empty}</h1><p>{t.emptyDetail}</p><button className="primary" onClick={() => openConnectionSheet(null)}>{t.connect}</button></div>}
+      </section>}
       </div>
     </section>
     <section className={`transfer-panel ${transferPanelCollapsed ? 'collapsed' : ''}`}>
@@ -2168,9 +2385,19 @@ export default function App() {
         const targetChanged = connectionTargetChanged(current, connection);
         return targetChanged ? null : { ...current, name: connection.name, initialPath: connection.initialPath, keyPath: connection.keyPath, keyPassphraseNotRequired: connection.keyPassphraseNotRequired, localDirectory: connection.localDirectory, tags: connection.tags, transferMaxConcurrent: connection.transferMaxConcurrent, transferBandwidthLimitKbps: connection.transferBandwidthLimitKbps, transferRetryCount: connection.transferRetryCount };
       });
+      setSecondaryConnection((current) => {
+        if (current?.id !== connection.id) return current;
+        return connectionTargetChanged(current, connection) ? null : { ...current, ...connection };
+      });
       setNotice(t.bookmarkSaved);
       setShowConnect(false);
-    }} onConnected={(connection) => { setConnections((current) => upsertConnectionInOrder(current, connection)); void invoke('bookmark_save', { bookmark: connection }).then(() => invoke('connection_history_record', { bookmark: connection })).then(() => invoke<ConnectionHistory[]>('connection_history_list')).then(setHistory).catch((reason) => setError(invokeErrorMessage(reason))); setActive(connection); setShowConnect(false); void navigateDirectory(connection, connection.initialPath, true); }} />}
+    }} onConnected={(connection) => {
+      setConnections((current) => upsertConnectionInOrder(current, connection));
+      void invoke('bookmark_save', { bookmark: connection }).then(() => invoke('connection_history_record', { bookmark: connection })).then(() => invoke<ConnectionHistory[]>('connection_history_list')).then(setHistory).catch((reason) => setError(invokeErrorMessage(reason)));
+      setShowConnect(false);
+      if (connectTarget === 'secondary') { setAuxiliaryPaneState(null); setSecondaryConnection(connection); }
+      else { setPrimaryLocal(false); setActive(connection); void navigateDirectory(connection, connection.initialPath, true); }
+    }} />}
     {showPreferences && <PreferencesSheet value={preferences} language={language} t={t} softwareUpdate={softwareUpdate} onCheckUpdate={() => void checkForSoftwareUpdate(true)} onShowUpdate={() => setShowSoftwareUpdate(true)} onClose={() => setShowPreferences(false)} onSave={(next) => { setPreferences(next); setShowPreferences(false); }} />}
     {showSoftwareUpdate && <SoftwareUpdateSheet state={softwareUpdate} language={language} onClose={() => { if (softwareUpdate.phase !== 'downloading') setShowSoftwareUpdate(false); }} onInstall={() => void downloadAndInstallSoftwareUpdate()} onRestart={() => void relaunch()} />}
     {syncLocalDirectory && <SyncPreviewSheet preview={syncPreview} localDirectory={syncLocalDirectory} remoteDirectory={path} direction={syncDirection} comparison={syncComparison} busy={syncPreviewBusy} executionBusy={syncExecutionBusy} error={syncPreviewError} exclusions={syncExclusions} conflictChoices={syncConflictChoices} progress={syncExecutionProgress} result={syncExecutionResult} history={syncHistory} t={t} text={syncText} onClose={() => { if (syncExecutionBusy) return; setSyncLocalDirectory(''); setSyncPreview(null); }} onDirection={(direction) => { setSyncDirection(direction); setSyncExecutionResult(null); void calculateSyncPreview(syncLocalDirectory, direction); }} onComparison={(comparison) => { setSyncComparison(comparison); setSyncPreview(null); setSyncExecutionResult(null); void calculateSyncPreview(syncLocalDirectory, syncDirection, syncExclusions, comparison); }} onExclusions={(value) => { setSyncExclusions(value); setSyncPreview(null); setSyncExecutionResult(null); }} onConflict={(itemPath, choice) => setSyncConflictChoices((current) => ({ ...current, [itemPath]: choice }))} onRefresh={() => void calculateSyncPreview()} onExecute={() => void executeSync()} onCancelExecution={() => void cancelSyncExecution()} onClearHistory={() => void clearSyncHistory()} />}
