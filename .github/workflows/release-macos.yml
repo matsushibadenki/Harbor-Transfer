@@ -66,7 +66,10 @@ jobs:
 
       - name: Resolve release version
         shell: bash
-        run: echo "RELEASE_TAG=v$(node -p \"require('./src-tauri/tauri.conf.json').version\")" >> "$GITHUB_ENV"
+        run: |
+          set -euo pipefail
+          RELEASE_VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          echo "RELEASE_TAG=v${RELEASE_VERSION}" >> "$GITHUB_ENV"
 
       - name: Build, sign, notarize, and upload draft
         uses: tauri-apps/tauri-action@v0
@@ -82,12 +85,23 @@ jobs:
 
       - name: Verify notarized artifacts
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           APP_PATH="src-tauri/target/universal-apple-darwin/release/bundle/macos/Harbor Transfer.app"
+          DMG_PATH="$(find src-tauri/target/universal-apple-darwin/release/bundle/dmg -name '*.dmg' -type f -print -quit)"
+          test -n "$DMG_PATH" || { echo "DMG artifact is missing"; exit 1; }
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
           spctl --assess --type execute --verbose=2 "$APP_PATH"
-          find src-tauri/target/universal-apple-darwin/release/bundle/dmg -name '*.dmg' -print0 | xargs -0 -n1 xcrun stapler validate
+          xcrun notarytool submit "$DMG_PATH" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$DMG_PATH"
+          xcrun stapler validate "$DMG_PATH"
+          gh release upload "$RELEASE_TAG" "$DMG_PATH" --clobber
 
       - name: Publish verified release
         shell: bash
