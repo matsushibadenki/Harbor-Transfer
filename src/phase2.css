@@ -3,6 +3,7 @@
  * pre-emit critique: P5 H5 E4 S5 R5 V4 · contrast: pass (40–41) · tokens: pass (48) · responsive: pass (49)
  */
 :root {
+  --ht-pane-chrome: #fff;
   --ht-file-name: #000;
   --ht-icon-image: #7c3aed;
   --ht-icon-video: #db2777;
@@ -32,9 +33,9 @@
 
 .browser-workspace.dual-pane {
   position: relative;
-  grid-template-columns: minmax(320px, 1fr) 42px minmax(320px, 1fr);
+  grid-template-columns: clamp(240px, calc(var(--dual-pane-position, 50%) - 21px), calc(100% - 282px)) 42px minmax(240px, 1fr);
   gap: 0;
-  background: var(--ht-rule, #dce6e3);
+  background: var(--ht-pane-chrome);
 }
 
 .browser-workspace.dual-pane > .auxiliary-file-pane {
@@ -50,7 +51,7 @@
   order: 1;
 }
 
-.browser-workspace.dual-pane > .pane-transfer-controls {
+.browser-workspace.dual-pane > .pane-transfer-rail {
   grid-row: 1;
   grid-column: 2;
 }
@@ -66,16 +67,30 @@
   order: 1;
 }
 
-.pane-transfer-controls {
+.pane-transfer-rail {
   z-index: 2;
+  position: relative;
+  min-width: 0;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.pane-transfer-rail:focus-visible {
+  outline: 2px solid var(--ht-accent-strong, #087568);
+  outline-offset: -2px;
+}
+
+.pane-transfer-controls {
   display: flex;
+  width: 100%;
+  height: 100%;
   min-width: 0;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 5px;
   border-inline: 1px solid var(--ht-rule, #dce6e3);
-  background: var(--ht-surface-2, #f8fbfa);
+  background: var(--ht-pane-chrome);
 }
 
 .pane-transfer-controls > button {
@@ -87,6 +102,7 @@
   padding: 0;
   border: 1px solid transparent;
   color: var(--ht-text-secondary, #536863);
+  cursor: pointer;
 }
 
 .pane-transfer-controls > button:hover:not(:disabled),
@@ -113,6 +129,8 @@
   min-width: 0;
   min-height: 0;
   background: var(--ht-canvas, #fff);
+  container-name: file-pane;
+  container-type: inline-size;
 }
 
 .local-file-pane {
@@ -134,17 +152,19 @@
   flex: none;
   align-items: center;
   gap: 5px;
-  padding: 8px 10px;
+  padding: 8px 16px;
   border-bottom: 1px solid var(--ht-rule, #e5ecea);
-  background: var(--ht-surface-2, #f8fbfa);
+  background: var(--ht-pane-chrome);
 }
 
 .pane-heading {
-  min-height: 49px;
+  height: 56px;
+  min-height: 56px;
 }
 
 .local-path-toolbar {
-  min-height: 43px;
+  height: 49px;
+  min-height: 49px;
 }
 
 .pane-source {
@@ -186,7 +206,8 @@
   flex: 1;
   overflow: auto;
   overscroll-behavior: contain;
-  background: var(--ht-canvas, #fff);
+  color: var(--finder-secondary);
+  background: var(--finder-canvas);
 }
 
 .local-file-header,
@@ -205,11 +226,14 @@
   position: sticky;
   z-index: 1;
   top: 0;
-  height: 34px;
-  color: var(--ht-text-muted, #7c908c);
-  background: var(--ht-surface-2, #f8fbfa);
+  box-sizing: border-box;
+  height: 32px;
+  border-block-end: 1px solid var(--finder-rule);
+  color: var(--finder-secondary);
+  background: var(--finder-header);
+  box-shadow: var(--finder-header-highlight);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .local-file-row {
@@ -217,7 +241,7 @@
   min-height: var(--file-row-height, 38px);
   border: 0;
   border-radius: 0;
-  color: var(--ht-text-secondary, #536863);
+  color: var(--finder-secondary);
   background: var(--ht-row-odd, #fff);
   text-align: left;
   font-size: 12px;
@@ -249,18 +273,22 @@
 }
 
 .local-file-row:nth-of-type(odd) {
-  background: var(--ht-row-even, #f7f8f8);
+  background: var(--finder-canvas);
+}
+
+.local-file-row:nth-of-type(even) {
+  background: var(--finder-canvas-alt);
 }
 
 .local-file-row:hover,
 .local-file-row:focus-visible {
-  color: var(--ht-text-primary, #2d4942);
-  background: var(--ht-row-hover, #eef3f2);
+  color: var(--finder-ink);
+  background: var(--finder-hover);
 }
 
 .local-file-row.selected {
-  color: var(--ht-text-primary, #2d4942);
-  background: var(--ht-selected, #d8ebe6);
+  color: var(--finder-ink);
+  background: var(--finder-selected);
 }
 
 .local-file-name {
@@ -268,7 +296,7 @@
   min-width: 0;
   align-items: center;
   gap: 8px;
-  color: var(--ht-file-name);
+  color: var(--finder-ink);
   font-size: var(--file-name-font-size, 13px);
   font-weight: var(--file-name-font-weight, 400);
 }
@@ -277,6 +305,11 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.local-file-name > .folder-art {
+  flex: none;
+  color: var(--ht-accent);
 }
 
 .secondary-connection-strip,
@@ -292,9 +325,20 @@
 }
 
 .secondary-connection-strip {
-  min-height: 32px;
-  padding: 0 12px;
+  background: var(--ht-pane-chrome);
+  height: 34px;
+  min-height: 34px;
+  padding: 0 16px;
   border-bottom: 1px solid var(--ht-rule, #e5ecea);
+}
+
+.secondary-connection-strip > svg {
+  flex: none;
+  color: var(--ht-accent, #168b79);
+}
+
+.local-connection-strip strong {
+  color: var(--ht-text-primary, #2d4942);
 }
 
 .secondary-connection-strip strong,
@@ -338,7 +382,7 @@
     grid-column: 1;
   }
 
-  .browser-workspace.dual-pane > .pane-transfer-controls {
+  .browser-workspace.dual-pane > .pane-transfer-rail {
     grid-row: 2;
     grid-column: 1;
   }
@@ -348,6 +392,11 @@
   .browser-workspace.dual-pane.auxiliary-after > .auxiliary-file-pane {
     grid-row: 3;
     grid-column: 1;
+  }
+
+  .pane-transfer-rail {
+    cursor: default;
+    touch-action: auto;
   }
 
   .pane-transfer-controls {
@@ -432,6 +481,12 @@ body.resizing-sidebar * {
   user-select: none !important;
 }
 
+body.resizing-panes,
+body.resizing-panes * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
 .toolbar,
 .browser-toolbar,
 .path-toolbar,
@@ -447,8 +502,20 @@ body.resizing-sidebar * {
 }
 
 .browser-toolbar {
+  height: 56px;
+  min-height: 56px;
   min-width: 0;
   flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.browser-toolbar > .pane-source,
+.browser-toolbar > .view-switcher,
+.browser-toolbar > button,
+.pane-heading > .pane-source,
+.pane-heading > button {
+  flex-shrink: 0;
 }
 
 .browser-toolbar-action {
@@ -492,12 +559,29 @@ body.resizing-sidebar * {
 
 .path-toolbar {
   display: flex;
+  height: 49px;
+  min-height: 49px;
   align-items: center;
   gap: 5px;
   min-width: 0;
   padding: 8px 16px;
   border-bottom: 1px solid #e5ecea;
   background: #fbfdfc;
+}
+
+.path-toolbar,
+.local-path-toolbar,
+.browser-toolbar,
+.pane-heading,
+.connection-strip,
+.secondary-connection-strip {
+  box-sizing: border-box;
+}
+
+.connection-strip {
+  height: 34px;
+  min-height: 34px;
+  padding-inline: 16px;
 }
 
 .path-toolbar .path-field {
@@ -538,6 +622,11 @@ body.resizing-sidebar * {
   color: #657b76;
   overscroll-behavior-x: contain;
   scrollbar-width: thin;
+}
+
+.pane-breadcrumb-bar {
+  height: 36px;
+  min-height: 36px;
 }
 
 .breadcrumb-item {
@@ -1383,6 +1472,67 @@ input:disabled {
   }
 
   .browser-toolbar-action-label {
+    display: none;
+  }
+}
+
+/* A dual-pane window can be wide while each individual file pane is narrow.
+   Base toolbar compaction on the pane itself instead of the window viewport. */
+@container file-pane (max-width: 680px) {
+  .browser-toolbar {
+    gap: 4px;
+    padding-inline: 10px;
+  }
+
+  .browser-toolbar-action {
+    width: 32px;
+    min-width: 32px;
+    padding-right: 0 !important;
+    padding-left: 0 !important;
+  }
+
+  .browser-toolbar-action-label {
+    display: none;
+  }
+
+  .browser-toolbar .search {
+    width: auto;
+    min-width: 76px;
+    max-width: 170px;
+    flex: 1 1 110px;
+  }
+
+  .pane-heading {
+    gap: 4px;
+    padding-inline: 8px;
+  }
+
+  .pane-source select {
+    max-width: 118px;
+  }
+
+  .pane-heading .local-search {
+    min-width: 72px;
+  }
+}
+
+@container file-pane (max-width: 420px) {
+  .browser-toolbar,
+  .pane-heading {
+    height: 56px;
+    min-height: 56px;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+
+  .browser-toolbar .search,
+  .pane-heading .local-search {
+    min-width: 90px;
+    flex: 1 0 90px;
+  }
+
+  .browser-toolbar-spacer {
     display: none;
   }
 }
@@ -2424,6 +2574,7 @@ input:disabled {
 /* Keep the dark appearance layer fully scoped so the established light palette
    continues to use its original component rules without cascade side effects. */
 html[data-resolved-theme='dark'] {
+  --ht-pane-chrome: var(--ht-surface-2);
   --ht-canvas: oklch(21% 0.008 175);
   --ht-chrome: oklch(25% 0.01 175);
   --ht-sidebar: oklch(23% 0.009 175);
@@ -3309,11 +3460,13 @@ html[data-resolved-theme='dark'] {
   box-shadow: none;
 }
 
+html[data-resolved-theme='dark'] .local-file-row:nth-of-type(odd),
 html[data-resolved-theme='dark'] .file-display-region .file-row:nth-child(even),
 html[data-resolved-theme='dark'] .file-display-region .column-entry:nth-child(even) {
   background: var(--ht-file-row-even-neutral);
 }
 
+html[data-resolved-theme='dark'] .local-file-row:nth-of-type(even),
 html[data-resolved-theme='dark'] .file-display-region .file-row:nth-child(odd),
 html[data-resolved-theme='dark'] .file-display-region .column-entry:nth-child(odd) {
   background: var(--ht-file-row-odd-neutral);
@@ -3323,6 +3476,8 @@ html[data-resolved-theme='dark'] .file-display-region .icon-entry {
   background: transparent;
 }
 
+html[data-resolved-theme='dark'] .local-file-row:hover,
+html[data-resolved-theme='dark'] .local-file-row:focus-visible,
 html[data-resolved-theme='dark'] .file-display-region .file-row:hover,
 html[data-resolved-theme='dark'] .file-display-region .column-entry:hover,
 html[data-resolved-theme='dark'] .file-display-region .icon-entry:hover,
@@ -3330,6 +3485,8 @@ html[data-resolved-theme='dark'] .file-display-region .icon-entry:focus-within {
   background: var(--ht-file-row-hover-neutral);
 }
 
+html[data-resolved-theme='dark'] .local-file-row.selected,
+html[data-resolved-theme='dark'] .local-file-row.selected:hover,
 html[data-resolved-theme='dark'] .file-display-region .file-row.selected,
 html[data-resolved-theme='dark'] .file-display-region .file-row.selected:hover,
 html[data-resolved-theme='dark'] .file-display-region .column-entry.selected,
@@ -3557,11 +3714,12 @@ html[data-resolved-theme='dark'] {
 .file-display-region .icon-entry-main strong {
   display: flex;
   width: 100%;
-  min-height: 2.65em;
+  min-height: 0;
   align-items: flex-start;
   justify-content: center;
   overflow: visible;
   color: var(--finder-ink) !important;
+  font-size: max(10px, calc(var(--file-name-font-size, 13px) - 1px));
   line-height: 1.28;
   white-space: normal;
 }
@@ -3606,6 +3764,7 @@ html[data-resolved-theme='dark'] {
 .file-display-region .inline-rename-input.icons {
   min-height: 27px;
   background: var(--finder-control);
+  font-size: max(10px, calc(var(--file-name-font-size, 13px) - 1px));
 }
 
 /* Column view */
@@ -3796,4 +3955,27 @@ html[data-resolved-theme='dark'] {
   .file-display-region .icon-entry-main .entry-art {
     transition-duration: 0ms;
   }
+}
+
+/* Shared pane chrome: keep outside the nested dark-only appearance layer. */
+.browser-toolbar,
+.pane-heading,
+.path-toolbar,
+.local-path-toolbar,
+.connection-strip,
+.secondary-connection-strip,
+.browser-toolbar .search,
+.pane-heading .search,
+.path-toolbar .path-field,
+.local-path-toolbar .path-field {
+  background: var(--ht-pane-chrome);
+}
+
+.browser-toolbar input,
+.browser-toolbar select,
+.pane-heading input,
+.pane-heading select,
+.path-toolbar input,
+.local-path-toolbar input {
+  background: var(--ht-pane-chrome) !important;
 }
