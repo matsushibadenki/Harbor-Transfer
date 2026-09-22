@@ -17,7 +17,8 @@ use crate::sync::{
 };
 use crate::webdav_client::{WebDavClient, WebDavConfig};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -484,6 +485,8 @@ pub struct WorkspaceTransferRequest {
     pub is_directory: bool,
     #[serde(default)]
     pub move_item: bool,
+    #[serde(default)]
+    pub overwrite_existing: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -491,6 +494,43 @@ pub struct WorkspaceTransferRequest {
 pub struct WorkspaceTransferResult {
     pub item_count: usize,
     pub bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceChecksumRequest {
+    pub left: WorkspaceEndpoint,
+    pub right: WorkspaceEndpoint,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceChecksumResult {
+    pub equal: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSnapshotEntry {
+    pub path: String,
+    pub source_path: String,
+    pub size: u64,
+    pub is_directory: bool,
+    pub modified: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspacePrepareDestinationRequest {
+    pub root: WorkspaceEndpoint,
+    pub relative_directory: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspacePreparedDestination {
+    pub path: String,
+    pub entries: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1948,6 +1988,213 @@ pub async fn remote_list(
     connection.file_system().list_dir(&request.path).await.map_err(|error| error.to_string())
 }
 
+fn collect_local_workspace_snapshot(path: &str) -> Result<Vec<WorkspaceSnapshotEntry>, String> {
+    const MAX_ENTRIES: usize = 100_000;
+    let root = std::fs::canonicalize(path).map_err(|error| error.to_string())?;
+    if !root.is_dir() {
+        return Err("The comparison root is not a directory.".to_string());
+    }
+    let mut entries = Vec::new();
+    let mut pending = vec![(root, String::new())];
+    while let Some((directory, relative_directory)) = pending.pop() {
+        for child in std::fs::read_dir(&directory).map_err(|error| error.to_string())? {
+            if entries.len() >= MAX_ENTRIES {
+                return Err("Folder comparison stopped after 100,000 items.".to_string());
+            }
+            let child = child.map_err(|error| error.to_string())?;
+            let file_type = child.file_type().map_err(|error| error.to_string())?;
+            if file_type.is_symlink() || (!file_type.is_file() && !file_type.is_dir()) {
+                continue;
+            }
+            let name = child.file_name().to_string_lossy().into_owned();
+            if name.contains('/') || name.contains('\\') {
+                return Err("A local name cannot be represented safely in the comparison.".to_string());
+            }
+            let relative =
+                if relative_directory.is_empty() { name } else { format!("{relative_directory}/{name}") };
+            let path = child.path();
+            let metadata = child.metadata().map_err(|error| error.to_string())?;
+            let is_directory = file_type.is_dir();
+            entries.push(WorkspaceSnapshotEntry {
+                path: relative.clone(),
+                source_path: path.to_string_lossy().into_owned(),
+                size: if is_directory { 0 } else { metadata.len() },
+                is_directory,
+                modified: metadata
+                    .modified()
+                    .ok()
+                    .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                    .map(|value| value.as_secs() as i64),
+            });
+            if is_directory {
+                pending.push((path, relative));
+            }
+        }
+    }
+    Ok(entries)
+}
+
+#[tauri::command]
+pub async fn workspace_compare_snapshot(
+    endpoint: WorkspaceEndpoint,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<WorkspaceSnapshotEntry>, String> {
+    const MAX_ENTRIES: usize = 100_000;
+    match endpoint {
+        WorkspaceEndpoint::Local { path } => collect_local_workspace_snapshot(&path),
+        WorkspaceEndpoint::Remote { connection_id, path } => {
+            let connection = state.connection(&connection_id).await.ok_or("Connection not found.")?;
+            let mut connection = connection.lock().await;
+            let mut entries = Vec::new();
+            let mut pending = vec![(path, String::new())];
+            while let Some((directory, relative_directory)) = pending.pop() {
+                let children =
+                    connection.file_system().list_dir(&directory).await.map_err(|error| error.to_string())?;
+                let mut names = HashSet::new();
+                for child in children {
+                    if entries.len() >= MAX_ENTRIES {
+                        return Err("Folder comparison stopped after 100,000 items.".to_string());
+                    }
+                    if !names.insert(child.name.clone()) {
+                        return Err(format!(
+                            "Folder comparison cannot distinguish duplicate names in '{directory}'."
+                        ));
+                    }
+                    if matches!(child.file_type, crate::sftp_client::FileEntryType::Symlink) {
+                        continue;
+                    }
+                    remote_child_path(&directory, &child.name)?;
+                    let relative = if relative_directory.is_empty() {
+                        child.name.clone()
+                    } else {
+                        format!("{relative_directory}/{}", child.name)
+                    };
+                    let source_path = remote_child_path(
+                        &directory,
+                        child.path_component.as_deref().unwrap_or(&child.name),
+                    )?;
+                    let is_directory =
+                        matches!(child.file_type, crate::sftp_client::FileEntryType::Directory);
+                    entries.push(WorkspaceSnapshotEntry {
+                        path: relative.clone(),
+                        source_path: source_path.clone(),
+                        size: if is_directory { 0 } else { child.size },
+                        is_directory,
+                        modified: child.modified.as_deref().and_then(parse_remote_modified),
+                    });
+                    if is_directory {
+                        pending.push((source_path, relative));
+                    }
+                }
+            }
+            Ok(entries)
+        }
+    }
+}
+
+fn prepare_local_workspace_destination(
+    root: &Path,
+    relative: Option<&Path>,
+) -> Result<WorkspacePreparedDestination, String> {
+    let root = std::fs::canonicalize(root).map_err(|error| error.to_string())?;
+    if !root.is_dir() {
+        return Err("The destination root is not a directory.".to_string());
+    }
+    let mut current = root;
+    if let Some(relative) = relative {
+        for component in relative.components() {
+            current.push(component.as_os_str());
+            match std::fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+                Ok(_) => {
+                    return Err(format!("Destination path is not a safe directory: {}", current.display()))
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::create_dir(&current).map_err(|error| error.to_string())?;
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+    }
+    let entries = std::fs::read_dir(&current)
+        .map_err(|error| error.to_string())?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .map_err(|error| error.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(WorkspacePreparedDestination { path: current.to_string_lossy().into_owned(), entries })
+}
+
+#[tauri::command]
+pub async fn workspace_prepare_destination(
+    request: WorkspacePrepareDestinationRequest,
+    state: State<'_, Arc<AppState>>,
+) -> Result<WorkspacePreparedDestination, String> {
+    let relative = if request.relative_directory.is_empty() {
+        None
+    } else {
+        Some(safe_relative_path(&request.relative_directory)?)
+    };
+    match request.root {
+        WorkspaceEndpoint::Local { path } => {
+            prepare_local_workspace_destination(Path::new(&path), relative.as_deref())
+        }
+        WorkspaceEndpoint::Remote { connection_id, path } => {
+            let connection = state.connection(&connection_id).await.ok_or("Connection not found.")?;
+            let mut connection = connection.lock().await;
+            let mut current = path;
+            if let Some(relative) = relative {
+                for component in relative.components() {
+                    let name = component.as_os_str().to_string_lossy();
+                    let children = connection
+                        .file_system()
+                        .list_dir(&current)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    let mut matches = children.into_iter().filter(|entry| entry.name == name);
+                    let child = match (matches.next(), matches.next()) {
+                        (Some(child), None) => child,
+                        (None, None) => {
+                            let new_path = remote_child_path(&current, &name)?;
+                            connection
+                                .file_system()
+                                .create_dir(&new_path)
+                                .await
+                                .map_err(|error| error.to_string())?;
+                            let children = connection
+                                .file_system()
+                                .list_dir(&current)
+                                .await
+                                .map_err(|error| error.to_string())?;
+                            children
+                                .into_iter()
+                                .find(|entry| entry.name == name)
+                                .ok_or("Created destination directory is not visible.")?
+                        }
+                        _ => return Err(format!("Destination contains multiple items named '{name}'.")),
+                    };
+                    if !matches!(child.file_type, crate::sftp_client::FileEntryType::Directory) {
+                        return Err(format!("Destination path is not a directory: {name}"));
+                    }
+                    current =
+                        remote_child_path(&current, child.path_component.as_deref().unwrap_or(&child.name))?;
+                }
+            }
+            let entries = connection
+                .file_system()
+                .list_dir(&current)
+                .await
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect();
+            Ok(WorkspacePreparedDestination { path: current, entries })
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn sync_preview(
     request: SyncPreviewRequest,
@@ -2451,9 +2698,27 @@ async fn write_local_workspace_destination(
     source: &Path,
     destination: &Path,
     is_directory: bool,
+    overwrite_existing: bool,
 ) -> Result<WorkspaceTransferResult, String> {
-    if std::fs::symlink_metadata(destination).is_ok() {
-        return Err(format!("An item named '{}' already exists at the destination.", destination.display()));
+    if overwrite_existing && is_directory {
+        return Err("Workspace comparison cannot replace an entire directory.".to_string());
+    }
+    match std::fs::symlink_metadata(destination) {
+        Ok(_) if !overwrite_existing => {
+            return Err(format!(
+                "An item named '{}' already exists at the destination.",
+                destination.display()
+            ));
+        }
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err("Only an existing regular file can be replaced.".to_string());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && overwrite_existing => {
+            return Err("The file selected for replacement no longer exists.".to_string());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
     }
     let parent = destination.parent().ok_or("The local destination must have a parent directory.")?;
     if !parent.is_dir() {
@@ -2465,6 +2730,12 @@ async fn write_local_workspace_destination(
     let outcome = async {
         if !is_directory {
             let bytes = tokio::fs::copy(source, &staging).await.map_err(|error| error.to_string())?;
+            if overwrite_existing {
+                let metadata = std::fs::symlink_metadata(destination).map_err(|error| error.to_string())?;
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err("The replacement target changed type before the copy completed.".to_string());
+                }
+            }
             tokio::fs::rename(&staging, destination).await.map_err(|error| error.to_string())?;
             return Ok(WorkspaceTransferResult { item_count: 1, bytes });
         }
@@ -2543,18 +2814,72 @@ async fn write_remote_workspace_destination(
     source: &Path,
     destination: &str,
     is_directory: bool,
+    overwrite_existing: bool,
 ) -> Result<WorkspaceTransferResult, String> {
     let (destination_parent, destination_name) = remote_parent_and_name(destination)?;
-    let existing = file_system
-        .list_dir(&destination_parent)
-        .await
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .any(|entry| entry.name == destination_name);
-    if existing {
+    let destination_entries =
+        file_system.list_dir(&destination_parent).await.map_err(|error| error.to_string())?;
+    let matching =
+        destination_entries.iter().filter(|entry| entry.name == destination_name).collect::<Vec<_>>();
+    if matching.len() > 1 {
+        return Err(format!("Multiple items named '{destination_name}' exist at the destination."));
+    }
+    if overwrite_existing
+        && (is_directory
+            || !matches!(matching.first(), Some(entry) if matches!(entry.file_type, crate::sftp_client::FileEntryType::File)))
+    {
+        return Err("Only an existing regular file can be replaced.".to_string());
+    }
+    if !overwrite_existing && !matching.is_empty() {
         return Err(format!("An item named '{destination_name}' already exists at the destination."));
     }
     if !is_directory {
+        if overwrite_existing {
+            let sequence = REMOTE_COPY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let temporary_name = format!(".harbor-compare-{sequence}.part");
+            let backup_name = format!(".harbor-compare-{sequence}.backup");
+            if destination_entries
+                .iter()
+                .any(|entry| entry.name == temporary_name || entry.name == backup_name)
+            {
+                return Err("The workspace replacement staging name is already in use.".to_string());
+            }
+            let temporary = remote_child_path(&destination_parent, &temporary_name)?;
+            let backup = remote_child_path(&destination_parent, &backup_name)?;
+            let expected = std::fs::metadata(source).map_err(|error| error.to_string())?.len();
+            let uploaded = file_system.upload_file(&source.to_string_lossy(), &temporary).await;
+            let bytes = match uploaded {
+                Ok(bytes) if bytes == expected => bytes,
+                Ok(bytes) => {
+                    let _ = file_system.delete_file(&temporary).await;
+                    return Err(format!("Workspace replacement uploaded {bytes} of {expected} bytes; the original file was kept."));
+                }
+                Err(error) => {
+                    let _ = file_system.delete_file(&temporary).await;
+                    return Err(error.to_string());
+                }
+            };
+            if let Err(error) = verify_remote_file_size(file_system, &temporary, expected).await {
+                let _ = file_system.delete_file(&temporary).await;
+                return Err(error.to_string());
+            }
+            if let Err(error) = file_system.rename(destination, &backup).await {
+                let _ = file_system.delete_file(&temporary).await;
+                return Err(format!("Could not preserve the existing file before replacement: {error}"));
+            }
+            if let Err(error) = file_system.rename(&temporary, destination).await {
+                let rollback = file_system.rename(&backup, destination).await;
+                let _ = file_system.delete_file(&temporary).await;
+                return Err(match rollback {
+                    Ok(()) => format!("Replacement failed and the original file was restored: {error}"),
+                    Err(restore_error) => format!("Replacement failed: {error}. The original remains at '{backup}' and could not be restored: {restore_error}"),
+                });
+            }
+            if let Err(error) = file_system.delete_file(&backup).await {
+                tracing::warn!("Workspace replacement retained backup '{backup}': {error}");
+            }
+            return Ok(WorkspaceTransferResult { item_count: 1, bytes });
+        }
         let bytes = file_system
             .upload_file(&source.to_string_lossy(), destination)
             .await
@@ -2590,11 +2915,78 @@ async fn write_remote_workspace_destination(
     result
 }
 
+fn sha256_workspace_file(path: &Path) -> Result<[u8; 32], String> {
+    let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 256 * 1024];
+    loop {
+        let count = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(digest.finalize().into())
+}
+
+async fn workspace_endpoint_checksum(
+    endpoint: &WorkspaceEndpoint,
+    state: &AppState,
+) -> Result<[u8; 32], String> {
+    match endpoint {
+        WorkspaceEndpoint::Local { path } => {
+            let source = PathBuf::from(path);
+            validate_workspace_local_source(&source, false)?;
+            tokio::task::spawn_blocking(move || sha256_workspace_file(&source))
+                .await
+                .map_err(|error| error.to_string())?
+        }
+        WorkspaceEndpoint::Remote { connection_id, path } => {
+            remote_parent_and_name(path)?;
+            let sequence = REMOTE_COPY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let staging_root = state.drag_cache_directory.join(format!("workspace-checksum-{sequence}"));
+            let staged_file = staging_root.join("payload");
+            tokio::fs::create_dir_all(&staging_root).await.map_err(|error| error.to_string())?;
+            let result = async {
+                let connection = state.connection(connection_id).await.ok_or("Connection not found.")?;
+                let mut connection = connection.lock().await;
+                connection
+                    .file_system()
+                    .download_file(path, &staged_file.to_string_lossy())
+                    .await
+                    .map_err(|error| error.to_string())?;
+                drop(connection);
+                tokio::task::spawn_blocking(move || sha256_workspace_file(&staged_file))
+                    .await
+                    .map_err(|error| error.to_string())?
+            }
+            .await;
+            if let Err(error) = tokio::fs::remove_dir_all(&staging_root).await {
+                tracing::warn!("Could not remove workspace checksum cache: {error}");
+            }
+            result
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn workspace_compare_checksum(
+    request: WorkspaceChecksumRequest,
+    state: State<'_, Arc<AppState>>,
+) -> Result<WorkspaceChecksumResult, String> {
+    let left = workspace_endpoint_checksum(&request.left, &state).await?;
+    let right = workspace_endpoint_checksum(&request.right, &state).await?;
+    Ok(WorkspaceChecksumResult { equal: left == right })
+}
+
 #[tauri::command]
 pub async fn workspace_transfer(
     request: WorkspaceTransferRequest,
     state: State<'_, Arc<AppState>>,
 ) -> Result<WorkspaceTransferResult, String> {
+    if request.overwrite_existing && (request.is_directory || request.move_item) {
+        return Err("Workspace replacement is only available when copying a regular file.".to_string());
+    }
     let source_description = match &request.source {
         WorkspaceEndpoint::Local { path } => path,
         WorkspaceEndpoint::Remote { path, .. } => path,
@@ -2673,7 +3065,13 @@ pub async fn workspace_transfer(
 
     let result = match &request.destination {
         WorkspaceEndpoint::Local { path } => {
-            write_local_workspace_destination(&local_source, Path::new(path), request.is_directory).await
+            write_local_workspace_destination(
+                &local_source,
+                Path::new(path),
+                request.is_directory,
+                request.overwrite_existing,
+            )
+            .await
         }
         WorkspaceEndpoint::Remote { connection_id, path } => match state.connection(connection_id).await {
             Some(connection) => {
@@ -2683,6 +3081,7 @@ pub async fn workspace_transfer(
                     &local_source,
                     path,
                     request.is_directory,
+                    request.overwrite_existing,
                 )
                 .await
             }
@@ -3957,15 +4356,130 @@ pub async fn transfer_upload_directory(
 #[cfg(test)]
 mod tests {
     use super::{
-        atomic_upload_path, commit_local_download, content_hash, effective_transfer_limits,
-        is_retryable_transfer_error, local_directory_list, local_download_staging_path,
-        parse_remote_modified, reject_symlink_ancestors, remote_child_path, remote_parent_and_name,
-        remote_replace_target, reserve_bandwidth, retry_backoff, safe_relative_path,
-        validate_workspace_local_source, write_local_workspace_destination, Protocol, TransferControl,
-        TransferScheduler,
+        atomic_upload_path, collect_local_workspace_snapshot, commit_local_download, content_hash,
+        effective_transfer_limits, is_retryable_transfer_error, local_directory_list,
+        local_download_staging_path, parse_remote_modified, prepare_local_workspace_destination,
+        reject_symlink_ancestors, remote_child_path, remote_parent_and_name, remote_replace_target,
+        reserve_bandwidth, retry_backoff, safe_relative_path, sha256_workspace_file,
+        validate_workspace_local_source, write_local_workspace_destination, write_remote_workspace_destination,
+        Protocol, TransferControl, TransferScheduler,
     };
+    use crate::remote_fs::RemoteFileSystem;
+    use crate::sftp_client::{FileEntry, FileEntryType};
+    use anyhow::{bail, Result};
+    use async_trait::async_trait;
+    use std::collections::HashMap;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
+
+    #[derive(Default)]
+    struct WorkspaceTestRemote {
+        files: HashMap<String, Vec<u8>>,
+        fail_commit: bool,
+    }
+
+    #[async_trait]
+    impl RemoteFileSystem for WorkspaceTestRemote {
+        async fn list_dir(&mut self, path: &str) -> Result<Vec<FileEntry>> {
+            let prefix = format!("{}/", path.trim_end_matches('/'));
+            Ok(self.files.iter().filter_map(|(file_path, bytes)| {
+                let name = file_path.strip_prefix(&prefix)?;
+                if name.contains('/') { return None; }
+                Some(FileEntry { name: name.to_string(), path_component: None, download_name: None, size: bytes.len() as u64, modified: None, permissions: None, file_type: FileEntryType::File, owner: None, group: None })
+            }).collect())
+        }
+        async fn upload_file(&mut self, local_path: &str, remote_path: &str) -> Result<u64> {
+            let bytes = std::fs::read(local_path)?;
+            let len = bytes.len() as u64;
+            self.files.insert(remote_path.to_string(), bytes);
+            Ok(len)
+        }
+        async fn download_file(&mut self, _remote_path: &str, _local_path: &str) -> Result<u64> { bail!("unused") }
+        async fn create_dir(&mut self, _path: &str) -> Result<()> { bail!("unused") }
+        async fn rename(&mut self, old_path: &str, new_path: &str) -> Result<()> {
+            if self.fail_commit && old_path.ends_with(".part") { bail!("simulated commit failure"); }
+            if self.files.contains_key(new_path) { bail!("destination exists"); }
+            let bytes = self.files.remove(old_path).ok_or_else(|| anyhow::anyhow!("source missing"))?;
+            self.files.insert(new_path.to_string(), bytes);
+            Ok(())
+        }
+        async fn set_metadata(&mut self, _path: &str, _permissions: Option<u32>, _modified: Option<u32>, _owner_id: Option<u32>, _group_id: Option<u32>) -> Result<()> { bail!("unused") }
+        async fn delete_file(&mut self, path: &str) -> Result<()> { self.files.remove(path); Ok(()) }
+        async fn delete_dir(&mut self, _path: &str) -> Result<()> { bail!("unused") }
+        async fn disconnect(&mut self) -> Result<()> { Ok(()) }
+    }
+
+    #[tokio::test]
+    async fn workspace_remote_replacement_restores_original_after_commit_failure() {
+        let workspace = tempfile::tempdir().unwrap();
+        let source = workspace.path().join("new.txt");
+        std::fs::write(&source, b"new content").unwrap();
+        let mut remote = WorkspaceTestRemote { files: HashMap::from([("/docs/file.txt".to_string(), b"original".to_vec())]), fail_commit: true };
+        let error = write_remote_workspace_destination(&mut remote, &source, "/docs/file.txt", false, true).await.unwrap_err();
+        assert!(error.contains("restored"));
+        assert_eq!(remote.files.get("/docs/file.txt").unwrap(), b"original");
+        assert_eq!(remote.files.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn workspace_remote_replacement_cleans_up_backup_after_success() {
+        let workspace = tempfile::tempdir().unwrap();
+        let source = workspace.path().join("new.txt");
+        std::fs::write(&source, b"new content").unwrap();
+        let mut remote = WorkspaceTestRemote { files: HashMap::from([("/docs/file.txt".to_string(), b"original".to_vec())]), fail_commit: false };
+        write_remote_workspace_destination(&mut remote, &source, "/docs/file.txt", false, true).await.unwrap();
+        assert_eq!(remote.files.get("/docs/file.txt").unwrap(), b"new content");
+        assert_eq!(remote.files.len(), 1);
+    }
+
+    #[test]
+    fn workspace_snapshot_preserves_nested_relative_paths() {
+        let root = tempfile::tempdir().expect("snapshot root");
+        std::fs::create_dir(root.path().join("資料")).expect("nested directory");
+        std::fs::write(root.path().join("資料/notes.txt"), b"hello").expect("nested file");
+        let snapshot = collect_local_workspace_snapshot(root.path().to_str().unwrap()).expect("snapshot");
+        assert!(snapshot.iter().any(|entry| entry.path == "資料" && entry.is_directory));
+        assert!(snapshot
+            .iter()
+            .any(|entry| entry.path == "資料/notes.txt" && entry.size == 5 && !entry.is_directory));
+    }
+
+    #[test]
+    fn workspace_destination_creates_only_missing_parents() {
+        let root = tempfile::tempdir().expect("destination root");
+        let prepared = prepare_local_workspace_destination(root.path(), Some(std::path::Path::new("a/b")))
+            .expect("prepare nested directory");
+        assert!(std::path::Path::new(&prepared.path).is_dir());
+        std::fs::write(root.path().join("occupied"), b"file").expect("occupied file");
+        assert!(prepare_local_workspace_destination(
+            root.path(),
+            Some(std::path::Path::new("occupied/child"))
+        )
+        .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_destination_rejects_symlink_parents() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("destination root");
+        let outside = tempfile::tempdir().expect("outside root");
+        symlink(outside.path(), root.path().join("escape")).expect("symlink");
+        assert!(prepare_local_workspace_destination(root.path(), Some(std::path::Path::new("escape/child")))
+            .is_err());
+        assert!(!outside.path().join("child").exists());
+    }
+
+    #[test]
+    fn workspace_checksum_uses_standard_sha256() {
+        let root = tempfile::tempdir().expect("checksum root");
+        let file = root.path().join("payload.txt");
+        std::fs::write(&file, b"abc").expect("checksum payload");
+        let digest = sha256_workspace_file(&file).expect("checksum");
+        let hex = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        assert_eq!(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
 
     #[test]
     fn editing_cache_hash_changes_with_file_contents() {
@@ -4217,7 +4731,8 @@ mod tests {
         let source_file = workspace.path().join("source.txt");
         let copied_file = workspace.path().join("copied.txt");
         tokio::fs::write(&source_file, b"harbor").await.unwrap();
-        let file_result = write_local_workspace_destination(&source_file, &copied_file, false).await.unwrap();
+        let file_result =
+            write_local_workspace_destination(&source_file, &copied_file, false, false).await.unwrap();
         assert_eq!(file_result.item_count, 1);
         assert_eq!(file_result.bytes, 6);
         assert_eq!(tokio::fs::read(&copied_file).await.unwrap(), b"harbor");
@@ -4228,7 +4743,9 @@ mod tests {
         tokio::fs::write(nested.join("港.txt"), b"transfer").await.unwrap();
         let copied_directory = workspace.path().join("copied-folder");
         let directory_result =
-            write_local_workspace_destination(&source_directory, &copied_directory, true).await.unwrap();
+            write_local_workspace_destination(&source_directory, &copied_directory, true, false)
+                .await
+                .unwrap();
         assert_eq!(directory_result.item_count, 3);
         assert_eq!(directory_result.bytes, 8);
         assert_eq!(tokio::fs::read(copied_directory.join("nested/港.txt")).await.unwrap(), b"transfer");
@@ -4241,9 +4758,26 @@ mod tests {
         let destination = workspace.path().join("destination.txt");
         tokio::fs::write(&source, b"new").await.unwrap();
         tokio::fs::write(&destination, b"keep").await.unwrap();
-        let error = write_local_workspace_destination(&source, &destination, false).await.unwrap_err();
+        let error = write_local_workspace_destination(&source, &destination, false, false).await.unwrap_err();
         assert!(error.contains("already exists"));
         assert_eq!(tokio::fs::read(&destination).await.unwrap(), b"keep");
+    }
+
+    #[tokio::test]
+    async fn workspace_local_replacement_commits_a_complete_file() {
+        let workspace = tempfile::tempdir().unwrap();
+        let source = workspace.path().join("source.txt");
+        let destination = workspace.path().join("destination.txt");
+        tokio::fs::write(&source, b"new content").await.unwrap();
+        tokio::fs::write(&destination, b"old content").await.unwrap();
+        let result = write_local_workspace_destination(&source, &destination, false, true).await.unwrap();
+        assert_eq!(result.bytes, 11);
+        assert_eq!(tokio::fs::read(&destination).await.unwrap(), b"new content");
+        assert_eq!(tokio::fs::read(&source).await.unwrap(), b"new content");
+
+        let missing = workspace.path().join("missing.txt");
+        assert!(write_local_workspace_destination(&source, &missing, false, true).await.is_err());
+        assert!(!missing.exists());
     }
 
     #[cfg(unix)]

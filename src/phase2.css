@@ -2265,6 +2265,195 @@ input:disabled {
   overscroll-behavior: contain;
 }
 
+.workspace-compare-sheet {
+  display: flex;
+  width: min(880px, calc(100vw - 32px));
+  max-height: calc(100dvh - 48px);
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.workspace-compare-paths {
+  display: grid;
+  gap: 4px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: var(--ht-pane-chrome);
+  color: var(--ht-text-secondary);
+  font-size: 12px;
+}
+
+.workspace-compare-paths span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-compare-note {
+  margin: 8px 0;
+  color: var(--ht-text-secondary);
+  font-size: 12px;
+}
+
+.workspace-compare-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  margin: 0 0 8px;
+}
+
+.workspace-compare-sheet .workspace-compare-toolbar label {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.workspace-compare-sheet .workspace-compare-toolbar input[type='checkbox'] {
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  accent-color: var(--ht-accent-strong);
+}
+
+.workspace-compare-toolbar .search {
+  flex: 1;
+  min-width: 90px;
+}
+
+.workspace-compare-toolbar small {
+  flex: none;
+  color: var(--ht-text-secondary);
+  white-space: nowrap;
+}
+
+.workspace-compare-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 10px;
+}
+
+.workspace-compare-sheet .workspace-conflict-policy {
+  display: grid;
+  gap: 4px;
+  min-width: min(250px, 100%);
+  margin: 0;
+}
+
+.workspace-compare-sheet .workspace-conflict-policy select {
+  width: 100%;
+}
+
+.workspace-compare-footer .form-actions {
+  margin: 0;
+}
+
+.workspace-review-list {
+  min-height: 0;
+  max-height: 50dvh;
+  overflow: auto;
+  padding: 8px 12px;
+  border: 1px solid var(--ht-rule);
+  border-radius: 8px;
+  color: var(--ht-text-primary);
+  font-size: 12px;
+}
+
+.workspace-review-list div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 0;
+}
+
+.workspace-review-list div span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-review-list div small {
+  flex: none;
+  color: var(--ht-text-secondary);
+}
+
+.workspace-compare-list {
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--ht-rule);
+  border-radius: 8px;
+}
+
+.workspace-compare-header,
+.workspace-compare-row {
+  display: grid;
+  grid-template-columns: 28px minmax(120px, 1fr) 72px 72px 148px;
+  align-items: center;
+  gap: 8px;
+  min-width: 480px;
+  padding: 7px 12px;
+  font-size: 12px;
+}
+
+.workspace-compare-header {
+  position: sticky;
+  top: 0;
+  background: var(--ht-pane-chrome);
+  color: var(--ht-text-secondary);
+}
+
+.workspace-compare-sheet .workspace-compare-row {
+  display: grid;
+  grid-template-columns: 28px minmax(120px, 1fr) 72px 72px 148px;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  margin: 0;
+  color: var(--ht-text-primary);
+  font-weight: 400;
+}
+
+.workspace-compare-result {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  gap: 4px;
+}
+
+.workspace-compare-result .icon-button {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  padding: 3px;
+}
+
+.workspace-compare-sheet .workspace-compare-row:nth-child(odd) {
+  background: var(--ht-pane-chrome);
+}
+
+.workspace-compare-row strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.workspace-compare-sheet .workspace-compare-row input[type='checkbox'] {
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  accent-color: var(--ht-accent-strong);
+}
+
 .sync-paths {
   display: grid;
   gap: 6px;

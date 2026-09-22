@@ -36,6 +36,9 @@ type WorkspacePaneState = { kind: PaneKind; directoryPath: string; connectionId?
 type WorkspacePaneId = 'primary' | 'auxiliary';
 type WorkspaceEndpoint = { kind: 'local'; path: string } | { kind: 'remote'; connectionId: string; path: string };
 type WorkspaceTransferResult = { itemCount: number; bytes: number };
+type WorkspaceCompareEntry = { name: string; sourcePath: string; isDirectory: boolean; size: number; modified?: number };
+type WorkspaceCompareRow = { name: string; left?: WorkspaceCompareEntry; right?: WorkspaceCompareEntry; status: 'leftOnly' | 'rightOnly' | 'different' | 'same' | 'unknown' };
+type WorkspaceConflictPolicy = 'rename' | 'overwrite' | 'skip';
 type TransferHistory = { id: string; name: string; direction: 'Upload' | 'Download'; status: 'Completed' | 'Failed' | 'Cancelled'; detail: string; bytes: number; completedAt: string };
 type TransferJob = { id: string; connectionId: string; name: string; direction: 'Upload' | 'Download'; localPath: string; remotePath: string; status: 'Failed'; detail: string; transferredBytes: number; totalBytes: number; retryCount: number; conflictPolicy: string; isDirectory: boolean; updatedAt: string };
 type TransferLogEvent = { id: number; transferId: string; name: string; direction: 'Upload' | 'Download'; event: string; status: string; detail: string; transferredBytes: number; totalBytes: number; retryCount: number; createdAt: string };
@@ -290,6 +293,18 @@ const dualPaneCopy = {
   ja: { show: 'デュアルペインを表示', hide: 'デュアルペインを閉じる', local: 'ローカル', remote: '接続先', source: 'ペインの接続先', swap: '左右のペインを入れ替える', resize: '左右のペイン幅を変更', choose: 'ローカルフォルダを選択', up: '親フォルダへ移動', refresh: '更新', empty: '項目がありません', unavailable: 'この場所を表示できません', connected: '接続済み', copyRight: '選択項目を右へコピー', copyLeft: '選択項目を左へコピー', moveRight: '選択項目を右へ移動', moveLeft: '選択項目を左へ移動', selectItems: '転送元の項目を選択してください', targetUnavailable: '転送先のフォルダを開いてください', transferring: 'ペイン間で転送しています…', copied: '{{count}}項目をコピーしました', moved: '{{count}}項目を移動しました', renamedConflict: '同名項目を避けるため「{{name}}」として転送します', dropCopy: 'ここへコピー', dropMove: 'ここへ移動', dragHint: 'Shiftキーを押しながらドロップすると移動します' },
   en: { show: 'Show dual pane', hide: 'Close dual pane', local: 'Local', remote: 'Connection', source: 'Pane source', swap: 'Swap left and right panes', resize: 'Resize left and right panes', choose: 'Choose local folder', up: 'Go to parent folder', refresh: 'Refresh', empty: 'No items', unavailable: 'This location could not be displayed', connected: 'Connected', copyRight: 'Copy selected items right', copyLeft: 'Copy selected items left', moveRight: 'Move selected items right', moveLeft: 'Move selected items left', selectItems: 'Select items in the source pane', targetUnavailable: 'Open a destination folder first', transferring: 'Transferring between panes…', copied: 'Copied {{count}} items', moved: 'Moved {{count}} items', renamedConflict: 'Transferred as “{{name}}” to avoid a name conflict', dropCopy: 'Copy here', dropMove: 'Move here', dragHint: 'Hold Shift while dropping to move' },
   'zh-CN': { show: '显示双栏', hide: '关闭双栏', local: '本地', remote: '连接', source: '窗格连接', swap: '交换左右窗格', resize: '调整左右窗格宽度', choose: '选择本地文件夹', up: '前往上级文件夹', refresh: '刷新', empty: '没有项目', unavailable: '无法显示此位置', connected: '已连接', copyRight: '将所选项目复制到右侧', copyLeft: '将所选项目复制到左侧', moveRight: '将所选项目移动到右侧', moveLeft: '将所选项目移动到左侧', selectItems: '请在源窗格中选择项目', targetUnavailable: '请先打开目标文件夹', transferring: '正在窗格之间传输…', copied: '已复制{{count}}个项目', moved: '已移动{{count}}个项目', renamedConflict: '为避免名称冲突，已作为“{{name}}”传输', dropCopy: '复制到此处', dropMove: '移动到此处', dragHint: '按住Shift键拖放可移动' },
+} as const;
+
+const compareCopy = {
+  ja: { title: 'フォルダを比較', description: '現在開いている左右のフォルダを比較します。同名項目をコピーする場合は、元の項目を保護するため別名で保存します。', compare: '比較', refresh: '再比較', close: '閉じる', name: '名前', left: '左', right: '右', status: '比較結果', same: '暫定一致', different: '差分', leftOnly: '左のみ', rightOnly: '右のみ', unknown: '日時不明', checksum: 'SHA-256で照合', hashEqual: 'SHA-256一致', hashDifferent: 'SHA-256不一致', copyRight: '選択項目を右へコピー', copyLeft: '選択項目を左へコピー', empty: '比較する項目がありません', noDifferences: '表示する差分はありません', differencesOnly: '差分のみ', search: '相対パスを検索', showing: '{{shown}} / {{total}} 項目を表示', select: '転送する項目を選択してください', unsupported: '同じ場所は比較できません', duplicate: '同じ名前の項目が複数あるため、このフォルダは比較できません。', loading: '比較しています…', details: '配下を再帰的に比較します。同名ファイルは必要に応じてSHA-256照合できます。両側にあるフォルダは配下の差分項目を選択してください。' },
+  en: { title: 'Compare Folders', description: 'Compare the folders open in both panes. Existing names are preserved by copying under a new name.', compare: 'Compare', refresh: 'Compare again', close: 'Close', name: 'Name', left: 'Left', right: 'Right', status: 'Result', same: 'Likely same', different: 'Different', leftOnly: 'Left only', rightOnly: 'Right only', unknown: 'Date unavailable', checksum: 'Verify SHA-256', hashEqual: 'SHA-256 match', hashDifferent: 'SHA-256 differs', copyRight: 'Copy selected right', copyLeft: 'Copy selected left', empty: 'No items to compare', noDifferences: 'No differences to show', differencesOnly: 'Differences only', search: 'Search relative paths', showing: 'Showing {{shown}} of {{total}} items', select: 'Select items to transfer', unsupported: 'Cannot compare the same location', duplicate: 'This folder contains multiple items with the same name and cannot be compared safely.', loading: 'Comparing…', details: 'Compares subfolders recursively. Verify same-named files with SHA-256 on demand. For folders present on both sides, select the differing children.' },
+  'zh-CN': { title: '比较文件夹', description: '比较左右窗格中打开的文件夹。同名项目会另存为新名称，以保护原有项目。', compare: '比较', refresh: '重新比较', close: '关闭', name: '名称', left: '左侧', right: '右侧', status: '结果', same: '暂时相同', different: '不同', leftOnly: '仅左侧', rightOnly: '仅右侧', unknown: '日期未知', checksum: '验证 SHA-256', hashEqual: 'SHA-256 相同', hashDifferent: 'SHA-256 不同', copyRight: '将所选项目复制到右侧', copyLeft: '将所选项目复制到左侧', empty: '没有可比较的项目', noDifferences: '没有可显示的差异', differencesOnly: '仅显示差异', search: '搜索相对路径', showing: '显示 {{shown}} / {{total}} 项', select: '请选择要传输的项目', unsupported: '无法比较相同位置', duplicate: '此文件夹存在多个同名项目，无法安全比较。', loading: '正在比较…', details: '递归比较子文件夹。同名文件可按需进行 SHA-256 验证。对于两侧都有的文件夹，请选择其中的差异项目。' },
+} as const;
+
+const compareConflictCopy = {
+  ja: { policy: '同名ファイルがある場合', rename: '別名で保存（既定）', overwrite: '上書き（通常ファイルのみ）', skip: 'スキップ', create: '新規コピー', review: '転送内容の確認', execute: 'コピーを実行', cancel: '比較に戻る', selected: '{{count}}項目を確認', directionRight: '左 → 右', directionLeft: '右 → 左', previewNote: '実行直前に転送先を再確認します。上書きは通常ファイルのみ、フォルダは置き換えません。', additional: 'ほか {{count}} 項目' },
+  en: { policy: 'When a name already exists', rename: 'Save with a new name (default)', overwrite: 'Replace (regular files only)', skip: 'Skip', create: 'New copy', review: 'Review Transfer', execute: 'Copy now', cancel: 'Back to comparison', selected: 'Review {{count}} items', directionRight: 'Left → Right', directionLeft: 'Right → Left', previewNote: 'The destination is checked again immediately before transfer. Only regular files can be replaced; folders are never replaced.', additional: '{{count}} more items' },
+  'zh-CN': { policy: '存在同名项目时', rename: '另存为新名称（默认）', overwrite: '覆盖（仅普通文件）', skip: '跳过', create: '新建副本', review: '确认传输内容', execute: '开始复制', cancel: '返回比较', selected: '确认 {{count}} 项', directionRight: '左 → 右', directionLeft: '右 → 左', previewNote: '传输前会再次检查目标。只能覆盖普通文件，不会替换文件夹。', additional: '还有 {{count}} 项' },
 } as const;
 
 const columnCopy = {
@@ -675,6 +690,159 @@ function RemoteFilePane({ language, connection, connections, showHiddenFiles, re
   </section>;
 }
 
+async function loadWorkspaceCompareEntries(pane: WorkspacePaneState): Promise<WorkspaceCompareEntry[]> {
+  const endpoint: WorkspaceEndpoint = pane.kind === 'local'
+    ? { kind: 'local', path: pane.directoryPath }
+    : { kind: 'remote', connectionId: pane.connectionId ?? '', path: pane.directoryPath };
+  const entries = await invoke<Array<{ path: string; sourcePath: string; size: number; isDirectory: boolean; modified?: number }>>('workspace_compare_snapshot', { endpoint });
+  return entries.map((entry) => ({ name: entry.path, sourcePath: entry.sourcePath, isDirectory: entry.isDirectory, size: entry.size, modified: entry.modified }));
+}
+
+function compareWorkspaceRows(left: WorkspaceCompareEntry[], right: WorkspaceCompareEntry[], showHiddenFiles: boolean): WorkspaceCompareRow[] {
+  const visible = (entry: WorkspaceCompareEntry) => showHiddenFiles || !entry.name.split('/').some((component) => component.startsWith('.'));
+  const leftMap = new Map(left.filter(visible).map((entry) => [entry.name, entry]));
+  const rightMap = new Map(right.filter(visible).map((entry) => [entry.name, entry]));
+  const rows = [...new Set([...leftMap.keys(), ...rightMap.keys()])].sort((a, b) => a.localeCompare(b)).map((name) => {
+    const leftEntry = leftMap.get(name);
+    const rightEntry = rightMap.get(name);
+    let status: WorkspaceCompareRow['status'];
+    if (!leftEntry) status = 'rightOnly';
+    else if (!rightEntry) status = 'leftOnly';
+    else if (leftEntry.isDirectory !== rightEntry.isDirectory || (!leftEntry.isDirectory && leftEntry.size !== rightEntry.size)) status = 'different';
+    else if (leftEntry.isDirectory) status = 'same';
+    else if (leftEntry.modified === undefined || rightEntry.modified === undefined) status = 'unknown';
+    else status = Math.abs(leftEntry.modified - rightEntry.modified) <= 2 ? 'same' : 'different';
+    return { name, left: leftEntry, right: rightEntry, status };
+  });
+  const rowByPath = new Map(rows.map((row) => [row.name, row]));
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    const separator = row.name.lastIndexOf('/');
+    if (separator < 0) continue;
+    const parent = rowByPath.get(row.name.slice(0, separator));
+    if (!parent?.left?.isDirectory || !parent?.right?.isDirectory) continue;
+    if (row.status === 'different' || row.status === 'leftOnly' || row.status === 'rightOnly') parent.status = 'different';
+    else if (row.status === 'unknown' && parent.status === 'same') parent.status = 'unknown';
+  }
+  return rows;
+}
+
+function WorkspaceCompareSheet({ language, left, right, showHiddenFiles, busy, onClose, onCopy }: { language: Language; left: WorkspacePaneState; right: WorkspacePaneState; showHiddenFiles: boolean; busy: boolean; onClose: () => void; onCopy: (source: WorkspacePaneState, destination: WorkspacePaneState, entries: WorkspaceCompareEntry[], policy: WorkspaceConflictPolicy) => Promise<void> }) {
+  const text = compareCopy[language];
+  const conflictText = compareConflictCopy[language];
+  const [rows, setRows] = useState<WorkspaceCompareRow[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [checksumResults, setChecksumResults] = useState<Record<string, boolean>>({});
+  const [checkingName, setCheckingName] = useState('');
+  const [checksumError, setChecksumError] = useState('');
+  const [query, setQuery] = useState('');
+  const [differencesOnly, setDifferencesOnly] = useState(true);
+  const [conflictPolicy, setConflictPolicy] = useState<WorkspaceConflictPolicy>('rename');
+  const [pendingTransfer, setPendingTransfer] = useState<{ direction: 'left' | 'right'; entries: WorkspaceCompareEntry[] } | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [refresh, setRefresh] = useState(0);
+  const sameLocation = left.kind === right.kind && left.connectionId === right.connectionId && left.directoryPath === right.directoryPath;
+  useEffect(() => {
+    if (sameLocation) return;
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+    setChecksumError('');
+    void Promise.all([loadWorkspaceCompareEntries(left), loadWorkspaceCompareEntries(right)]).then(([leftEntries, rightEntries]) => {
+      if (cancelled) return;
+      const hasDuplicate = (entries: WorkspaceCompareEntry[]) => {
+        const names = entries.filter((entry) => showHiddenFiles || !entry.name.split('/').some((component) => component.startsWith('.'))).map((entry) => entry.name);
+        return new Set(names).size !== names.length;
+      };
+      if (hasDuplicate(leftEntries) || hasDuplicate(rightEntries)) { setRows([]); setError(text.duplicate); return; }
+      setRows(compareWorkspaceRows(leftEntries, rightEntries, showHiddenFiles));
+      setSelected(new Set());
+      setChecksumResults({});
+    }).catch((reason) => { if (!cancelled) setError(invokeErrorMessage(reason)); }).finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [left.kind, left.connectionId, left.directoryPath, right.kind, right.connectionId, right.directoryPath, showHiddenFiles, refresh, sameLocation, text.duplicate]);
+  const selectedRows = rows.filter((row) => selected.has(row.name));
+  const comparisonByPath = useMemo(() => new Map(rows.map((row) => [row.name, row])), [rows]);
+  const filteredRows = useMemo(() => {
+    const normalized = query.toLocaleLowerCase(language);
+    return rows.filter((row) => {
+      const equal = checksumResults[row.name] === true || (row.status === 'same' && checksumResults[row.name] !== false);
+      return (!differencesOnly || !equal) && row.name.toLocaleLowerCase(language).includes(normalized);
+    });
+  }, [rows, checksumResults, query, language, differencesOnly]);
+  const visibleRows = filteredRows.slice(0, 2_000);
+  async function verifyChecksum(row: WorkspaceCompareRow) {
+    if (!row.left || !row.right || row.left.isDirectory || row.right.isDirectory) return;
+    setCheckingName(row.name);
+    setChecksumError('');
+    try {
+      const result = await invoke<{ equal: boolean }>('workspace_compare_checksum', { request: {
+        left: left.kind === 'local' ? { kind: 'local', path: row.left.sourcePath } : { kind: 'remote', connectionId: left.connectionId, path: row.left.sourcePath },
+        right: right.kind === 'local' ? { kind: 'local', path: row.right.sourcePath } : { kind: 'remote', connectionId: right.connectionId, path: row.right.sourcePath },
+      } });
+      setChecksumResults((current) => ({ ...current, [row.name]: result.equal }));
+      if (result.equal) setSelected((current) => { const next = new Set(current); next.delete(row.name); return next; });
+    } catch (reason) { setChecksumError(invokeErrorMessage(reason)); }
+    finally { setCheckingName(''); }
+  }
+  function transfer(direction: 'left' | 'right') {
+    const selectedDirectories = new Set(selectedRows.flatMap((row) => {
+      const entry = direction === 'left' ? row.left : row.right;
+      return entry?.isDirectory ? [entry.name] : [];
+    }));
+    const items = selectedRows.flatMap((row) => {
+      const entry = direction === 'left' ? row.left : row.right;
+      return entry ? [entry] : [];
+    }).filter((entry) => {
+      let separator = entry.name.lastIndexOf('/');
+      while (separator >= 0) {
+        if (selectedDirectories.has(entry.name.slice(0, separator))) return false;
+        separator = entry.name.lastIndexOf('/', separator - 1);
+      }
+      return true;
+    });
+    if (items.length) setPendingTransfer({ direction, entries: items });
+  }
+  async function confirmTransfer() {
+    if (!pendingTransfer || submitting) return;
+    setSubmitting(true);
+    setChecksumError('');
+    try {
+      const sourcePane = pendingTransfer.direction === 'left' ? left : right;
+      const destinationPane = pendingTransfer.direction === 'left' ? right : left;
+      await onCopy(sourcePane, destinationPane, pendingTransfer.entries, conflictPolicy);
+    } catch (reason) {
+      setChecksumError(invokeErrorMessage(reason));
+      setPendingTransfer(null);
+    } finally { setSubmitting(false); }
+  }
+  if (pendingTransfer) return <div className="modal-backdrop" role="presentation"><section className="connect-sheet workspace-compare-sheet" role="dialog" aria-modal="true" aria-labelledby="workspace-review-title">
+    <div className="sheet-title"><div><h2 id="workspace-review-title">{conflictText.review}</h2><p>{conflictText.selected.replace('{{count}}', String(pendingTransfer.entries.length))} · {pendingTransfer.direction === 'left' ? conflictText.directionRight : conflictText.directionLeft}</p></div></div>
+    <p className="workspace-compare-note">{conflictText.previewNote}</p>
+    <div className="workspace-review-list">{pendingTransfer.entries.slice(0, 40).map((entry) => {
+      const row = comparisonByPath.get(entry.name);
+      const conflict = pendingTransfer.direction === 'left' ? Boolean(row?.right) : Boolean(row?.left);
+      return <div key={entry.name} title={entry.name}><span>{entry.name}</span><small>{conflict ? conflictText[conflictPolicy] : conflictText.create}</small></div>;
+    })}{pendingTransfer.entries.length > 40 && <p>{conflictText.additional.replace('{{count}}', String(pendingTransfer.entries.length - 40))}</p>}</div>
+    <p className="workspace-compare-note">{conflictText.policy}: {conflictText[conflictPolicy]}</p>
+    <div className="form-actions"><button disabled={submitting || busy} onClick={() => setPendingTransfer(null)}>{conflictText.cancel}</button><button className="primary" disabled={submitting || busy} onClick={() => void confirmTransfer()}>{submitting || busy ? <LoaderCircle className="spinning" size={15} /> : <Copy size={15} />}{conflictText.execute}</button></div>
+  </section></div>;
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="connect-sheet workspace-compare-sheet" role="dialog" aria-modal="true" aria-labelledby="workspace-compare-title">
+    <div className="sheet-title"><div><h2 id="workspace-compare-title">{text.title}</h2><p>{text.description}</p></div><button className="icon-button" aria-label={text.close} onClick={onClose}>×</button></div>
+    <div className="workspace-compare-paths"><span title={left.directoryPath}>{text.left}: {left.directoryPath}</span><span title={right.directoryPath}>{text.right}: {right.directoryPath}</span></div>
+    <p className="workspace-compare-note">{text.details}</p>
+    <div className="workspace-compare-toolbar"><label><input type="checkbox" checked={differencesOnly} onChange={(event) => setDifferencesOnly(event.target.checked)}/>{text.differencesOnly}</label><div className="search"><Search size={15}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={text.search} aria-label={text.search}/></div><small>{text.showing.replace('{{shown}}', String(visibleRows.length)).replace('{{total}}', String(filteredRows.length))}</small></div>
+    {checksumError && <p className="error-banner" role="alert">{checksumError}</p>}
+    {sameLocation ? <p className="error-banner">{text.unsupported}</p> : error ? <p className="error-banner">{error}</p> : loading ? <p className="view-empty">{text.loading}</p> : rows.length === 0 ? <p className="view-empty">{text.empty}</p> : visibleRows.length === 0 ? <p className="view-empty">{text.noDifferences}</p> : <div className="workspace-compare-list" role="table" aria-label={text.title}>
+      <div className="workspace-compare-header" role="row"><span/><span>{text.name}</span><span>{text.left}</span><span>{text.right}</span><span>{text.status}</span></div>
+      {visibleRows.map((row) => <div className={`workspace-compare-row ${row.status}`} role="row" key={row.name}><input type="checkbox" aria-label={row.name} checked={selected.has(row.name)} disabled={(Boolean(row.left?.isDirectory && row.right?.isDirectory)) || (row.status === 'same' && checksumResults[row.name] !== false) || checksumResults[row.name] === true} onChange={() => setSelected((current) => { const next = new Set(current); if (next.has(row.name)) next.delete(row.name); else next.add(row.name); return next; })}/><strong title={row.name}>{row.name}</strong><span title={row.left?.modified ? new Date(row.left.modified * 1000).toLocaleString(language) : undefined}>{row.left ? row.left.isDirectory ? '—' : formatBytes(row.left.size) : '—'}</span><span title={row.right?.modified ? new Date(row.right.modified * 1000).toLocaleString(language) : undefined}>{row.right ? row.right.isDirectory ? '—' : formatBytes(row.right.size) : '—'}</span><span className="workspace-compare-result">{row.name in checksumResults ? checksumResults[row.name] ? text.hashEqual : text.hashDifferent : text[row.status]}{row.left && row.right && !row.left.isDirectory && !row.right.isDirectory && <button className="icon-button" aria-label={`${text.checksum}: ${row.name}`} title={text.checksum} disabled={Boolean(checkingName) || busy} onClick={() => void verifyChecksum(row)}>{checkingName === row.name ? <LoaderCircle className="spinning" size={14}/> : <RefreshCw size={14}/>}</button>}</span></div>)}
+    </div>}
+    <div className="workspace-compare-footer"><label className="workspace-conflict-policy">{conflictText.policy}<select value={conflictPolicy} onChange={(event) => setConflictPolicy(event.target.value as WorkspaceConflictPolicy)}><option value="rename">{conflictText.rename}</option><option value="overwrite">{conflictText.overwrite}</option><option value="skip">{conflictText.skip}</option></select></label><div className="form-actions"><button disabled={loading || busy || sameLocation} onClick={() => setRefresh((value) => value + 1)}><RefreshCw size={15}/>{text.refresh}</button><button disabled={busy || selectedRows.every((row) => !row.right)} onClick={() => transfer('right')}><ArrowLeft size={15}/>{text.copyLeft}</button><button className="primary" disabled={busy || selectedRows.every((row) => !row.left)} onClick={() => transfer('left')}><ArrowRight size={15}/>{text.copyRight}</button></div></div>
+  </section></div>;
+}
+
 export default function App() {
   const [preferences, setPreferences] = useState<Preferences>(loadPreferences);
   const language = preferences.language;
@@ -771,6 +939,7 @@ export default function App() {
   const [auxiliaryPaneState, setAuxiliaryPaneState] = useState<WorkspacePaneState | null>(null);
   const [auxiliaryRefreshToken, setAuxiliaryRefreshToken] = useState(0);
   const [workspaceTransferBusy, setWorkspaceTransferBusy] = useState(false);
+  const [showWorkspaceCompare, setShowWorkspaceCompare] = useState(false);
   const availableUpdate = useRef<Update | null>(null);
   const automaticUpdateCheckStarted = useRef(false);
   const remoteEditPolling = useRef<Set<string>>(new Set());
@@ -2218,6 +2387,46 @@ export default function App() {
     }
   }
 
+  async function copyComparedEntries(source: WorkspacePaneState, destination: WorkspacePaneState, selectedEntries: WorkspaceCompareEntry[], policy: WorkspaceConflictPolicy) {
+    const destinationRoot = workspaceEndpoint(destination, destination.directoryPath);
+    if (!destinationRoot) throw new Error(dualPaneText.targetUnavailable);
+    setWorkspaceTransferBusy(true);
+    setError(null);
+    setNotice(dualPaneText.transferring);
+    let completed = 0;
+    try {
+      for (const entry of selectedEntries) {
+        const separator = entry.name.lastIndexOf('/');
+        const relativeDirectory = separator < 0 ? '' : entry.name.slice(0, separator);
+        const name = entry.name.slice(separator + 1);
+        const prepared = await invoke<{ path: string; entries: string[] }>('workspace_prepare_destination', {
+          request: { root: destinationRoot, relativeDirectory },
+        });
+        const occupied = new Set(prepared.entries);
+        const conflict = occupied.has(name);
+        if (conflict && policy === 'skip') continue;
+        if (conflict && policy === 'overwrite' && entry.isDirectory) throw new Error('Workspace comparison cannot replace an entire directory.');
+        const destinationName = conflict && policy === 'rename' ? nextCopyName(name, entry.isDirectory, occupied) : name;
+        if (destinationName !== name) setNotice(dualPaneText.renamedConflict.replace('{{name}}', destinationName));
+        const sourceEndpoint = workspaceEndpoint(source, entry.sourcePath);
+        const destinationPath = destination.kind === 'local'
+          ? joinLocalPath(prepared.path, destinationName)
+          : joinPath(prepared.path, destinationName);
+        const destinationEndpoint = workspaceEndpoint(destination, destinationPath);
+        if (!sourceEndpoint || !destinationEndpoint) throw new Error(dualPaneText.targetUnavailable);
+        await invoke<WorkspaceTransferResult>('workspace_transfer', {
+          request: { source: sourceEndpoint, destination: destinationEndpoint, isDirectory: entry.isDirectory, moveItem: false, overwriteExisting: conflict && policy === 'overwrite' },
+        });
+        completed += 1;
+      }
+      setNotice(dualPaneText.copied.replace('{{count}}', String(completed)));
+    } finally {
+      setAuxiliaryRefreshToken((current) => current + 1);
+      if (active) void loadDirectory(active, path);
+      setWorkspaceTransferBusy(false);
+    }
+  }
+
   const densityMetrics = fileDensityMetrics[preferences.fileRowDensity];
   const primaryRemotePaneState: WorkspacePaneState | null = active ? {
     kind: 'remote',
@@ -2319,6 +2528,7 @@ export default function App() {
       {dualPane && auxiliaryPane}
       {dualPane && <div className="pane-transfer-rail" role="separator" aria-label={dualPaneText.resize} title={dualPaneText.resize} aria-orientation="vertical" aria-valuemin={20} aria-valuemax={80} aria-valuenow={Math.round(dualPaneRatio * 100)} tabIndex={0} onPointerDown={startDualPaneResize} onDoubleClick={(event) => { if (!(event.target as HTMLElement).closest('button')) setDualPaneRatio(defaultDualPaneRatio); }} onKeyDown={(event) => { if (event.key === 'ArrowLeft') { event.preventDefault(); adjustDualPaneRatio(-0.03); } if (event.key === 'ArrowRight') { event.preventDefault(); adjustDualPaneRatio(0.03); } if (event.key === 'Home') { event.preventDefault(); setDualPaneRatio(defaultDualPaneRatio); } }}><div className="pane-transfer-controls" role="group" aria-label={dualPaneText.transferring}>
         <button aria-label={dualPaneText.swap} title={dualPaneText.swap} onClick={() => setLeftPaneKind((current) => current === 'local' ? 'remote' : 'local')}><ArrowLeftRight size={16}/></button>
+        <button disabled={workspaceTransferBusy || !leftPaneState?.directoryPath || !rightPaneState?.directoryPath} aria-label={compareCopy[language].compare} title={compareCopy[language].compare} onClick={() => setShowWorkspaceCompare(true)}><FolderSync size={16}/></button>
         <span className="pane-transfer-divider"/>
         <button disabled={workspaceTransferBusy || !leftPaneState?.items.length || !rightPaneState} aria-label={dualPaneText.copyRight} title={dualPaneText.copyRight} onClick={() => void transferBetweenPanes(leftPaneState, rightPaneState, false)}><Copy size={14}/><ArrowRight size={14}/></button>
         <button disabled={workspaceTransferBusy || !rightPaneState?.items.length || !leftPaneState} aria-label={dualPaneText.copyLeft} title={dualPaneText.copyLeft} onClick={() => void transferBetweenPanes(rightPaneState, leftPaneState, false)}><ArrowLeft size={14}/><Copy size={14}/></button>
@@ -2327,6 +2537,7 @@ export default function App() {
         <button disabled={workspaceTransferBusy || !rightPaneState?.items.length || !leftPaneState} aria-label={dualPaneText.moveLeft} title={dualPaneText.moveLeft} onClick={() => void transferBetweenPanes(rightPaneState, leftPaneState, true)}><ArrowLeft size={14}/><Scissors size={14}/></button>
         {workspaceTransferBusy && <LoaderCircle className="spinning pane-transfer-spinner" size={15} />}
       </div></div>}
+      {showWorkspaceCompare && leftPaneState && rightPaneState && <WorkspaceCompareSheet language={language} left={leftPaneState} right={rightPaneState} showHiddenFiles={preferences.showHiddenFiles} busy={workspaceTransferBusy} onClose={() => setShowWorkspaceCompare(false)} onCopy={async (source, destination, selectedEntries, policy) => { await copyComparedEntries(source, destination, selectedEntries, policy); setShowWorkspaceCompare(false); }} />}
       {primaryLocal ? <LocalFilePane language={language} initialPath={active?.localDirectory} showHiddenFiles={preferences.showHiddenFiles} connections={connections} refreshToken={auxiliaryRefreshToken} paneId="primary" paneClassName="primary-file-pane" onSelectSource={(connection) => { setPrimaryLocalPaneState(null); openConnectionSheet(connection, 'primary'); }} onStateChange={setPrimaryLocalPaneState} onWorkspaceDragStart={beginWorkspaceDrag} onWorkspaceDrop={dropWorkspaceItems}/> : <section className={`browser ${isDragOver ? 'drag-over' : ''}`} ref={browserZoneRef} onDragOver={(event) => { if (event.dataTransfer.types.includes('application/x-harbor-workspace')) { event.preventDefault(); event.currentTarget.classList.add('workspace-drag-over'); event.dataTransfer.dropEffect = event.shiftKey ? 'move' : 'copy'; } }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.classList.remove('workspace-drag-over'); }} onDrop={(event) => { event.currentTarget.classList.remove('workspace-drag-over'); if (!event.dataTransfer.types.includes('application/x-harbor-workspace')) return; event.preventDefault(); dropWorkspaceItems('primary', event.shiftKey); }}>
         {notice && <div className="notice-banner" role="status" aria-live="polite">{notice}</div>}
         {active ? <>
