@@ -68,5 +68,7 @@ Desktop.ini
 # アップロードしてはいけません。
 # 素材
 dontUpload/
+dontUpload/*
 website/
+website/*
 
