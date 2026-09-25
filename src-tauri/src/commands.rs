@@ -4361,8 +4361,8 @@ mod tests {
         local_download_staging_path, parse_remote_modified, prepare_local_workspace_destination,
         reject_symlink_ancestors, remote_child_path, remote_parent_and_name, remote_replace_target,
         reserve_bandwidth, retry_backoff, safe_relative_path, sha256_workspace_file,
-        validate_workspace_local_source, write_local_workspace_destination, write_remote_workspace_destination,
-        Protocol, TransferControl, TransferScheduler,
+        validate_workspace_local_source, write_local_workspace_destination,
+        write_remote_workspace_destination, Protocol, TransferControl, TransferScheduler,
     };
     use crate::remote_fs::RemoteFileSystem;
     use crate::sftp_client::{FileEntry, FileEntryType};
@@ -4382,11 +4382,27 @@ mod tests {
     impl RemoteFileSystem for WorkspaceTestRemote {
         async fn list_dir(&mut self, path: &str) -> Result<Vec<FileEntry>> {
             let prefix = format!("{}/", path.trim_end_matches('/'));
-            Ok(self.files.iter().filter_map(|(file_path, bytes)| {
-                let name = file_path.strip_prefix(&prefix)?;
-                if name.contains('/') { return None; }
-                Some(FileEntry { name: name.to_string(), path_component: None, download_name: None, size: bytes.len() as u64, modified: None, permissions: None, file_type: FileEntryType::File, owner: None, group: None })
-            }).collect())
+            Ok(self
+                .files
+                .iter()
+                .filter_map(|(file_path, bytes)| {
+                    let name = file_path.strip_prefix(&prefix)?;
+                    if name.contains('/') {
+                        return None;
+                    }
+                    Some(FileEntry {
+                        name: name.to_string(),
+                        path_component: None,
+                        download_name: None,
+                        size: bytes.len() as u64,
+                        modified: None,
+                        permissions: None,
+                        file_type: FileEntryType::File,
+                        owner: None,
+                        group: None,
+                    })
+                })
+                .collect())
         }
         async fn upload_file(&mut self, local_path: &str, remote_path: &str) -> Result<u64> {
             let bytes = std::fs::read(local_path)?;
@@ -4394,19 +4410,43 @@ mod tests {
             self.files.insert(remote_path.to_string(), bytes);
             Ok(len)
         }
-        async fn download_file(&mut self, _remote_path: &str, _local_path: &str) -> Result<u64> { bail!("unused") }
-        async fn create_dir(&mut self, _path: &str) -> Result<()> { bail!("unused") }
+        async fn download_file(&mut self, _remote_path: &str, _local_path: &str) -> Result<u64> {
+            bail!("unused")
+        }
+        async fn create_dir(&mut self, _path: &str) -> Result<()> {
+            bail!("unused")
+        }
         async fn rename(&mut self, old_path: &str, new_path: &str) -> Result<()> {
-            if self.fail_commit && old_path.ends_with(".part") { bail!("simulated commit failure"); }
-            if self.files.contains_key(new_path) { bail!("destination exists"); }
+            if self.fail_commit && old_path.ends_with(".part") {
+                bail!("simulated commit failure");
+            }
+            if self.files.contains_key(new_path) {
+                bail!("destination exists");
+            }
             let bytes = self.files.remove(old_path).ok_or_else(|| anyhow::anyhow!("source missing"))?;
             self.files.insert(new_path.to_string(), bytes);
             Ok(())
         }
-        async fn set_metadata(&mut self, _path: &str, _permissions: Option<u32>, _modified: Option<u32>, _owner_id: Option<u32>, _group_id: Option<u32>) -> Result<()> { bail!("unused") }
-        async fn delete_file(&mut self, path: &str) -> Result<()> { self.files.remove(path); Ok(()) }
-        async fn delete_dir(&mut self, _path: &str) -> Result<()> { bail!("unused") }
-        async fn disconnect(&mut self) -> Result<()> { Ok(()) }
+        async fn set_metadata(
+            &mut self,
+            _path: &str,
+            _permissions: Option<u32>,
+            _modified: Option<u32>,
+            _owner_id: Option<u32>,
+            _group_id: Option<u32>,
+        ) -> Result<()> {
+            bail!("unused")
+        }
+        async fn delete_file(&mut self, path: &str) -> Result<()> {
+            self.files.remove(path);
+            Ok(())
+        }
+        async fn delete_dir(&mut self, _path: &str) -> Result<()> {
+            bail!("unused")
+        }
+        async fn disconnect(&mut self) -> Result<()> {
+            Ok(())
+        }
     }
 
     #[tokio::test]
@@ -4414,8 +4454,13 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let source = workspace.path().join("new.txt");
         std::fs::write(&source, b"new content").unwrap();
-        let mut remote = WorkspaceTestRemote { files: HashMap::from([("/docs/file.txt".to_string(), b"original".to_vec())]), fail_commit: true };
-        let error = write_remote_workspace_destination(&mut remote, &source, "/docs/file.txt", false, true).await.unwrap_err();
+        let mut remote = WorkspaceTestRemote {
+            files: HashMap::from([("/docs/file.txt".to_string(), b"original".to_vec())]),
+            fail_commit: true,
+        };
+        let error = write_remote_workspace_destination(&mut remote, &source, "/docs/file.txt", false, true)
+            .await
+            .unwrap_err();
         assert!(error.contains("restored"));
         assert_eq!(remote.files.get("/docs/file.txt").unwrap(), b"original");
         assert_eq!(remote.files.len(), 1);
@@ -4426,8 +4471,13 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let source = workspace.path().join("new.txt");
         std::fs::write(&source, b"new content").unwrap();
-        let mut remote = WorkspaceTestRemote { files: HashMap::from([("/docs/file.txt".to_string(), b"original".to_vec())]), fail_commit: false };
-        write_remote_workspace_destination(&mut remote, &source, "/docs/file.txt", false, true).await.unwrap();
+        let mut remote = WorkspaceTestRemote {
+            files: HashMap::from([("/docs/file.txt".to_string(), b"original".to_vec())]),
+            fail_commit: false,
+        };
+        write_remote_workspace_destination(&mut remote, &source, "/docs/file.txt", false, true)
+            .await
+            .unwrap();
         assert_eq!(remote.files.get("/docs/file.txt").unwrap(), b"new content");
         assert_eq!(remote.files.len(), 1);
     }
