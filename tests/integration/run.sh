@@ -74,7 +74,7 @@ WEBDAV_TEST_CA_CERT="$cert_dir/ca.crt" WEBDAV_TEST_HOST=127.0.0.1 WEBDAV_TEST_PO
   cargo test --manifest-path "$project_dir/src-tauri/Cargo.toml" webdav_client::tests::live_webdav_ -- --test-threads=1
 
 compose stop webdav nextcloud-https nextcloud
-compose up --wait s3
+compose up --build --wait s3
 
 S3_TEST_ENDPOINT="http://127.0.0.1:$s3_host_port" S3_TEST_ACCESS_KEY=harboraccess S3_TEST_SECRET_KEY=harborsecret123 \
   cargo test --manifest-path "$project_dir/src-tauri/Cargo.toml" s3_client::tests::live_s3_ -- --test-threads=1

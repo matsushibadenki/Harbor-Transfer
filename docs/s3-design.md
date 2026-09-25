@@ -48,3 +48,4 @@ S3にはディレクトリが存在しないため、UIの `/photos/2026` はオ
 - multipartアップロードとストリーミングダウンロードが既存の進捗、停止、再開、取消イベントへ接続される。
 - 失敗したダウンロードが完成ファイルとして残らず、失敗したmultipart uploadに対してabortが呼ばれる。
 - MinIOの隔離テストで17 MiB超multipartの往復、Unicode key、取消後の未完了upload消去、1,001件のページング一覧を検証する。
+- テスト用MinIOは `tests/integration/Dockerfile.s3` で公式リリース `RELEASE.2025-09-07T16-13-09Z` のコミットを固定してビルドする。配布イメージ取得時の `unauthorized` を回避し、同じサーバー実装で検証を継続する。初回はGo依存関係の取得とビルドが必要になる。
