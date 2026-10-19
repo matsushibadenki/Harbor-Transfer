@@ -6,6 +6,25 @@
 
 ## 進捗
 
+### 2026-10-19 依存ライブラリ定期更新
+
+- 🟢 [Done] React / React DOMを19.3.0から19.3.1、Lucideを1.55.0から1.59.0へ更新し、manifestとpnpm lockfileを同期。
+- 🟢 [Done] 型検査・フロントエンドビルド・51種類のアイコンSVG描画・pnpm checkが成功。Rustはテストランナー上115 passed、0 failedで、前回未完了だった検査を完了。
+- ⭕️ [Pending] Docker daemonが利用できず通信統合テストは未実行。liveテストの早期returnを実接続成功として扱わない。Tauri／通信依存の更新とネイティブ画面回帰は保留を維持。
+
+詳細: [依存更新記録](dependency-maintenance.md)。
+
+### 2026-10-12 依存ライブラリ定期更新
+
+- 🟢 [Done] React / React DOMと型定義を19.3.0、Viteを8.3.4、Reactプラグインを6.1.2、TypeScriptを7.0.2、Lucideを1.55.0へ更新し、manifestとpnpm lockfileを同期。型検査とフロントエンドビルドは成功。
+- 🟠 [Next] Tauriネイティブ環境で3言語・アイコン・狭いウインドウ・ドッキング／フローティングを回帰確認。
+- ⭕️ [Pending] Docker daemonが利用できないため、Tauri／AWS／SSH／FTP／WebDAV／SMB等の更新と実接続回帰テストを保留。Tokioの試行更新は今回分を取り消した。
+- ⭕️ [Pending] ブラウザー単体ではTauri APIがなく初期化に失敗し、UI検証は未完了。PPK対応ssh-keyはstable代替を確認できず、既存のRC固定を維持。
+
+- ⭕️ [Pending] `pnpm check`のRustテストはAWS SDKコンパイルが10分以上続いたため中断。check全体は未完了。
+
+詳細: [依存更新記録](dependency-maintenance.md)。
+
 - [Done] 初期機能設計書を作成し、対象プロトコル、画面、セキュリティ、IPC、受け入れ条件を定義
 - [Done] ロードマップを作成し、Tauri 2 + Rust を前提に実装順を定義
 - [Done] ルートディレクトリに独立した Tauri 2 + Rust アプリを作成し、フロントエンド/バックエンドのビルドを確認
