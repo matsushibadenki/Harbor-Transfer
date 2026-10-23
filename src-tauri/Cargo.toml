@@ -1,6 +1,6 @@
 [package]
 name = "harbor-transfer"
-version = "0.2.5"
+version = "0.2.6"
 description = "A secure file transfer client"
 edition = "2021"
 
