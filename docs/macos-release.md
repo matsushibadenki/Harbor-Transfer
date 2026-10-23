@@ -45,6 +45,14 @@ openssl base64 -A -in DeveloperIDApplication.p12
 
 Copy the output directly into `APPLE_CERTIFICATE`; never commit the `.p12`, either private key, or any password. Once all secrets exist, open **Actions → Release macOS → Run workflow**. The workflow creates the signed universal application, DMG, updater archive and signature, plus `latest.json` for in-app update discovery. Increase the package, Tauri, and Cargo versions together before every release.
 
+## Notarization authentication failures
+
+The workflow checks Apple notarization authentication before dependency installation and compilation. HTTP 401 from `notarytool` means Apple rejected the Apple ID and app-specific password combination; it is separate from compilation and Developer ID code signing.
+
+Generate a new app-specific password for the Apple account used for notarization, then update `APPLE_PASSWORD` under repository **Settings → Secrets and variables → Actions**. Verify that `APPLE_ID` is the email address for that same account and that it has access to team `3WH28SSRZC`. See [Apple's app-specific password instructions](https://support.apple.com/en-us/102654).
+
+Re-run **Release macOS** against `main` after updating the secrets. If using the local `Harbor-Transfer` notarization profile, update it separately with `xcrun notarytool store-credentials "Harbor-Transfer"`; use its interactive prompts rather than putting passwords in shell history.
+
 ## Update delivery policy
 
 Harbor Transfer checks the HTTPS `latest.json` published with the newest GitHub Release. The updater verifies every downloaded archive with the dedicated public key embedded in the application before installation. Keep the notarized DMG attached to every release as an offline recovery and manual-install path. Version `0.2.0` is the first updater-capable build, so users of `0.1.0` must install `0.2.0` manually once; later releases can update in-app.
