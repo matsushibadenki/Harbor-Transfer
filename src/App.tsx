@@ -9,7 +9,7 @@ import { check, type DownloadEvent, type Update } from '@tauri-apps/plugin-updat
 import { emitTo, listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { getCurrentWebviewWindow, WebviewWindow } from '@tauri-apps/api/webviewWindow';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   AppWindow, ArrowLeft, ArrowLeftRight, ArrowRight, ArrowUpToLine, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Cloud, Columns3, Copy, File, FileCog, Folder, FolderPlus, Grid2X2, HardDrive,
   ClipboardPaste, Download, FileArchive, FileAudio, FileCode2, FileDown, FileImage, FileJson, FileSpreadsheet, FileText, FileUp, FileVideo, FolderSync, FolderUp, GripVertical, KeyRound, Link2, List, LoaderCircle, LockKeyhole, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Plus, RefreshCw, Scissors, Search, Settings, Share2, Trash2, Upload,
@@ -59,7 +59,7 @@ type ColumnVisibility = Record<OptionalColumnKey, boolean>;
 type SortDirection = 'ascending' | 'descending';
 type ColumnMenuPosition = { x: number; y: number };
 type ViewMode = 'list' | 'icons' | 'columns';
-type ColumnLevel = { path: string; entries: FileEntry[]; selectedName?: string };
+type ColumnLevel = { path: string; entries: FileEntry[]; selectedName?: string; loading?: boolean };
 type SyncDirection = 'localToRemote' | 'remoteToLocal';
 type SyncComparison = 'sizeOnly' | 'sizeAndModified';
 type SyncAction = 'upload' | 'download' | 'createRemoteDirectory' | 'createLocalDirectory' | 'conflict' | 'destinationOnly';
@@ -115,10 +115,10 @@ const defaultColumnWidths: ColumnWidths = { name: 320, size: 76, modified: 150, 
 const defaultColumnVisibility: ColumnVisibility = { size: true, modified: true, permissions: true, owner: false, group: false, type: false };
 const technicalInputProps = { autoCapitalize: 'none' as const, autoCorrect: 'off' as const, spellCheck: false };
 const fileDensityMetrics = {
-  extraCompact: { list: 30, column: 26, icon: 120 },
-  compact: { list: 36, column: 30, icon: 128 },
-  standard: { list: 44, column: 34, icon: 136 },
-  comfortable: { list: 52, column: 40, icon: 148 },
+  extraCompact: { list: 22, column: 22, icon: 112 },
+  compact: { list: 26, column: 24, icon: 120 },
+  standard: { list: 32, column: 28, icon: 128 },
+  comfortable: { list: 40, column: 36, icon: 144 },
 } as const;
 const defaultSidebarWidth = 244;
 const minimumSidebarWidth = 180;
@@ -314,9 +314,9 @@ const columnCopy = {
 } as const;
 
 const viewCopy = {
-  ja: { list: 'リスト表示', icons: 'アイコン表示', columns: 'カラム表示', empty: '項目がありません', items: '{{count}}項目', selected: '{{count}}項目を選択', preview: 'プレビュー' },
-  en: { list: 'List view', icons: 'Icon view', columns: 'Column view', empty: 'No items', items: '{{count}} items', selected: '{{count}} selected', preview: 'Preview' },
-  'zh-CN': { list: '列表视图', icons: '图标视图', columns: '分栏视图', empty: '没有项目', items: '{{count}}个项目', selected: '已选择{{count}}个项目', preview: '预览' },
+  ja: { list: 'リスト表示', icons: 'アイコン表示', columns: 'カラム表示', empty: '項目がありません', items: '{{count}}項目', selected: '{{count}}項目を選択', preview: 'プレビュー', loading: '読み込み中' },
+  en: { list: 'List view', icons: 'Icon view', columns: 'Column view', empty: 'No items', items: '{{count}} items', selected: '{{count}} selected', preview: 'Preview', loading: 'Loading' },
+  'zh-CN': { list: '列表视图', icons: '图标视图', columns: '分栏视图', empty: '没有项目', items: '{{count}}个项目', selected: '已选择{{count}}个项目', preview: '预览', loading: '正在加载' },
 } as const;
 
 const syncCopy = {
@@ -358,7 +358,19 @@ function protocolLabel(protocol: Protocol) { return protocol === 'cloudFtp' ? 'C
 function defaultPort(protocol: Protocol) { return isSshProtocol(protocol) ? 22 : protocol === 'smb' ? 445 : protocol === 'webdav' || protocol === 's3' || protocol === 'googleDrive' ? 443 : 21; }
 function connectionTargetChanged(left: Connection, right: Connection) { return left.protocol !== right.protocol || left.host !== right.host || left.port !== right.port || left.username !== right.username || left.s3Region !== right.s3Region || left.s3Endpoint !== right.s3Endpoint || Boolean(left.s3ForcePathStyle) !== Boolean(right.s3ForcePathStyle) || Boolean(left.s3PreserveEmptyDirectories) !== Boolean(right.s3PreserveEmptyDirectories) || left.smbShare !== right.smbShare || left.smbDomain !== right.smbDomain || Boolean(left.smbGuest) !== Boolean(right.smbGuest); }
 function parentPath(path: string) { const parts = path.split('/').filter(Boolean); parts.pop(); return `/${parts.join('/')}` || '/'; }
-function formatBytes(bytes: number) { if (!bytes) return '—'; const units = ['B', 'KB', 'MB', 'GB']; const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), 3); return `${(bytes / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`; }
+function formatBytes(bytes: number) { if (!bytes) return '0 B'; const units = ['B', 'KB', 'MB', 'GB']; const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), 3); return `${(bytes / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`; }
+
+const fileDateFormatters = Object.fromEntries(['ja', 'en', 'zh-CN'].map((language) => [language,
+  new Intl.DateTimeFormat(language, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }),
+]));
+
+function formatFileDate(value: string | number | undefined, language: Language) {
+  if (value === undefined || value === '') return '—';
+  // Preserve server-local times without inventing a timezone; ISO offsets are
+  // honored by Date. Unknown protocol formats remain visible verbatim.
+  const date = new Date(typeof value === 'number' ? value * 1000 : value.replace(/^(\d{4}-\d{2}-\d{2}) /, '$1T'));
+  return Number.isNaN(date.getTime()) ? String(value) : fileDateFormatters[language].format(date);
+}
 function formatDuration(seconds?: number) { if (seconds === undefined || !Number.isFinite(seconds)) return '—'; if (seconds < 60) return `${Math.ceil(seconds)}s`; return `${Math.floor(seconds / 60)}m ${Math.ceil(seconds % 60)}s`; }
 type FileIconCategory = 'image' | 'video' | 'audio' | 'archive' | 'code' | 'data' | 'spreadsheet' | 'document' | 'generic';
 function fileIconCategory(name: string): FileIconCategory {
@@ -383,6 +395,49 @@ function RemoteEntryIcon({ entry, size, className = '' }: { entry: FileEntry; si
   const icons = { image: FileImage, video: FileVideo, audio: FileAudio, archive: FileArchive, code: FileCode2, data: FileJson, spreadsheet: FileSpreadsheet, document: FileText, generic: File };
   const Icon = icons[category];
   return <Icon className={`${className} file-type-icon file-type-${category}`} size={size}/>;
+}
+
+// Large artwork stays vector-based; remote files are never downloaded to draw it.
+function FileArtwork({ entry }: { entry: FileEntry }) {
+  const gradient = useId();
+  const category = fileIconCategory(entry.name);
+  const extension = entry.name.includes('.') ? entry.name.split('.').pop()!.slice(0, 4).toUpperCase() : '';
+  return <span className={`entry-art-frame file-type-${category}`} aria-hidden="true">
+    {entry.file_type === 'Directory' ? <svg className="finder-artwork folder-artwork" viewBox="0 0 64 56" focusable="false">
+      <defs><linearGradient id={gradient} x2="0" y2="1"><stop stopColor="#80c9bd"/><stop offset="1" stopColor="#399889"/></linearGradient></defs>
+      <path d="M5 11a4 4 0 0 1 4-4h16l6 6h24a4 4 0 0 1 4 4v29H5Z" fill="#388c80"/>
+      <path d="M9 17h46v27H9Z" fill="#dbf1ec"/>
+      <path d="M5 20a4 4 0 0 1 4-4h46a4 4 0 0 1 4 4v25a4 4 0 0 1-4 4H9a4 4 0 0 1-4-4Z" fill={`url(#${gradient})`} stroke="#328778" strokeWidth=".7"/>
+      <path d="M10 17h44" stroke="#b8e4da" strokeWidth="1"/>
+    </svg> : <svg className="finder-artwork document-artwork" viewBox="0 0 64 64" focusable="false">
+      <path d="M15 4h23l13 13v41a3 3 0 0 1-3 3H15a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3Z" fill="var(--artwork-paper)" stroke="var(--artwork-edge)"/>
+      <path d="M38 4v10a3 3 0 0 0 3 3h10" fill="var(--artwork-fold)" stroke="var(--artwork-edge)"/>
+      <path d="M20 27h23M20 33h18M20 39h23" stroke="var(--artwork-line)" strokeWidth="2" strokeLinecap="round"/>
+      <rect x="7" y="44" width="42" height="14" rx="3" fill="var(--entry-tint, #73818c)"/>
+      <text x="28" y="54" textAnchor="middle" fill="white" fontSize="8" fontWeight="700" fontFamily="-apple-system, sans-serif">{entry.file_type === 'Symlink' ? '↗' : extension || 'FILE'}</text>
+    </svg>}
+  </span>;
+}
+
+function DirectoryColumn({ path: directoryPath, resizeLabel, children, onContextMenu, onKeyDown }: { path: string; resizeLabel: string; children: React.ReactNode; onContextMenu: React.MouseEventHandler<HTMLElement>; onKeyDown: React.KeyboardEventHandler<HTMLElement> }) {
+  const ref = useRef<HTMLElement>(null);
+  const drag = useRef<{ x: number; width: number } | null>(null);
+  const resize = (width: number) => {
+    const bounded = Math.round(Math.max(200, Math.min(520, width)));
+    ref.current?.style.setProperty('--directory-column-width', `${bounded}px`);
+    ref.current?.querySelector('[role="separator"]')?.setAttribute('aria-valuenow', String(bounded));
+  };
+  return <section ref={ref} className="directory-column" aria-label={directoryPath} onContextMenu={onContextMenu} onKeyDown={onKeyDown}>
+    {children}
+    <div className="directory-column-resizer" role="separator" tabIndex={0} aria-label={`${resizeLabel}: ${visibleRemotePath(directoryPath)}`} aria-orientation="vertical" aria-valuemin={200} aria-valuemax={520} aria-valuenow={260}
+      onPointerDown={(event) => { if (event.button !== 0) return; event.preventDefault(); event.stopPropagation(); drag.current = { x: event.clientX, width: ref.current!.getBoundingClientRect().width }; event.currentTarget.setPointerCapture(event.pointerId); }}
+      onPointerMove={(event) => { if (drag.current) resize(drag.current.width + event.clientX - drag.current.x); }}
+      onPointerUp={(event) => { drag.current = null; if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }}
+      onPointerCancel={() => { drag.current = null; }} onLostPointerCapture={() => { drag.current = null; }}
+      onDoubleClick={() => resize(Math.max(200, ...Array.from(ref.current!.querySelectorAll<HTMLElement>('.column-entry-main > span')).map((node) => node.scrollWidth + 80)))}
+      onKeyDown={(event) => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); event.stopPropagation(); resize(ref.current!.getBoundingClientRect().width + (event.key === 'ArrowRight' ? 20 : -20)); } }}
+    ><GripVertical size={12}/></div>
+  </section>;
 }
 function transferFailureStatus(reason: unknown): 'Failed' | 'Cancelled' { return String(reason).toLowerCase().includes('cancel') ? 'Cancelled' : 'Failed'; }
 function invokeErrorMessage(reason: unknown): string {
@@ -578,7 +633,7 @@ function LocalFilePane({ language, initialPath, showHiddenFiles, connections, re
           setSelectedPaths(next);
           onStateChange({ kind: 'local', directoryPath: listing?.path ?? currentPathRef.current, entries: (listing?.entries ?? []).map((item) => item.name), items: (listing?.entries ?? []).filter((item) => next.has(item.path)).map((item) => ({ name: item.name, sourcePath: item.path, isDirectory: item.kind === 'Directory' })) });
         }} onDragStart={(event) => { const paths = selected ? selectedPaths : new Set([entry.path]); const items = (listing?.entries ?? []).filter((item) => paths.has(item.path)).map((item) => ({ name: item.name, sourcePath: item.path, isDirectory: item.kind === 'Directory' })); onWorkspaceDragStart(paneId, { kind: 'local', directoryPath: listing?.path ?? currentPathRef.current, entries: (listing?.entries ?? []).map((item) => item.name), items }, event); }} onDoubleClick={() => { if (entry.kind === 'Directory') void loadLocalDirectory(entry.path); }} onKeyDown={(event) => { if (event.key === 'Enter' && entry.kind === 'Directory') void loadLocalDirectory(entry.path); }}>
-          <span className="local-file-name" role="cell"><RemoteEntryIcon entry={fileEntry} size={17}/><span>{entry.name}</span></span><span role="cell">{entry.kind === 'Directory' ? '—' : formatBytes(entry.size)}</span><time role="cell">{entry.modifiedUnix ? new Date(entry.modifiedUnix * 1000).toLocaleString(language) : '—'}</time>
+          <span className="local-file-name" role="cell"><RemoteEntryIcon entry={fileEntry} size={17}/><span>{entry.name}</span></span><span role="cell">{entry.kind === 'Directory' ? '—' : formatBytes(entry.size)}</span><time role="cell" title={entry.modifiedUnix ? new Date(entry.modifiedUnix * 1000).toLocaleString(language) : undefined}>{formatFileDate(entry.modifiedUnix || undefined, language)}</time>
         </button>;
       })}
     </div>
@@ -676,7 +731,7 @@ function RemoteFilePane({ language, connection, connections, showHiddenFiles, re
           setSelectedPaths(next);
           onStateChange({ kind: 'remote', connectionId, directoryPath: path, entries: entries.map((item) => item.name), items: entries.map((item) => ({ item, itemPath: entryRemotePath(path, item) })).filter(({ itemPath }) => next.has(itemPath)).map(({ item, itemPath }) => ({ name: item.name, sourcePath: itemPath, isDirectory: item.file_type === 'Directory' })) });
         }} onDragStart={(event) => { const paths = selected ? selectedPaths : new Set([remotePath]); const items = entries.map((item) => ({ item, itemPath: entryRemotePath(path, item) })).filter(({ itemPath }) => paths.has(itemPath)).map(({ item, itemPath }) => ({ name: localDownloadName(item), sourcePath: itemPath, isDirectory: item.file_type === 'Directory' })); onWorkspaceDragStart(paneId, { kind: 'remote', connectionId, directoryPath: path, entries: entries.map((item) => item.name), items }, event); }} onDoubleClick={() => { if (entry.file_type === 'Directory') void loadRemoteDirectory(remotePath); }} onKeyDown={(event) => { if (event.key === 'Enter' && entry.file_type === 'Directory') void loadRemoteDirectory(remotePath); }}>
-          <span className="local-file-name" role="cell"><RemoteEntryIcon entry={entry} size={17}/><span>{entry.name}</span></span><span role="cell">{entry.file_type === 'Directory' ? '—' : formatBytes(entry.size)}</span><span role="cell">{entry.modified ?? '—'}</span>
+          <span className="local-file-name" role="cell"><RemoteEntryIcon entry={entry} size={17}/><span>{entry.name}</span></span><span role="cell">{entry.file_type === 'Directory' ? '—' : formatBytes(entry.size)}</span><time role="cell" title={entry.modified}>{formatFileDate(entry.modified, language)}</time>
         </button>;
       })}
     </div>
@@ -953,6 +1008,8 @@ export default function App() {
   const inlineRenameCommitting = useRef(false);
   const inlineRenameTimer = useRef<number | null>(null);
   const selectionAnchor = useRef<{ basePath: string; index: number } | null>(null);
+  const columnBrowserRef = useRef<HTMLDivElement>(null);
+  const columnRequestSequence = useRef(0);
   const transferPanelUserControlled = useRef(false);
   const browserZoneRef = useRef<HTMLElement | null>(null);
   const browserWorkspaceRef = useRef<HTMLDivElement | null>(null);
@@ -993,6 +1050,10 @@ export default function App() {
     }
     return null;
   }, [columnLevels]);
+  useEffect(() => {
+    const browser = columnBrowserRef.current;
+    if (viewMode === 'columns' && browser) browser.scrollTo({ left: browser.scrollWidth, behavior: 'instant' });
+  }, [viewMode, columnLevels.length, columnPreview?.basePath, columnPreview?.entry.name]);
   const selectedCount = selectedRemoteItems.filter((item) => item.connectionId === active?.id).length;
   const hasActiveTransfer = transfers.some((item) => item.status === 'Running') || Boolean(dragPreparingPath) || Boolean(directoryProgress && directoryProgress.status !== 'completed' && directoryProgress.status !== 'cancelled' && directoryProgress.status !== 'failed');
   const breadcrumbs = useMemo(() => {
@@ -1371,6 +1432,7 @@ export default function App() {
 
   async function loadDirectory(connection = active, requestedPath = path): Promise<boolean> {
     if (!connection) return false;
+    columnRequestSequence.current += 1;
     setBusy(true); setError(null);
     try {
       const result = await invoke<FileEntry[]>('remote_list', { request: { connectionId: connection.id, path: requestedPath } });
@@ -1409,6 +1471,8 @@ export default function App() {
   }
 
   function selectViewMode(next: ViewMode) {
+    columnRequestSequence.current += 1;
+    if (viewMode === 'columns') setBusy(false);
     setViewMode(next);
     if (next === 'columns') setColumnLevels([{ path, entries }]);
   }
@@ -1417,23 +1481,71 @@ export default function App() {
     if (!active) return;
     const level = columnLevels[levelIndex];
     if (!level) return;
+    const sequence = ++columnRequestSequence.current;
     const selectedLevels = columnLevels.slice(0, levelIndex + 1).map((item, index) => index === levelIndex ? { ...item, selectedName: entryIdentity(entry) } : item);
     if (entry.file_type !== 'Directory') {
+      setBusy(false);
       setColumnLevels(selectedLevels);
       setPath(level.path);
       setEntries(level.entries);
       return;
     }
     const childPath = entryRemotePath(level.path, entry);
-    setBusy(true); setError(null); setColumnLevels(selectedLevels);
+    setBusy(true); setError(null);
+    setColumnLevels([...selectedLevels, { path: childPath, entries: [], loading: true }]);
     try {
       const childEntries = await invoke<FileEntry[]>('remote_list', { request: { connectionId: active.id, path: childPath } });
+      if (sequence !== columnRequestSequence.current) return;
       setColumnLevels([...selectedLevels, { path: childPath, entries: childEntries }]);
       setPath(childPath);
       setEntries(childEntries);
       recordDirectoryNavigation(childPath);
-    } catch (reason) { setError(String(reason)); }
-    finally { setBusy(false); }
+      return { path: childPath, entries: childEntries };
+    } catch (reason) {
+      if (sequence === columnRequestSequence.current) { setError(String(reason)); setColumnLevels(selectedLevels); }
+    }
+    finally { if (sequence === columnRequestSequence.current) setBusy(false); }
+  }
+
+  function navigateColumnSelection(event: React.KeyboardEvent<HTMLElement>, levelIndex: number, visibleEntries: FileEntry[]) {
+    const target = event.target as HTMLElement;
+    if (target.closest('input, [role="separator"]') || event.metaKey || event.ctrlKey || event.altKey) return;
+    const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button.column-entry-main'));
+    const current = buttons.findIndex((button) => button === target || button.contains(target));
+    if (current < 0) return;
+    const focusColumn = (index: number, level = columnLevels[index]) => {
+      const column = columnBrowserRef.current?.querySelectorAll<HTMLElement>('.directory-column')[index];
+      const button = column?.querySelector<HTMLButtonElement>('.column-entry.selected button.column-entry-main') ?? column?.querySelector<HTMLButtonElement>('button.column-entry-main');
+      if (button && level) {
+        const visible = level.entries.filter((entry) => (preferences.showHiddenFiles || !entry.name.startsWith('.')) && entry.name.toLowerCase().includes(query.toLowerCase()));
+        const position = Array.from(column!.querySelectorAll('button.column-entry-main')).indexOf(button);
+        const entry = visible[position];
+        if (entry) {
+          selectRemoteEntry({ metaKey: false, ctrlKey: false, shiftKey: false }, entry, level.path, visible);
+          setColumnLevels((levels) => levels.map((item, i) => i === index ? { ...item, selectedName: entryIdentity(entry) } : item));
+        }
+      }
+      button?.focus({ preventScroll: true });
+      button?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    };
+    if (event.key === 'ArrowLeft') { event.preventDefault(); cancelScheduledInlineRename(); focusColumn(levelIndex - 1); return; }
+    if (event.key === 'ArrowRight') {
+      event.preventDefault(); cancelScheduledInlineRename();
+      const entry = visibleEntries[current];
+      if (entry.file_type === 'Directory') {
+        const child = columnLevels[levelIndex + 1];
+        if (child?.path === entryRemotePath(columnLevels[levelIndex].path, entry) && !child.loading) focusColumn(levelIndex + 1);
+        else void openColumnEntry(levelIndex, entry).then((level) => requestAnimationFrame(() => { if (level && document.activeElement === buttons[current]) focusColumn(levelIndex + 1, level); }));
+      }
+      return;
+    }
+    const next = event.key === 'ArrowDown' ? Math.min(current + 1, buttons.length - 1) : event.key === 'ArrowUp' ? Math.max(current - 1, 0) : event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : -1;
+    if (next < 0) return;
+    event.preventDefault(); cancelScheduledInlineRename();
+    selectRemoteEntry(event, visibleEntries[next], columnLevels[levelIndex].path, visibleEntries);
+    buttons[next].focus({ preventScroll: true });
+    buttons[next].scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    if (!event.shiftKey) void openColumnEntry(levelIndex, visibleEntries[next]);
   }
 
   function adjustColumnWidth(column: ColumnKey, delta: number) {
@@ -1467,7 +1579,7 @@ export default function App() {
   }
 
   function startDualPaneResize(event: React.PointerEvent<HTMLDivElement>) {
-    if (window.matchMedia('(max-width: 980px)').matches || (event.target as HTMLElement).closest('button')) return;
+    if (window.matchMedia('(max-width: 760px)').matches || (event.target as HTMLElement).closest('button')) return;
     const workspace = browserWorkspaceRef.current;
     if (!workspace) return;
     event.preventDefault();
@@ -1682,7 +1794,7 @@ export default function App() {
   function renderListCell(entry: FileEntry, column: ColumnKey, basePath: string, selected: boolean) {
     if (column === 'name') return <span className="file-name"><span className="file-name-icon"><RemoteEntryIcon entry={entry} size={18}/></span>{isInlineRenaming(entry, basePath) ? inlineRenameInput('list') : <span className="file-name-text" title={selected ? menuText.rename : entry.name} onClick={(event) => { if (selected) scheduleInlineRename(event, entry, basePath); }}>{entry.name}</span>}</span>;
     if (column === 'size') return <span className="size-cell">{entry.file_type === 'Directory' ? '—' : formatBytes(entry.size)}</span>;
-    if (column === 'modified') return <span className="modified-cell">{entry.modified ?? '—'}</span>;
+    if (column === 'modified') return <time className="modified-cell" title={entry.modified}>{formatFileDate(entry.modified, language)}</time>;
     if (column === 'permissions') return <span className="permissions-cell">{entry.permissions ?? '—'}</span>;
     if (column === 'owner') return <span className="owner-cell">{entry.owner ?? '—'}</span>;
     if (column === 'group') return <span className="group-cell">{entry.group ?? '—'}</span>;
@@ -2170,6 +2282,37 @@ export default function App() {
     selectRemoteEntry(event, entry, basePath, orderedEntries);
   }
 
+  function navigateFileSelection(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (viewMode === 'columns' || !active || filteredEntries.length === 0) return;
+    const target = event.target as HTMLElement;
+    if (target.closest('input, textarea, select, .column-heading')) return;
+    const nodes = Array.from(event.currentTarget.querySelectorAll<HTMLElement>(viewMode === 'list' ? '.file-row' : '.icon-entry-main'));
+    const current = nodes.findIndex((node) => node === target || node.contains(target));
+    if (current < 0) return;
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a') {
+      event.preventDefault();
+      setSelectedRemoteItems(filteredEntries.map((entry) => selectedItem(entry, path)).filter((item): item is SelectedRemoteItem => item !== null));
+      return;
+    }
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
+    let next = current;
+    const firstTop = nodes[0].getBoundingClientRect().top;
+    const columns = viewMode === 'icons' ? Math.max(1, nodes.filter((node) => Math.abs(node.getBoundingClientRect().top - firstTop) < 2).length) : 1;
+    if (event.key === 'ArrowDown') next += columns;
+    else if (event.key === 'ArrowUp') next -= columns;
+    else if (viewMode === 'icons' && event.key === 'ArrowRight') next += 1;
+    else if (viewMode === 'icons' && event.key === 'ArrowLeft') next -= 1;
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = nodes.length - 1;
+    else return;
+    event.preventDefault();
+    cancelScheduledInlineRename();
+    next = Math.max(0, Math.min(nodes.length - 1, next));
+    selectRemoteEntry(event, filteredEntries[next], path, filteredEntries);
+    nodes[next].focus({ preventScroll: true });
+    nodes[next].scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+
   function cancelScheduledDragPreparation() {
     cancelScheduledInlineRename();
     // Export preparation now starts only from an actual drag gesture. Invalidate
@@ -2564,7 +2707,13 @@ export default function App() {
           </div>
           {error && <div className="error-banner"><strong>{t.error}:</strong> {error}</div>}
           <div className="connection-strip"><span className="online-dot" />{active.name}<span>·</span><span>{active.username}@{active.host}</span><span className="connected">{t.connected}</span></div>
-          <div className="file-display-region" onContextMenu={(event) => openBrowserContext(event)}>
+          <div className="file-display-region" aria-busy={busy} onKeyDown={navigateFileSelection} onPointerDown={(event) => {
+            if (event.button === 0 && !(event.target as HTMLElement).closest('.file-row, .icon-entry, .column-entry, .file-header, .directory-column-title, .column-preview, input, button')) {
+              cancelScheduledInlineRename();
+              setSelectedRemoteItems([]);
+              selectionAnchor.current = null;
+            }
+          }} onContextMenu={(event) => openBrowserContext(event)}>
           {isDragOver && <div className="drop-overlay"><Upload size={32}/><strong>{p2.drop}</strong></div>}
           {viewMode === 'list' && <div className="file-table" role="table" style={{ '--file-columns': `${visibleColumns.map((column) => `${columnWidths[column]}px`).join(' ')} minmax(0, 1fr) 30px`, '--file-min-width': `${visibleColumns.reduce((total, column) => total + columnWidths[column], 0) + 48 + visibleColumns.length * 8}px` } as React.CSSProperties}>
             <div className="file-header" role="row" onContextMenu={openColumnVisibilityMenu}>
@@ -2574,40 +2723,43 @@ export default function App() {
               {visibleColumns.map((column) => <span className={`list-cell ${column}-column`} role="cell" key={column}>{renderListCell(entry, column, path, selected)}</span>)}<span className="file-grid-spacer" aria-hidden="true"/><button aria-label={menuText.information} title={menuText.information} onClick={(event) => openFileInformation(event, entry)}><MoreHorizontal size={18}/></button>
             </div>; })}
           </div>}
-          {viewMode === 'icons' && <div className="icon-grid" role="grid" aria-label={viewsText.icons}>
+          {viewMode === 'list' && !busy && filteredEntries.length === 0 && <p className="file-list-empty" role="status">{viewsText.empty}</p>}
+          {viewMode === 'icons' && <div className="icon-grid" role="grid" aria-label={viewsText.icons} aria-multiselectable="true">
             {filteredEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
             {filteredEntries.map((entry) => { const remotePath = entryRemotePath(path, entry); const selected = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const renaming = isInlineRenaming(entry, path); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`icon-entry ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} role="gridcell" aria-selected={selected} key={entryIdentity(entry)} draggable={entry.file_type !== 'Symlink' && !renaming} onContextMenu={(event) => openEntryContext(event, entry)} onDragStart={(event) => { if (dualPane) beginPrimaryWorkspaceDrag(event, entry, path); else startRemoteDrag(event, entry); }}>
               {renaming ? <div className="icon-entry-main inline-renaming">
-                <RemoteEntryIcon entry={entry} className="entry-art" size={entry.file_type === 'Directory' ? 46 : 44}/>
+                <FileArtwork entry={entry}/>
                 {inlineRenameInput('icons')}<small>{entry.file_type === 'Directory' ? entry.permissions ?? '—' : formatBytes(entry.size)}</small>
               </div> : <button className="icon-entry-main" title={entry.name} onClick={(event) => scheduleRemoteDragPreparation(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); }} onKeyDown={(event) => { if (event.key === 'F2') { beginInlineRename(event, entry, path); return; } if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(event, entry); } if (event.key !== 'Enter') return; event.preventDefault(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); }}>
-                <RemoteEntryIcon entry={entry} className="entry-art" size={entry.file_type === 'Directory' ? 46 : 44}/>
+                <FileArtwork entry={entry}/>
                 <strong><span title={selected ? menuText.rename : entry.name} onClick={(event) => { if (selected) scheduleInlineRename(event, entry, path); }}>{entry.name}</span></strong><small>{entry.file_type === 'Directory' ? entry.permissions ?? '—' : formatBytes(entry.size)}</small>
               </button>}
               <button className="icon-entry-more" aria-label={menuText.information} title={menuText.information} onClick={(event) => openFileInformation(event, entry)}><MoreHorizontal size={16}/></button>
             </div>; })}
           </div>}
-          {viewMode === 'columns' && <div className="column-browser" role="listbox" aria-label={viewsText.columns}>
+          {viewMode === 'columns' && <div ref={columnBrowserRef} className="column-browser" role="group" aria-label={viewsText.columns}>
             {columnLevels.map((level, levelIndex) => {
               const visibleLevelEntries = level.entries.filter((entry) => (preferences.showHiddenFiles || !entry.name.startsWith('.')) && entry.name.toLowerCase().includes(query.toLowerCase()));
-              return <section className="directory-column" key={`${level.path}-${levelIndex}`} aria-label={level.path} onContextMenu={(event) => openBrowserContext(event, level.path)}>
-                <div className="directory-column-title" title={visibleRemotePath(level.path)}>{visibleRemotePath(level.path)}</div>
-                {visibleLevelEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
+              return <DirectoryColumn key={`${level.path}-${levelIndex}`} path={level.path} resizeLabel={columnsText.resize} onKeyDown={(event) => navigateColumnSelection(event, levelIndex, visibleLevelEntries)} onContextMenu={(event) => openBrowserContext(event, level.path)}>
+                <div className="directory-column-title" title={visibleRemotePath(level.path)}><span>{visibleRemotePath(level.path).split('/').filter(Boolean).pop() || '/'}</span>{level.loading ? <LoaderCircle size={13} className="spinning" aria-label={viewsText.loading}/> : <small>{visibleLevelEntries.length}</small>}</div>
+                <div className="directory-column-items" role="listbox" aria-label={visibleRemotePath(level.path)} aria-multiselectable="true" aria-busy={Boolean(level.loading)}>
+                {!level.loading && visibleLevelEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
                 {visibleLevelEntries.map((entry) => { const remotePath = entryRemotePath(level.path, entry); const selectedForAction = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const selected = level.selectedName === entryIdentity(entry) || selectedForAction; const renaming = isInlineRenaming(entry, level.path); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`column-entry ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entryIdentity(entry)} role="option" aria-selected={selected} draggable={entry.file_type !== 'Symlink' && !renaming} onContextMenu={(event) => openEntryContext(event, entry, level.path)} onDragStart={(event) => { if (dualPane) beginPrimaryWorkspaceDrag(event, entry, level.path); else startRemoteDrag(event, entry, level.path); }}>
                   {renaming ? <div className="column-entry-main inline-renaming"><RemoteEntryIcon entry={entry} size={entry.file_type === 'Directory' ? 17 : 16}/>{inlineRenameInput('columns')}</div> : <button className="column-entry-main" title={entry.name} onClick={(event) => { if (event.detail <= 1) { cancelScheduledDragPreparation(); selectRemoteEntry(event, entry, level.path, visibleLevelEntries); if (!event.metaKey && !event.ctrlKey && !event.shiftKey) void openColumnEntry(levelIndex, entry); } }} onDoubleClick={() => { cancelScheduledDragPreparation(); if (entry.file_type !== 'Directory') void editRemoteFile(entry, level.path); }} onKeyDown={(event) => { if (event.key === 'F2') { beginInlineRename(event, entry, level.path); return; } if (event.key !== 'Enter') return; event.preventDefault(); entry.file_type === 'Directory' ? void openColumnEntry(levelIndex, entry) : void editRemoteFile(entry, level.path); }}>
-                    <RemoteEntryIcon entry={entry} size={entry.file_type === 'Directory' ? 17 : 16}/><span title={selectedForAction ? menuText.rename : entry.name} onClick={(event) => { if (selectedForAction) scheduleInlineRename(event, entry, level.path); }}>{entry.name}</span>{entry.file_type === 'Directory' ? <ChevronRight size={14}/> : <small>{formatBytes(entry.size)}</small>}
+                    <RemoteEntryIcon entry={entry} size={entry.file_type === 'Directory' ? 17 : 16}/><span title={selectedForAction ? menuText.rename : entry.name} onClick={(event) => { if (selectedForAction) scheduleInlineRename(event, entry, level.path); }}>{entry.name}</span>{entry.file_type === 'Directory' && <ChevronRight size={14}/>}
                   </button>}
                   <button className="column-entry-more" aria-label={menuText.information} title={menuText.information} onClick={(event) => openFileInformation(event, entry, level.path)}><MoreHorizontal size={15}/></button>
                 </div>; })}
-              </section>;
+                </div>
+              </DirectoryColumn>;
             })}
             {columnPreview && <aside className="column-preview" aria-label={viewsText.preview}>
-              <div className="column-preview-art"><RemoteEntryIcon entry={columnPreview.entry} size={58}/></div>
+              <div className="column-preview-art"><FileArtwork entry={columnPreview.entry}/></div>
               <strong title={columnPreview.entry.name}>{columnPreview.entry.name}</strong>
               <dl>
                 <div><dt>{columnCopy[language].type}</dt><dd>{entryKind(columnPreview.entry)}</dd></div>
                 <div><dt>{t.size}</dt><dd>{formatBytes(columnPreview.entry.size)}</dd></div>
-                <div><dt>{t.modified}</dt><dd>{columnPreview.entry.modified ?? '—'}</dd></div>
+                <div><dt>{t.modified}</dt><dd title={columnPreview.entry.modified}>{formatFileDate(columnPreview.entry.modified, language)}</dd></div>
                 {columnPreview.entry.permissions && <div><dt>{columnCopy[language].permissions}</dt><dd className="permissions-cell">{columnPreview.entry.permissions}</dd></div>}
               </dl>
               <small title={entryRemotePath(columnPreview.basePath, columnPreview.entry)}>{visibleRemotePath(entryRemotePath(columnPreview.basePath, columnPreview.entry))}</small>

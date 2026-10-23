@@ -369,7 +369,7 @@
   background: var(--ht-selected, #d8ebe6);
 }
 
-@media (max-width: 980px) {
+@media (max-width: 760px) {
   .browser-workspace.dual-pane {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(220px, 1fr) 42px minmax(220px, 1fr);

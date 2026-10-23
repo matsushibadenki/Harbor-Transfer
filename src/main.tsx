@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import App, { SshKeyManagerWindow } from './App';
 import './styles.css';
 import './phase2.css';
+import './file-browser.css';
 
 const systemDarkMode = window.matchMedia('(prefers-color-scheme: dark)');
 
