@@ -6,12 +6,13 @@
 
 ## 進捗
 
-### 2026-10-23 0.2.6リリース準備
+### 2026-10-23 0.2.6リリース
 
 - 🟢 [Done] package／Tauri／Cargoのバージョンを0.2.6へ統一し、日本語・英語・简体中文のリリースノートを追加。
 - 🟢 [Done] GitHub CIでRustテスト115件、通信統合テスト、フロントエンド品質チェック、macOSデバッグバンドルが成功。公開用UniversalアプリのビルドとDeveloper ID署名も成功。
 - 🟢 [Done] 公証用Apple認証をビルド前に検査する処理を追加し、無効な認証情報を早期検出。
-- ⭕️ [Pending] Apple公証がHTTP 401で失敗。GitHubのAPPLE_ID／APPLE_PASSWORDとローカルのHarbor-Transfer公証プロファイルを有効な認証情報へ更新後、0.2.6の公証・配布を再開する。
+- 🟢 [Done] Apple認証情報を認証済みアカウントに統一してHTTP 401を解消。UniversalアプリとDMGのApple公証がAcceptedとなり、[0.2.6を正式公開](https://github.com/matsushibadenki/Harbor-Transfer/releases/tag/v0.2.6)。[リリースワークフロー](https://github.com/matsushibadenki/Harbor-Transfer/actions/runs/39926713789)が成功。
+- 🟢 [Done] 公開DMGの公証チケット・SHA-256、更新アーカイブの署名とアプリ内公開鍵の一致、両CPU構成、バージョン・bundle identifier、AppleDouble／拡張属性の非混入を検証。公開アップデートURLから0.2.6の配信を確認。
 
 ### 2026-10-23 ファイルブラウザーの表示品質改善
 
