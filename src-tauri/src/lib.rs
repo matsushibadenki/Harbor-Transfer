@@ -11,6 +11,8 @@ mod sftp_client;
 mod ssh;
 mod sync;
 mod webdav_client;
+mod workspace;
+mod workspace_tabs;
 
 use commands::AppState;
 use std::sync::Arc;
@@ -24,6 +26,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_drag::init())
         .plugin(tauri_plugin_fs::init())
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                if let Some(state) = window.try_state::<Arc<AppState>>() {
+                    state.remove_workspace_link(window.label());
+                }
+            }
+        })
         .setup(|app| {
             let data_directory = app.path().app_data_dir().map_err(|error| error.to_string())?;
             let cache_directory = app.path().app_cache_dir().map_err(|error| error.to_string())?;
@@ -76,6 +85,13 @@ pub fn run() {
             commands::workspace_compare_checksum,
             commands::workspace_compare_snapshot,
             commands::workspace_prepare_destination,
+            commands::workspace_places_list,
+            commands::workspace_document_load,
+            commands::workspace_document_save,
+            commands::workspace_place_save,
+            commands::workspace_place_delete,
+            commands::workspace_link_set,
+            commands::workspace_link_resolve,
             commands::remote_set_metadata,
             commands::remote_delete,
             commands::remote_delete_tree,

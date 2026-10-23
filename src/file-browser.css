@@ -347,3 +347,67 @@ html[data-resolved-theme] .column-preview > strong { font-size: 13px; line-heigh
 html[data-resolved-theme] .column-preview dl > div { border: 0; padding-block: 5px; }
 html[data-resolved-theme] .column-preview dt,
 html[data-resolved-theme] .column-preview dd { font-size: 11px; line-height: 1.45; }
+
+.places-bar {
+  display: flex;
+  align-items: center;
+  flex: none;
+  height: 30px;
+  min-width: 0;
+  gap: 5px;
+  padding: 2px 8px;
+  border-bottom: 1px solid var(--finder-rule);
+  background: var(--finder-canvas);
+  color: var(--finder-secondary);
+}
+.places-bar .place-add {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  min-width: 24px;
+  min-height: 24px !important;
+  padding: 0;
+}
+.places-items { display: flex; align-items: center; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: thin; }
+.places-items .place-chip { flex: none; gap: 4px; min-height: 22px !important; padding: 2px 6px; font-size: 11px; font-weight: 400; white-space: nowrap; }
+.place-chip > span { max-width: 128px; overflow: hidden; text-overflow: ellipsis; }
+.places-bar .place-chip[aria-current='location'] { background: var(--finder-selected); color: var(--finder-ink); }
+.place-editor {
+  position: fixed;
+  z-index: 1000;
+  width: 264px;
+  padding: 12px;
+  color: var(--finder-ink);
+  background: var(--finder-canvas);
+  border: 1px solid var(--finder-rule);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px #0003;
+}
+.place-editor label { display: grid; gap: 6px; font-size: 11px; }
+.place-editor input { width: 100%; min-width: 0; font-size: 13px; }
+.place-editor small { display: block; margin-top: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--finder-muted); font-size: 10px; }
+.place-editor p { color: var(--ht-danger, #b54931); font-size: 11px; overflow-wrap: anywhere; max-height: 60px; overflow: auto; }
+.place-editor-actions { display: flex; align-items: center; gap: 4px; margin-top: 10px; }
+.place-editor-actions > span { flex: 1; }
+.place-editor-actions > button { display: grid; place-items: center; width: 28px; min-height: 26px !important; padding: 4px; }
+.workspace-link-toggle.on { color: var(--finder-focus); background: var(--finder-selected); }
+.workspace-link-toggle.paused { color: var(--ht-warning, #a96c15); }
+.workspace-live-status { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.app-shell { grid-template-rows: 58px 36px minmax(0, 1fr) 170px; }
+.app-shell.queue-collapsed { grid-template-rows: 58px 36px minmax(0, 1fr) 44px; }
+.workspace-tabs-area { min-width: 0; border-bottom: 1px solid var(--ht-rule); background: var(--ht-pane-chrome); }
+.workspace-tab-strip { height: 35px; display: flex; align-items: center; padding: 0 8px; gap: 4px; }
+.workspace-tab-strip [role="tablist"] { display: flex; min-width: 0; overflow-x: auto; scrollbar-width: thin; }
+.workspace-tab { display: flex; align-items: center; position: relative; min-width: 100px; max-width: 240px; border-radius: 6px 6px 0 0; }
+.workspace-tab.selected { background: var(--ht-selected); }
+.workspace-tab [role="tab"] { display: flex; align-items: center; gap: 6px; min-width: 0; border: 0; box-shadow: none; background: transparent; color: var(--finder-ink); padding: 7px 8px; }
+.workspace-tab [role="tab"] span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-tab [role="tab"] svg { flex-shrink: 0; }
+.workspace-tab i { width: 5px; height: 5px; flex-shrink: 0; border-radius: 50%; background: var(--ht-text-muted); }
+.workspace-tab i.connected { background: #36a573; }
+.workspace-tab .tab-close { border: 0; background: transparent; box-shadow: none; padding: 4px; margin-right: 3px; }
+.tab-rename { position: absolute; inset: 2px 22px 2px 2px; width: calc(100% - 24px); min-width: 0; z-index: 1; }
+.tab-disconnected { display: flex; align-items: center; justify-content: center; gap: 12px; flex-direction: column; }
+.tab-disconnected code { max-width: 90%; overflow-wrap: anywhere; }
+.workspace-restore-error { display: flex; align-items: center; gap: 12px; padding: 2px 12px; font-size: 12px; }

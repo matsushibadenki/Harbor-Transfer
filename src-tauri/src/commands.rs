@@ -16,6 +16,7 @@ use crate::sync::{
     SyncPreview,
 };
 use crate::webdav_client::{WebDavClient, WebDavConfig};
+use crate::workspace::{self, LinkFailure, PlaceStore, SavePlaceRequest, SavedPlace};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -233,6 +234,8 @@ pub struct AppState {
     connections: Mutex<HashMap<String, Arc<Mutex<RemoteConnection>>>>,
     credential_cache: Mutex<HashMap<String, Option<String>>>,
     bookmarks: BookmarkStore,
+    places: PlaceStore,
+    workspace_links: StdMutex<HashMap<String, WorkspaceLinkRoots>>,
     transfer_controls: Mutex<HashMap<String, Arc<TransferControl>>>,
     transfer_scheduler: Arc<TransferScheduler>,
     bandwidth_limiter: Arc<BandwidthLimiter>,
@@ -256,6 +259,8 @@ impl AppState {
             connections: Mutex::new(HashMap::new()),
             credential_cache: Mutex::new(HashMap::new()),
             bookmarks: BookmarkStore::new(&data_directory)?,
+            places: PlaceStore::new(&data_directory)?,
+            workspace_links: StdMutex::new(HashMap::new()),
             transfer_controls: Mutex::new(HashMap::new()),
             transfer_scheduler: TransferScheduler::new(),
             bandwidth_limiter: BandwidthLimiter::new(),
@@ -269,6 +274,26 @@ impl AppState {
 
     async fn connection(&self, connection_id: &str) -> Option<Arc<Mutex<RemoteConnection>>> {
         self.connections.lock().await.get(connection_id).cloned()
+    }
+
+    pub fn remove_workspace_link(&self, window_label: &str) {
+        self.workspace_links.lock().unwrap_or_else(|error| error.into_inner()).remove(window_label);
+    }
+
+    fn invalidate_workspace_connection(&self, connection_id: &str) -> Vec<String> {
+        let mut links = self.workspace_links.lock().unwrap_or_else(|error| error.into_inner());
+        let affected: Vec<String> = links
+            .iter()
+            .filter_map(|(label, roots)| {
+                [&roots.primary, &roots.auxiliary].iter().any(|endpoint| {
+                matches!(endpoint, WorkspaceEndpoint::Remote { connection_id: id, .. } if id == connection_id)
+            }).then(|| label.clone())
+            })
+            .collect();
+        for label in &affected {
+            links.remove(label);
+        }
+        affected
     }
 }
 
@@ -470,11 +495,47 @@ pub struct RemotePasteRequest {
     pub cut: bool,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum WorkspaceEndpoint {
-    Local { path: String },
-    Remote { connection_id: String, path: String },
+    Local {
+        path: String,
+    },
+    Remote {
+        #[serde(alias = "connection_id")]
+        connection_id: String,
+        path: String,
+    },
+}
+
+impl WorkspaceEndpoint {
+    fn path(&self) -> &str {
+        match self {
+            Self::Local { path } | Self::Remote { path, .. } => path,
+        }
+    }
+
+    fn same_source(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Local { .. }, Self::Local { .. }) => true,
+            (Self::Remote { connection_id: left, .. }, Self::Remote { connection_id: right, .. }) => {
+                left == right
+            }
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkspaceLinkRoots {
+    primary: WorkspaceEndpoint,
+    auxiliary: WorkspaceEndpoint,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkspaceLinkResolution {
+    endpoint: Option<WorkspaceEndpoint>,
+    reason: Option<LinkFailure>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1755,6 +1816,7 @@ pub struct SshKeySummary {
 pub async fn connection_connect(
     request: ConnectRequest,
     state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
 ) -> Result<ConnectionSummary, String> {
     let protocol = request.protocol;
     let connection = match protocol {
@@ -1853,6 +1915,9 @@ pub async fn connection_connect(
     };
 
     state.connections.lock().await.insert(request.connection_id.clone(), Arc::new(Mutex::new(connection)));
+    for label in state.invalidate_workspace_connection(&request.connection_id) {
+        let _ = app.emit_to(label, "workspace://link-invalidated", ());
+    }
     Ok(ConnectionSummary { connection_id: request.connection_id, protocol })
 }
 
@@ -1899,8 +1964,12 @@ pub async fn google_drive_open_setup_page(page: String) -> Result<(), String> {
 pub async fn connection_disconnect(
     connection_id: String,
     state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
     let connection = state.connections.lock().await.remove(&connection_id);
+    for label in state.invalidate_workspace_connection(&connection_id) {
+        let _ = app.emit_to(label, "workspace://link-invalidated", ());
+    }
     let connection = connection.ok_or("Connection not found.".to_string())?;
     let mut connection = connection.lock().await;
     connection.file_system().disconnect().await.map_err(|error| error.to_string())
@@ -1986,6 +2055,146 @@ pub async fn remote_list(
     let connection = state.connection(&request.connection_id).await.ok_or("Connection not found.")?;
     let mut connection = connection.lock().await;
     connection.file_system().list_dir(&request.path).await.map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn workspace_places_list(state: State<'_, Arc<AppState>>) -> Result<Vec<SavedPlace>, String> {
+    state.places.list()
+}
+
+#[tauri::command]
+pub fn workspace_document_load(
+    window: tauri::WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<crate::workspace_tabs::WorkspaceDocument>, String> {
+    state.places.load_workspace(window.label())
+}
+
+#[tauri::command]
+pub fn workspace_document_save(
+    window: tauri::WebviewWindow,
+    document: crate::workspace_tabs::WorkspaceDocument,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    state.places.save_workspace(window.label(), document)
+}
+
+#[tauri::command]
+pub fn workspace_place_save(
+    request: SavePlaceRequest,
+    state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    if request.kind == "remote"
+        && !state.bookmarks.list()?.iter().any(|bookmark| bookmark.id == request.bookmark_id)
+    {
+        return Err("Save the connection bookmark before adding a remote place.".into());
+    }
+    state.places.save(request)?;
+    let _ = app.emit("workspace://places-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub fn workspace_place_delete(
+    id: String,
+    state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    state.places.delete(&id)?;
+    let _ = app.emit("workspace://places-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn workspace_link_set(
+    window: tauri::WebviewWindow,
+    roots: Option<WorkspaceLinkRoots>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    if let Some(roots) = roots {
+        for endpoint in [&roots.primary, &roots.auxiliary] {
+            workspace::relative_names(endpoint.path(), endpoint.path())
+                .map_err(|_| "Invalid linked navigation root.")?;
+            if let WorkspaceEndpoint::Remote { connection_id, .. } = endpoint {
+                state.connection(connection_id).await.ok_or("Connection not found.")?;
+            }
+        }
+        state
+            .workspace_links
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(window.label().into(), roots);
+    } else {
+        state.remove_workspace_link(window.label());
+    }
+    Ok(())
+}
+
+fn linked_remote_child(entries: Vec<FileEntry>, name: &str) -> Result<String, LinkFailure> {
+    let mut matching = entries.into_iter().filter(|entry| entry.name == name);
+    match (matching.next(), matching.next()) {
+        (Some(entry), None) if matches!(entry.file_type, crate::sftp_client::FileEntryType::Directory) => {
+            Ok(entry.path_component.unwrap_or(entry.name))
+        }
+        (Some(_), None) => Err(LinkFailure::NotDirectory),
+        (None, None) => Err(LinkFailure::Missing),
+        _ => Err(LinkFailure::Ambiguous),
+    }
+}
+
+#[tauri::command]
+pub async fn workspace_link_resolve(
+    window: tauri::WebviewWindow,
+    pane: String,
+    endpoint: WorkspaceEndpoint,
+    state: State<'_, Arc<AppState>>,
+) -> Result<WorkspaceLinkResolution, String> {
+    let roots = state
+        .workspace_links
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(window.label())
+        .cloned()
+        .ok_or("Linked navigation is disabled.")?;
+    let (source, target) = match pane.as_str() {
+        "primary" => (roots.primary, roots.auxiliary),
+        "auxiliary" => (roots.auxiliary, roots.primary),
+        _ => return Err("Invalid workspace pane.".into()),
+    };
+    let failure = |reason| Ok(WorkspaceLinkResolution { endpoint: None, reason: Some(reason) });
+    if !source.same_source(&endpoint) {
+        return failure(LinkFailure::OutsideRoot);
+    }
+    let names = match workspace::relative_names(source.path(), endpoint.path()) {
+        Ok(names) => names,
+        Err(reason) => return failure(reason),
+    };
+    let mapped = match target {
+        WorkspaceEndpoint::Local { path } => match workspace::resolve_local(&path, &names) {
+            Ok(path) => WorkspaceEndpoint::Local { path },
+            Err(reason) => return failure(reason),
+        },
+        WorkspaceEndpoint::Remote { connection_id, path } => {
+            let connection = state.connection(&connection_id).await.ok_or("Connection not found.")?;
+            let mut connection = connection.lock().await;
+            let mut current = path;
+            for name in &names {
+                let entries =
+                    connection.file_system().list_dir(&current).await.map_err(|error| error.to_string())?;
+                let component = match linked_remote_child(entries, name) {
+                    Ok(component) => component,
+                    Err(reason) => return failure(reason),
+                };
+                current = match remote_child_path(&current, &component) {
+                    Ok(path) => path,
+                    Err(_) => return failure(LinkFailure::InvalidPath),
+                };
+            }
+            WorkspaceEndpoint::Remote { connection_id, path: current }
+        }
+    };
+    Ok(WorkspaceLinkResolution { endpoint: Some(mapped), reason: None })
 }
 
 fn collect_local_workspace_snapshot(path: &str) -> Result<Vec<WorkspaceSnapshotEntry>, String> {
@@ -4371,6 +4580,94 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
+
+    #[test]
+    fn workspace_endpoints_accept_browser_connection_ids() {
+        let json = serde_json::json!({"kind":"remote", "connectionId":"server-a", "path":"/site"});
+        let endpoint: super::WorkspaceEndpoint = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(endpoint).unwrap(), json);
+        let legacy: super::WorkspaceEndpoint = serde_json::from_value(
+            serde_json::json!({"kind":"remote", "connection_id":"server-a", "path":"/site"}),
+        )
+        .unwrap();
+        assert_eq!(legacy.path(), "/site");
+    }
+
+    #[test]
+    fn linked_navigation_roots_are_owned_by_each_rust_window_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let state =
+            super::AppState::new(directory.path().join("data"), directory.path().join("cache")).unwrap();
+        let roots = |path: &str| super::WorkspaceLinkRoots {
+            primary: super::WorkspaceEndpoint::Local { path: path.into() },
+            auxiliary: super::WorkspaceEndpoint::Local { path: "/target".into() },
+        };
+        {
+            let mut sessions = state.workspace_links.lock().unwrap();
+            sessions.insert("main".into(), roots("/one"));
+            sessions.insert("second".into(), roots("/two"));
+        }
+        state.remove_workspace_link("main");
+        let sessions = state.workspace_links.lock().unwrap();
+        assert!(!sessions.contains_key("main"));
+        assert_eq!(sessions.get("second").unwrap().primary.path(), "/two");
+    }
+
+    #[test]
+    fn linked_remote_navigation_uses_stable_ids_and_rejects_ambiguity() {
+        let folder = FileEntry {
+            name: "Assets".into(),
+            path_component: Some("opaque-folder-id".into()),
+            download_name: None,
+            size: 0,
+            modified: None,
+            permissions: None,
+            file_type: FileEntryType::Directory,
+            owner: None,
+            group: None,
+        };
+        assert_eq!(super::linked_remote_child(vec![folder.clone()], "Assets").unwrap(), "opaque-folder-id");
+        assert_eq!(
+            super::linked_remote_child(vec![folder.clone(), folder.clone()], "Assets").unwrap_err(),
+            crate::workspace::LinkFailure::Ambiguous
+        );
+        assert_eq!(
+            super::linked_remote_child(vec![], "Assets").unwrap_err(),
+            crate::workspace::LinkFailure::Missing
+        );
+        let mut link = folder;
+        link.file_type = FileEntryType::Symlink;
+        assert_eq!(
+            super::linked_remote_child(vec![link], "Assets").unwrap_err(),
+            crate::workspace::LinkFailure::NotDirectory
+        );
+    }
+
+    #[test]
+    fn reconnecting_only_invalidates_windows_using_that_connection() {
+        let directory = tempfile::tempdir().unwrap();
+        let state =
+            super::AppState::new(directory.path().join("data"), directory.path().join("cache")).unwrap();
+        {
+            let mut sessions = state.workspace_links.lock().unwrap();
+            for (label, connection) in [("first", "a"), ("second", "b")] {
+                sessions.insert(
+                    label.into(),
+                    super::WorkspaceLinkRoots {
+                        primary: super::WorkspaceEndpoint::Remote {
+                            connection_id: connection.into(),
+                            path: "/site".into(),
+                        },
+                        auxiliary: super::WorkspaceEndpoint::Local { path: "/local".into() },
+                    },
+                );
+            }
+        }
+        assert_eq!(state.invalidate_workspace_connection("a"), vec!["first"]);
+        let sessions = state.workspace_links.lock().unwrap();
+        assert!(!sessions.contains_key("first"));
+        assert!(sessions.contains_key("second"));
+    }
 
     #[derive(Default)]
     struct WorkspaceTestRemote {

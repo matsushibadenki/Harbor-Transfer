@@ -10,9 +10,11 @@ import { emitTo, listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { getCurrentWebviewWindow, WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { PlacesBar, WorkspacePlacesProvider, locationKey, sameLocationSource, workspaceToolsCopy, type NavigationRequest, type WorkspaceLocation } from './workspace-tools';
+import { WorkspaceTabs, tabsCopy, type WorkspaceDocument, type WorkspaceTab, type TabPane } from './workspace-tabs';
 import {
   AppWindow, ArrowLeft, ArrowLeftRight, ArrowRight, ArrowUpToLine, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Cloud, Columns3, Copy, File, FileCog, Folder, FolderPlus, Grid2X2, HardDrive,
-  ClipboardPaste, Download, FileArchive, FileAudio, FileCode2, FileDown, FileImage, FileJson, FileSpreadsheet, FileText, FileUp, FileVideo, FolderSync, FolderUp, GripVertical, KeyRound, Link2, List, LoaderCircle, LockKeyhole, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Plus, RefreshCw, Scissors, Search, Settings, Share2, Trash2, Upload,
+  ClipboardPaste, Download, FileArchive, FileAudio, FileCode2, FileDown, FileImage, FileJson, FileSpreadsheet, FileText, FileUp, FileVideo, FolderSync, FolderUp, GripVertical, KeyRound, Link2, Unlink2, List, LoaderCircle, LockKeyhole, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Plus, RefreshCw, Scissors, Search, Settings, Share2, Trash2, Upload,
 } from 'lucide-react';
 
 type Protocol = 'sftp' | 'cloudFtp' | 'ftp' | 'ftps' | 'webdav' | 's3' | 'smb' | 'googleDrive';
@@ -296,9 +298,9 @@ const dualPaneCopy = {
 } as const;
 
 const compareCopy = {
-  ja: { title: 'フォルダを比較', description: '現在開いている左右のフォルダを比較します。同名項目をコピーする場合は、元の項目を保護するため別名で保存します。', compare: '比較', refresh: '再比較', close: '閉じる', name: '名前', left: '左', right: '右', status: '比較結果', same: '暫定一致', different: '差分', leftOnly: '左のみ', rightOnly: '右のみ', unknown: '日時不明', checksum: 'SHA-256で照合', hashEqual: 'SHA-256一致', hashDifferent: 'SHA-256不一致', copyRight: '選択項目を右へコピー', copyLeft: '選択項目を左へコピー', empty: '比較する項目がありません', noDifferences: '表示する差分はありません', differencesOnly: '差分のみ', search: '相対パスを検索', showing: '{{shown}} / {{total}} 項目を表示', select: '転送する項目を選択してください', unsupported: '同じ場所は比較できません', duplicate: '同じ名前の項目が複数あるため、このフォルダは比較できません。', loading: '比較しています…', details: '配下を再帰的に比較します。同名ファイルは必要に応じてSHA-256照合できます。両側にあるフォルダは配下の差分項目を選択してください。' },
-  en: { title: 'Compare Folders', description: 'Compare the folders open in both panes. Existing names are preserved by copying under a new name.', compare: 'Compare', refresh: 'Compare again', close: 'Close', name: 'Name', left: 'Left', right: 'Right', status: 'Result', same: 'Likely same', different: 'Different', leftOnly: 'Left only', rightOnly: 'Right only', unknown: 'Date unavailable', checksum: 'Verify SHA-256', hashEqual: 'SHA-256 match', hashDifferent: 'SHA-256 differs', copyRight: 'Copy selected right', copyLeft: 'Copy selected left', empty: 'No items to compare', noDifferences: 'No differences to show', differencesOnly: 'Differences only', search: 'Search relative paths', showing: 'Showing {{shown}} of {{total}} items', select: 'Select items to transfer', unsupported: 'Cannot compare the same location', duplicate: 'This folder contains multiple items with the same name and cannot be compared safely.', loading: 'Comparing…', details: 'Compares subfolders recursively. Verify same-named files with SHA-256 on demand. For folders present on both sides, select the differing children.' },
-  'zh-CN': { title: '比较文件夹', description: '比较左右窗格中打开的文件夹。同名项目会另存为新名称，以保护原有项目。', compare: '比较', refresh: '重新比较', close: '关闭', name: '名称', left: '左侧', right: '右侧', status: '结果', same: '暂时相同', different: '不同', leftOnly: '仅左侧', rightOnly: '仅右侧', unknown: '日期未知', checksum: '验证 SHA-256', hashEqual: 'SHA-256 相同', hashDifferent: 'SHA-256 不同', copyRight: '将所选项目复制到右侧', copyLeft: '将所选项目复制到左侧', empty: '没有可比较的项目', noDifferences: '没有可显示的差异', differencesOnly: '仅显示差异', search: '搜索相对路径', showing: '显示 {{shown}} / {{total}} 项', select: '请选择要传输的项目', unsupported: '无法比较相同位置', duplicate: '此文件夹存在多个同名项目，无法安全比较。', loading: '正在比较…', details: '递归比较子文件夹。同名文件可按需进行 SHA-256 验证。对于两侧都有的文件夹，请选择其中的差异项目。' },
+  ja: { title: 'フォルダを比較', description: '左右で開いているフォルダを比較し、競合の扱いを確認してコピーします。', compare: '比較', refresh: '再比較', close: '閉じる', name: '名前', left: '左', right: '右', status: '比較結果', same: '暫定一致', different: '差分', leftOnly: '左のみ', rightOnly: '右のみ', unknown: '日時不明', checksum: 'SHA-256で照合', hashEqual: 'SHA-256一致', hashDifferent: 'SHA-256不一致', copyRight: '選択項目を右へコピー', copyLeft: '選択項目を左へコピー', empty: '比較する項目がありません', noDifferences: '表示する差分はありません', differencesOnly: '差分のみ', search: '相対パスを検索', showing: '{{shown}} / {{total}} 項目を表示', select: '転送する項目を選択してください', unsupported: '同じ場所は比較できません', duplicate: '同じ名前の項目が複数あるため、このフォルダは比較できません。', loading: '比較しています…', details: '配下を再帰的に比較します。同名ファイルは必要に応じてSHA-256照合できます。両側にあるフォルダは配下の差分項目を選択してください。' },
+  en: { title: 'Compare Folders', description: 'Compare the folders open in both panes and review conflicts before copying.', compare: 'Compare', refresh: 'Compare again', close: 'Close', name: 'Name', left: 'Left', right: 'Right', status: 'Result', same: 'Likely same', different: 'Different', leftOnly: 'Left only', rightOnly: 'Right only', unknown: 'Date unavailable', checksum: 'Verify SHA-256', hashEqual: 'SHA-256 match', hashDifferent: 'SHA-256 differs', copyRight: 'Copy selected right', copyLeft: 'Copy selected left', empty: 'No items to compare', noDifferences: 'No differences to show', differencesOnly: 'Differences only', search: 'Search relative paths', showing: 'Showing {{shown}} of {{total}} items', select: 'Select items to transfer', unsupported: 'Cannot compare the same location', duplicate: 'This folder contains multiple items with the same name and cannot be compared safely.', loading: 'Comparing…', details: 'Compares subfolders recursively. Verify same-named files with SHA-256 on demand. For folders present on both sides, select the differing children.' },
+  'zh-CN': { title: '比较文件夹', description: '比较左右窗格中打开的文件夹，确认冲突处理方式后再复制。', compare: '比较', refresh: '重新比较', close: '关闭', name: '名称', left: '左侧', right: '右侧', status: '结果', same: '暂时相同', different: '不同', leftOnly: '仅左侧', rightOnly: '仅右侧', unknown: '日期未知', checksum: '验证 SHA-256', hashEqual: 'SHA-256 相同', hashDifferent: 'SHA-256 不同', copyRight: '将所选项目复制到右侧', copyLeft: '将所选项目复制到左侧', empty: '没有可比较的项目', noDifferences: '没有可显示的差异', differencesOnly: '仅显示差异', search: '搜索相对路径', showing: '显示 {{shown}} / {{total}} 项', select: '请选择要传输的项目', unsupported: '无法比较相同位置', duplicate: '此文件夹存在多个同名项目，无法安全比较。', loading: '正在比较…', details: '递归比较子文件夹。同名文件可按需进行 SHA-256 验证。对于两侧都有的文件夹，请选择其中的差异项目。' },
 } as const;
 
 const compareConflictCopy = {
@@ -544,7 +546,8 @@ function upsertConnectionInOrder(current: Connection[], connection: Connection):
   return next;
 }
 
-function LocalFilePane({ language, initialPath, showHiddenFiles, connections, refreshToken, paneId, paneClassName = '', onSelectSource, onStateChange, onWorkspaceDragStart, onWorkspaceDrop }: { language: Language; initialPath?: string; showHiddenFiles: boolean; connections: Connection[]; refreshToken: number; paneId: WorkspacePaneId; paneClassName?: string; onSelectSource: (connection: Connection) => void; onStateChange: (state: WorkspacePaneState) => void; onWorkspaceDragStart: (paneId: WorkspacePaneId, state: WorkspacePaneState, event: React.DragEvent) => void; onWorkspaceDrop: (paneId: WorkspacePaneId, moveItem: boolean) => void }) {
+type PaneNavigationProps = { navigationRequest?: NavigationRequest; onNavigationError?: () => void };
+function LocalFilePane({ language, initialPath, showHiddenFiles, connections, refreshToken, paneId, paneClassName = '', onSelectSource, onStateChange, onWorkspaceDragStart, onWorkspaceDrop, navigationRequest, onNavigationError }: { language: Language; initialPath?: string; showHiddenFiles: boolean; connections: Connection[]; refreshToken: number; paneId: WorkspacePaneId; paneClassName?: string; onSelectSource: (connection: Connection) => void; onStateChange: (state: WorkspacePaneState) => void; onWorkspaceDragStart: (paneId: WorkspacePaneId, state: WorkspacePaneState, event: React.DragEvent) => void; onWorkspaceDrop: (paneId: WorkspacePaneId, moveItem: boolean) => void } & PaneNavigationProps) {
   const text = dualPaneCopy[language];
   const common = copy[language];
   const views = viewCopy[language];
@@ -556,20 +559,34 @@ function LocalFilePane({ language, initialPath, showHiddenFiles, connections, re
   const [pathCopied, setPathCopied] = useState(false);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const currentPathRef = useRef(initialPath ?? '');
+  const directoryRequest = useRef(0);
+  const navigationError = useRef(onNavigationError);
+  navigationError.current = onNavigationError;
   const loadLocalDirectory = useCallback(async (requestedPath: string) => {
-    if (!requestedPath) return;
+    if (!requestedPath) return false;
+    const sequence = ++directoryRequest.current;
     setBusy(true);
     setError('');
     try {
       const next = await invoke<LocalDirectoryListing>('local_directory_list', { path: requestedPath });
+      if (sequence !== directoryRequest.current) return undefined;
       setListing(next);
       setPathDraft(next.path);
       currentPathRef.current = next.path;
       setSelectedPaths(new Set());
       onStateChange({ kind: 'local', directoryPath: next.path, entries: next.entries.map((entry) => entry.name), items: [] });
-    } catch (reason) { setError(invokeErrorMessage(reason)); }
-    finally { setBusy(false); }
+      return true;
+    } catch (reason) { if (sequence === directoryRequest.current) setError(invokeErrorMessage(reason)); return false; }
+    finally { if (sequence === directoryRequest.current) setBusy(false); }
   }, [onStateChange]);
+
+  useEffect(() => () => { directoryRequest.current += 1; }, []);
+  useEffect(() => {
+    if (!navigationRequest || navigationRequest.connectionId) return;
+    let cancelled = false;
+    void loadLocalDirectory(navigationRequest.path).then((ok) => { if (ok === false && !cancelled) navigationError.current?.(); });
+    return () => { cancelled = true; };
+  }, [navigationRequest, loadLocalDirectory]);
 
   useEffect(() => {
     let cancelled = false;
@@ -622,6 +639,7 @@ function LocalFilePane({ language, initialPath, showHiddenFiles, connections, re
     </div>
     {error && <div className="error-banner"><strong>{text.unavailable}:</strong> {error}</div>}
     <div className="secondary-connection-strip local-connection-strip"><HardDrive size={14}/><strong>{text.local}</strong></div>
+    <PlacesBar location={listing ? { kind: 'local', path: listing.path } : null} onNavigate={(next) => void loadLocalDirectory(next)}/>
     <div className="local-file-list" role="table">
       <div className="local-file-header" role="row"><span>{common.name}</span><span>{common.size}</span><span>{common.modified}</span></div>
       {visibleEntries.length === 0 ? <p className="view-empty">{text.empty}</p> : visibleEntries.map((entry) => {
@@ -647,7 +665,7 @@ function LocalFilePane({ language, initialPath, showHiddenFiles, connections, re
   </section>;
 }
 
-function RemoteFilePane({ language, connection, connections, showHiddenFiles, refreshToken, paneId, onSelectLocal, onSelectConnection, onStateChange, onWorkspaceDragStart, onWorkspaceDrop }: { language: Language; connection: Connection; connections: Connection[]; showHiddenFiles: boolean; refreshToken: number; paneId: WorkspacePaneId; onSelectLocal: () => void; onSelectConnection: (connection: Connection) => void; onStateChange: (state: WorkspacePaneState) => void; onWorkspaceDragStart: (paneId: WorkspacePaneId, state: WorkspacePaneState, event: React.DragEvent) => void; onWorkspaceDrop: (paneId: WorkspacePaneId, moveItem: boolean) => void }) {
+function RemoteFilePane({ language, connection, connections, showHiddenFiles, refreshToken, paneId, onSelectLocal, onSelectConnection, onStateChange, onWorkspaceDragStart, onWorkspaceDrop, navigationRequest, onNavigationError }: { language: Language; connection: Connection; connections: Connection[]; showHiddenFiles: boolean; refreshToken: number; paneId: WorkspacePaneId; onSelectLocal: () => void; onSelectConnection: (connection: Connection) => void; onStateChange: (state: WorkspacePaneState) => void; onWorkspaceDragStart: (paneId: WorkspacePaneId, state: WorkspacePaneState, event: React.DragEvent) => void; onWorkspaceDrop: (paneId: WorkspacePaneId, moveItem: boolean) => void } & PaneNavigationProps) {
   const text = dualPaneCopy[language];
   const common = copy[language];
   const views = viewCopy[language];
@@ -662,21 +680,35 @@ function RemoteFilePane({ language, connection, connections, showHiddenFiles, re
   const connectionId = connection.id;
   const initialPath = connection.initialPath || '/';
   const currentPathRef = useRef(initialPath);
+  const directoryRequest = useRef(0);
+  const navigationError = useRef(onNavigationError);
+  navigationError.current = onNavigationError;
 
   const loadRemoteDirectory = useCallback(async (requestedPath: string) => {
+    const sequence = ++directoryRequest.current;
     setBusy(true);
     setError('');
     try {
       const next = await invoke<FileEntry[]>('remote_list', { request: { connectionId, path: requestedPath } });
+      if (sequence !== directoryRequest.current) return undefined;
       setEntries(next);
       setPath(requestedPath);
       setPathDraft(visibleRemotePath(requestedPath));
       currentPathRef.current = requestedPath;
       setSelectedPaths(new Set());
       onStateChange({ kind: 'remote', connectionId, directoryPath: requestedPath, entries: next.map((entry) => entry.name), items: [] });
-    } catch (reason) { setError(invokeErrorMessage(reason)); }
-    finally { setBusy(false); }
+      return true;
+    } catch (reason) { if (sequence === directoryRequest.current) setError(invokeErrorMessage(reason)); return false; }
+    finally { if (sequence === directoryRequest.current) setBusy(false); }
   }, [connectionId, onStateChange]);
+
+  useEffect(() => () => { directoryRequest.current += 1; }, []);
+  useEffect(() => {
+    if (!navigationRequest || navigationRequest.connectionId !== connectionId) return;
+    let cancelled = false;
+    void loadRemoteDirectory(navigationRequest.path).then((ok) => { if (ok === false && !cancelled) navigationError.current?.(); });
+    return () => { cancelled = true; };
+  }, [navigationRequest, connectionId, loadRemoteDirectory]);
 
   useEffect(() => {
     setPath(initialPath);
@@ -720,6 +752,7 @@ function RemoteFilePane({ language, connection, connections, showHiddenFiles, re
     </div>
     {error && <div className="error-banner"><strong>{text.unavailable}:</strong> {error}</div>}
     <div className="secondary-connection-strip"><span className="online-dot"/><strong>{connection.name}</strong><span>{connection.username ? `${connection.username}@` : ''}{connection.host}</span><small>{text.connected}</small></div>
+    <PlacesBar location={{ kind: 'remote', connectionId, path }} onNavigate={(next) => void loadRemoteDirectory(next)}/>
     <div className="local-file-list" role="table">
       <div className="local-file-header" role="row"><span>{common.name}</span><span>{common.size}</span><span>{common.modified}</span></div>
       {visibleEntries.length === 0 ? <p className="view-empty">{busy ? '…' : text.empty}</p> : visibleEntries.map((entry) => {
@@ -923,6 +956,17 @@ export default function App() {
   const [draggedBookmarkId, setDraggedBookmarkId] = useState('');
   const [bookmarkDropTarget, setBookmarkDropTarget] = useState<{ id: string; edge: 'before' | 'after' } | null>(null);
   const [active, setActive] = useState<Connection | null>(null);
+  const [workspaceDocument, setWorkspaceDocument] = useState<WorkspaceDocument | null>(null);
+  const [workspaceLoadError, setWorkspaceLoadError] = useState('');
+  const [workspaceLoadAttempt, setWorkspaceLoadAttempt] = useState(0);
+  const [tabCloseTarget, setTabCloseTarget] = useState<string | null>(null);
+  const [restoredPrimary, setRestoredPrimary] = useState<TabPane | null>(null);
+  const [restoredAuxiliary, setRestoredAuxiliary] = useState<TabPane | null>(null);
+  const tabSessions = useRef(new Map<string, { primary: Connection | null; auxiliary: Connection | null }>());
+  const workspaceSaveQueue = useRef<Promise<unknown>>(Promise.resolve());
+  const workspaceLatest = useRef<WorkspaceDocument | null>(null);
+  const workspaceHome = useRef('/');
+  const tabReconnect = useRef<{ bookmarkId: string; path: string; target: ConnectTarget } | null>(null);
   const [secondaryConnection, setSecondaryConnection] = useState<Connection | null>(null);
   const [path, setPath] = useState('/');
   const [pathDraft, setPathDraft] = useState('/');
@@ -995,6 +1039,19 @@ export default function App() {
   const [auxiliaryRefreshToken, setAuxiliaryRefreshToken] = useState(0);
   const [workspaceTransferBusy, setWorkspaceTransferBusy] = useState(false);
   const [showWorkspaceCompare, setShowWorkspaceCompare] = useState(false);
+  const [linkPhase, setLinkPhase] = useState<'off' | 'on' | 'paused'>('off');
+  const [linkReason, setLinkReason] = useState('');
+  const [linkWorking, setLinkWorking] = useState(false);
+  const [linkToggling, setLinkToggling] = useState(false);
+  const [primaryNavigation, setPrimaryNavigation] = useState<NavigationRequest>();
+  const [auxiliaryNavigation, setAuxiliaryNavigation] = useState<NavigationRequest>();
+  const linkSequence = useRef(0);
+  const linkCommands = useRef<Promise<unknown>>(Promise.resolve());
+  const linkPhaseRef = useRef(linkPhase);
+  linkPhaseRef.current = linkPhase;
+  const observedNavigation = useRef<Record<WorkspacePaneId, WorkspaceLocation | null> | null>(null);
+  const expectedNavigation = useRef<Record<WorkspacePaneId, string>>({ primary: '', auxiliary: '' });
+  const currentLocations = useRef<Record<WorkspacePaneId, WorkspaceLocation | null>>({ primary: null, auxiliary: null });
   const availableUpdate = useRef<Update | null>(null);
   const automaticUpdateCheckStarted = useRef(false);
   const remoteEditPolling = useRef<Set<string>>(new Set());
@@ -1010,6 +1067,7 @@ export default function App() {
   const selectionAnchor = useRef<{ basePath: string; index: number } | null>(null);
   const columnBrowserRef = useRef<HTMLDivElement>(null);
   const columnRequestSequence = useRef(0);
+  const directoryRequestSequence = useRef(0);
   const transferPanelUserControlled = useRef(false);
   const browserZoneRef = useRef<HTMLElement | null>(null);
   const browserWorkspaceRef = useRef<HTMLDivElement | null>(null);
@@ -1323,6 +1381,8 @@ export default function App() {
   const visibleConnections = useMemo(() => selectedTag ? connections.filter((connection) => connection.tags.split(',').map((tag) => tag.trim()).includes(selectedTag)) : connections, [connections, selectedTag]);
 
   function openConnectionSheet(bookmark: Connection | null, target: ConnectTarget = 'primary') {
+    if (!workspaceLatest.current) return;
+    tabReconnect.current = null;
     setConnectingBookmark(bookmark);
     setSelectedKeyPath(bookmark?.keyPath ?? '');
     setConnectTarget(target);
@@ -1430,17 +1490,19 @@ export default function App() {
     return () => unlisten?.();
   }, []);
 
-  async function loadDirectory(connection = active, requestedPath = path): Promise<boolean> {
+  async function loadDirectory(connection = active, requestedPath = path): Promise<boolean | undefined> {
     if (!connection) return false;
+    const sequence = ++directoryRequestSequence.current;
     columnRequestSequence.current += 1;
     setBusy(true); setError(null);
     try {
       const result = await invoke<FileEntry[]>('remote_list', { request: { connectionId: connection.id, path: requestedPath } });
+      if (sequence !== directoryRequestSequence.current) return undefined;
       setEntries(result); setPath(requestedPath); setColumnLevels([{ path: requestedPath, entries: result }]);
       setSelectedRemoteItems([]); selectionAnchor.current = null;
       return true;
-    } catch (reason) { setError(String(reason)); return false; }
-    finally { setBusy(false); }
+    } catch (reason) { if (sequence === directoryRequestSequence.current) setError(String(reason)); return false; }
+    finally { if (sequence === directoryRequestSequence.current) setBusy(false); }
   }
 
   function recordDirectoryNavigation(nextPath: string, reset = false) {
@@ -1481,6 +1543,7 @@ export default function App() {
     if (!active) return;
     const level = columnLevels[levelIndex];
     if (!level) return;
+    directoryRequestSequence.current += 1;
     const sequence = ++columnRequestSequence.current;
     const selectedLevels = columnLevels.slice(0, levelIndex + 1).map((item, index) => index === levelIndex ? { ...item, selectedName: entryIdentity(entry) } : item);
     if (entry.file_type !== 'Directory') {
@@ -2583,6 +2646,246 @@ export default function App() {
   const primaryPaneState = primaryLocal ? primaryLocalPaneState : primaryRemotePaneState;
   const leftPaneState = leftPaneKind === 'local' ? auxiliaryPaneState : primaryPaneState;
   const rightPaneState = leftPaneKind === 'local' ? primaryPaneState : auxiliaryPaneState;
+  const toolsText = workspaceToolsCopy[language];
+  const primaryLocation = primaryPaneState ? workspaceEndpoint(primaryPaneState, primaryPaneState.directoryPath) : null;
+  const auxiliaryLocation = auxiliaryPaneState ? workspaceEndpoint(auxiliaryPaneState, auxiliaryPaneState.directoryPath) : null;
+  const primaryLocationKey = locationKey(primaryLocation);
+  const auxiliaryLocationKey = locationKey(auxiliaryLocation);
+  currentLocations.current = { primary: primaryLocation, auxiliary: auxiliaryLocation };
+
+  const setLinkedRoots = useCallback((roots: { primary: WorkspaceLocation; auxiliary: WorkspaceLocation } | null) => {
+    const command = linkCommands.current.catch(() => {}).then(() => invoke('workspace_link_set', { roots }));
+    linkCommands.current = command;
+    return command;
+  }, []);
+  const pauseLinkedNavigation = useCallback((reason: string) => {
+    linkSequence.current += 1;
+    linkPhaseRef.current = 'paused';
+    setLinkPhase('paused'); setLinkReason(reason); setLinkWorking(false);
+    expectedNavigation.current = { primary: '', auxiliary: '' };
+    void setLinkedRoots(null).catch(() => {});
+  }, [setLinkedRoots]);
+  const linkedNavigationFailed = useCallback(() => {
+    if (linkPhaseRef.current === 'on') pauseLinkedNavigation('failed');
+  }, [pauseLinkedNavigation]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let dispose: (() => void) | undefined;
+    void listen('workspace://link-invalidated', () => {
+      if (linkPhaseRef.current === 'on') pauseLinkedNavigation('outsideRoot');
+      else linkSequence.current += 1;
+    }).then((unlisten) => { if (cancelled) unlisten(); else dispose = unlisten; });
+    return () => { cancelled = true; dispose?.(); };
+  }, [pauseLinkedNavigation]);
+
+  async function toggleLinkedNavigation() {
+    if (linkToggling) return;
+    const sequence = ++linkSequence.current;
+    if (linkPhaseRef.current === 'on') {
+      linkPhaseRef.current = 'off'; setLinkPhase('off'); setLinkWorking(false);
+      expectedNavigation.current = { primary: '', auxiliary: '' };
+      await setLinkedRoots(null).catch((reason) => setError(invokeErrorMessage(reason)));
+      return;
+    }
+    if (!primaryLocation || !auxiliaryLocation || !dualPane) return;
+    const roots = { primary: primaryLocation, auxiliary: auxiliaryLocation };
+    setLinkToggling(true);
+    try {
+      await setLinkedRoots(roots);
+      if (sequence !== linkSequence.current) return;
+      if (locationKey(currentLocations.current.primary) !== primaryLocationKey || locationKey(currentLocations.current.auxiliary) !== auxiliaryLocationKey) {
+        pauseLinkedNavigation('outsideRoot'); return;
+      }
+      observedNavigation.current = roots;
+      expectedNavigation.current = { primary: '', auxiliary: '' };
+      setLinkReason(''); linkPhaseRef.current = 'on'; setLinkPhase('on');
+    } catch (reason) { setError(invokeErrorMessage(reason)); }
+    finally { setLinkToggling(false); }
+  }
+
+  useEffect(() => {
+    if (linkPhase !== 'on') return;
+    const current = currentLocations.current;
+    const previous = observedNavigation.current;
+    observedNavigation.current = current;
+    if (!dualPane || !current.primary || !current.auxiliary || !previous
+      || !sameLocationSource(current.primary, previous.primary) || !sameLocationSource(current.auxiliary, previous.auxiliary)) {
+      pauseLinkedNavigation('outsideRoot'); return;
+    }
+    const panes: WorkspacePaneId[] = ['primary', 'auxiliary'];
+    const changed = panes.filter((pane) => {
+      const key = locationKey(current[pane]);
+      if (key === locationKey(previous[pane])) return false;
+      const expected = expectedNavigation.current[pane];
+      expectedNavigation.current[pane] = '';
+      return key !== expected;
+    });
+    if (!changed.length) return;
+    if (changed.length !== 1) { pauseLinkedNavigation('outsideRoot'); return; }
+    const pane = changed[0];
+    const target: WorkspacePaneId = pane === 'primary' ? 'auxiliary' : 'primary';
+    const sequence = ++linkSequence.current;
+    setLinkWorking(true);
+    void invoke<{ endpoint: WorkspaceEndpoint | null; reason: 'outsideRoot' | 'missing' | 'ambiguous' | 'notDirectory' | 'invalidPath' | 'failed' | null }>('workspace_link_resolve', { pane, endpoint: current[pane] }).then((result) => {
+      if (sequence !== linkSequence.current || linkPhaseRef.current !== 'on') return;
+      if (!result.endpoint) { pauseLinkedNavigation(result.reason ?? 'failed'); return; }
+      if (locationKey(result.endpoint) === locationKey(currentLocations.current[target])) return;
+      expectedNavigation.current[target] = locationKey(result.endpoint);
+      const request = { id: sequence, path: result.endpoint.path, connectionId: result.endpoint.kind === 'remote' ? result.endpoint.connectionId : undefined };
+      if (target === 'primary') setPrimaryNavigation(request); else setAuxiliaryNavigation(request);
+    }).catch(() => { if (sequence === linkSequence.current) pauseLinkedNavigation('failed'); })
+      .finally(() => { if (sequence === linkSequence.current) setLinkWorking(false); });
+  }, [primaryLocationKey, auxiliaryLocationKey, dualPane, linkPhase, pauseLinkedNavigation]);
+
+  useEffect(() => {
+    if (!primaryNavigation || primaryLocal || !active || primaryNavigation.connectionId !== active.id) return;
+    let cancelled = false;
+    void loadDirectory(active, primaryNavigation.path).then((ok) => {
+      if (ok === false && !cancelled) linkedNavigationFailed();
+      else if (ok) recordDirectoryNavigation(primaryNavigation.path);
+    });
+    return () => { cancelled = true; };
+  // Navigation requests are immutable commands; normal directory changes must not replay them.
+  }, [primaryNavigation, primaryLocal, active?.id, linkedNavigationFailed]);
+
+  const auxiliaryNavigationProps = { navigationRequest: auxiliaryNavigation, onNavigationError: linkedNavigationFailed };
+  const primaryNavigationProps = { navigationRequest: primaryNavigation, onNavigationError: linkedNavigationFailed };
+  const tabText = tabsCopy[language];
+  const activeTabId = workspaceDocument?.activeId ?? '';
+  const currentTab = workspaceDocument?.tabs.find(tab => tab.id === activeTabId);
+  function freshTab(): WorkspaceTab {
+    return { id: crypto.randomUUID(), name: '', primary: { kind: 'remote', bookmarkId: null, path: '/' }, auxiliary: { kind: 'local', bookmarkId: null, path: workspaceHome.current }, dualPane, leftPaneKind, ratio: dualPaneRatio, viewMode, widths: columnWidths, visibility: columnVisibility, sortColumn, sortDirection };
+  }
+  const tabSnapshot: WorkspaceTab | null = currentTab ? { ...currentTab,
+    primary: primaryLocal ? { kind: 'local', bookmarkId: null, path: primaryLocalPaneState?.directoryPath ?? restoredPrimary?.path ?? '/' } : active ? { kind: 'remote', bookmarkId: active.id, path } : restoredPrimary ?? currentTab.primary,
+    auxiliary: secondaryConnection ? { kind: 'remote', bookmarkId: secondaryConnection.id, path: auxiliaryPaneState?.directoryPath ?? restoredAuxiliary?.path ?? secondaryConnection.initialPath } : restoredAuxiliary?.kind === 'remote' ? restoredAuxiliary : { kind: 'local', bookmarkId: null, path: auxiliaryPaneState?.directoryPath ?? restoredAuxiliary?.path ?? '/' },
+    dualPane, leftPaneKind, ratio: dualPaneRatio, viewMode, widths: columnWidths, visibility: columnVisibility, sortColumn, sortDirection,
+  } : null;
+  const liveDocument = workspaceDocument && tabSnapshot ? { ...workspaceDocument, tabs: workspaceDocument.tabs.map(tab => tab.id === activeTabId ? tabSnapshot : tab) } : null;
+  workspaceLatest.current = liveDocument;
+  function persistWorkspace(document: WorkspaceDocument) {
+    workspaceSaveQueue.current = workspaceSaveQueue.current.catch(() => {}).then(() => invoke('workspace_document_save', { document }));
+    void workspaceSaveQueue.current.catch(reason => setError(invokeErrorMessage(reason)));
+    return workspaceSaveQueue.current;
+  }
+  function applyWorkspaceTab(tab: WorkspaceTab) {
+    // Invalidate all outstanding loads before changing the visible document.
+    cancelScheduledDragPreparation();
+    workspaceDragSourceRef.current = null;
+    setIsDragOver(false);
+    directoryRequestSequence.current += 1;
+    columnRequestSequence.current += 1;
+    linkSequence.current += 1;
+    setLinkPhase('off'); linkPhaseRef.current = 'off'; setLinkWorking(false); setLinkReason('');
+    expectedNavigation.current = { primary: '', auxiliary: '' };
+    void setLinkedRoots(null).catch(reason => setError(invokeErrorMessage(reason)));
+    setPrimaryNavigation(undefined); setAuxiliaryNavigation(undefined);
+    setBusy(false); setError(null); setQuery(''); setEntries([]); setColumnLevels([]);
+    setSelectedRemoteItems([]); setInlineRenameTarget(null); setEntryContextMenu(null); setBrowserContextMenu(null); setColumnMenu(null); setFileInformationTarget(null);
+    setPrimaryLocalPaneState(null); setAuxiliaryPaneState(null);
+    setDualPane(tab.dualPane); setLeftPaneKind(tab.leftPaneKind); setDualPaneRatio(tab.ratio);
+    setViewMode(tab.viewMode); setColumnWidths(tab.widths); setColumnVisibility(tab.visibility);
+    setSortColumn(tab.sortColumn); setSortDirection(tab.sortDirection);
+    setRestoredPrimary(tab.primary); setRestoredAuxiliary(tab.auxiliary);
+    setPath(tab.primary.path); setPathDraft(tab.primary.path);
+    setDirectoryHistory([tab.primary.path]); setDirectoryHistoryIndex(0);
+    setPrimaryLocal(tab.primary.kind === 'local');
+    const session = tabSessions.current.get(tab.id);
+    const usable = (connection: Connection | null | undefined) => {
+      const bookmark = connections.find(item => item.id === connection?.id);
+      return connection && bookmark && !connectionTargetChanged(connection, bookmark) ? { ...connection, ...bookmark } : null;
+    };
+    const primary = tab.primary.kind === 'remote' ? usable(session?.primary) : null;
+    const auxiliary = tab.auxiliary.kind === 'remote' ? usable(session?.auxiliary) : null;
+    tabSessions.current.set(tab.id, { primary, auxiliary });
+    setActive(primary); setSecondaryConnection(auxiliary);
+    if (primary) void loadDirectory(primary, tab.primary.path);
+  }
+  useEffect(() => {
+    let cancelled = false;
+    setWorkspaceLoadError('');
+    void Promise.all([invoke<WorkspaceDocument | null>('workspace_document_load'), invoke<string>('local_default_directory')]).then(([saved, home]) => {
+      if (cancelled) return;
+      workspaceHome.current = home;
+      const document = saved ?? (() => { const tab = freshTab(); tab.auxiliary.path = home; return { version: 1 as const, activeId: tab.id, tabs: [tab] }; })();
+      const tab = document.tabs.find(item => item.id === document.activeId);
+      if (!tab) throw new Error('Invalid workspace');
+      applyWorkspaceTab(tab);
+      setWorkspaceDocument(document);
+    }).catch(reason => { if (!cancelled) setWorkspaceLoadError(invokeErrorMessage(reason)); });
+    return () => { cancelled = true; };
+  // Load once per window. Never overwrite an unreadable saved workspace with defaults.
+  }, [workspaceLoadAttempt]);
+  const serializedWorkspace = JSON.stringify(liveDocument);
+  useEffect(() => {
+    if (!liveDocument) return;
+    const timer = window.setTimeout(() => { void persistWorkspace(JSON.parse(serializedWorkspace) as WorkspaceDocument); }, 180);
+    return () => window.clearTimeout(timer);
+  }, [serializedWorkspace]);
+  useEffect(() => {
+    let disposed = false;
+    let closing = false;
+    let unlisten: (() => void) | undefined;
+    void getCurrentWebviewWindow().onCloseRequested(async event => {
+      if (closing) return;
+      event.preventDefault();
+      try {
+        if (workspaceLatest.current) await persistWorkspace(workspaceLatest.current);
+        closing = true;
+        await getCurrentWebviewWindow().close();
+      } catch (reason) { closing = false; setError(invokeErrorMessage(reason)); }
+    }).then(stop => { if (disposed) stop(); else unlisten = stop; }).catch(reason => setError(invokeErrorMessage(reason)));
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
+  function selectWorkspaceTab(id: string, document = workspaceLatest.current) {
+    if (!document || id === activeTabId) return;
+    const next = document.tabs.find(tab => tab.id === id);
+    if (!next) return;
+    tabSessions.current.set(activeTabId, { primary: active, auxiliary: secondaryConnection });
+    const updated = { ...document, activeId: id };
+    setWorkspaceDocument(updated); applyWorkspaceTab(next); void persistWorkspace(updated);
+  }
+  function addWorkspaceTab() {
+    const document = workspaceLatest.current;
+    if (!document || document.tabs.length >= 32 || showConnect || inlineRenameBusy) return;
+    const tab = freshTab();
+    selectWorkspaceTab(tab.id, { ...document, tabs: [...document.tabs, tab] });
+  }
+  function closeWorkspaceTab(id: string, confirmed = false) {
+    const document = workspaceLatest.current;
+    if (!document || showConnect || inlineRenameBusy) return;
+    const tab = document.tabs.find(item => item.id === id);
+    const ids = [tab?.primary.bookmarkId, tab?.auxiliary.bookmarkId].filter(Boolean);
+    if (!confirmed && (transfers.some(transfer => transfer.status === 'Running' && ids.includes(transfer.connectionId)) || remoteEdits.some(edit => ids.includes(edit.connectionId)))) { setTabCloseTarget(id); return; }
+    let tabs = document.tabs.filter(item => item.id !== id);
+    if (!tabs.length) tabs = [freshTab()];
+    const nextId = id === activeTabId ? tabs[Math.min(document.tabs.findIndex(item => item.id === id), tabs.length - 1)].id : activeTabId;
+    const updated = { ...document, tabs, activeId: nextId };
+    if (id === activeTabId) applyWorkspaceTab(tabs.find(item => item.id === nextId)!);
+    tabSessions.current.delete(id); setTabCloseTarget(null); setWorkspaceDocument(updated); void persistWorkspace(updated);
+  }
+  useEffect(() => {
+    const shortcut = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || document.querySelector('[role="dialog"]')) return;
+      if (event.key.toLowerCase() === 't') { event.preventDefault(); if (!event.repeat) addWorkspaceTab(); }
+      if (event.key.toLowerCase() === 'w') { event.preventDefault(); if (!event.repeat) closeWorkspaceTab(activeTabId); }
+    };
+    window.addEventListener('keydown', shortcut);
+    return () => window.removeEventListener('keydown', shortcut);
+  });
+  function reconnectTabPane(pane: TabPane, target: ConnectTarget) {
+    const bookmark = connections.find(item => item.id === pane.bookmarkId);
+    if (bookmark) { openConnectionSheet(bookmark, target); tabReconnect.current = { bookmarkId: bookmark.id, path: pane.path, target }; }
+    else setError(tabText.offline);
+  }
+  function invalidateTabConnection(id: string) {
+    for (const [tabId, session] of tabSessions.current) {
+      tabSessions.current.set(tabId, { primary: session.primary?.id === id ? null : session.primary, auxiliary: session.auxiliary?.id === id ? null : session.auxiliary });
+    }
+  }
+  const linkFailureText = linkReason && linkReason in toolsText ? toolsText[linkReason as keyof typeof toolsText] : toolsText.failed;
+  const linkLabel = linkPhase === 'on' ? toolsText.unlink : linkPhase === 'paused' ? `${toolsText.paused}: ${linkFailureText} ${toolsText.resume}` : toolsText.link;
   function beginWorkspaceDrag(paneId: WorkspacePaneId, state: WorkspacePaneState, event: React.DragEvent) {
     workspaceDragSourceRef.current = { paneId, state };
     event.dataTransfer.effectAllowed = 'copyMove';
@@ -2616,9 +2919,10 @@ export default function App() {
     void transferBetweenPanes(source.state, destination, moveItem);
   }
   const auxiliaryPane = secondaryConnection
-    ? <RemoteFilePane language={language} connection={secondaryConnection} connections={connections} showHiddenFiles={preferences.showHiddenFiles} refreshToken={auxiliaryRefreshToken} paneId="auxiliary" onSelectLocal={() => { setAuxiliaryPaneState(null); setSecondaryConnection(null); }} onSelectConnection={(connection) => { setAuxiliaryPaneState(null); openConnectionSheet(connection, 'secondary'); }} onStateChange={setAuxiliaryPaneState} onWorkspaceDragStart={beginWorkspaceDrag} onWorkspaceDrop={dropWorkspaceItems}/>
-    : <LocalFilePane language={language} initialPath={active?.localDirectory} showHiddenFiles={preferences.showHiddenFiles} connections={connections} refreshToken={auxiliaryRefreshToken} paneId="auxiliary" paneClassName="auxiliary-file-pane" onSelectSource={(connection) => { setAuxiliaryPaneState(null); openConnectionSheet(connection, 'secondary'); }} onStateChange={setAuxiliaryPaneState} onWorkspaceDragStart={beginWorkspaceDrag} onWorkspaceDrop={dropWorkspaceItems}/>;
-  return <main className={`app-shell ${transferPanelCollapsed ? 'queue-collapsed' : ''}`} style={{ '--file-name-font-size': `${preferences.fileNameFontSize}px`, '--file-name-font-weight': preferences.fileNameFontWeight === 'normal' ? 400 : 650, '--file-row-height': `${densityMetrics.list}px`, '--column-row-height': `${densityMetrics.column}px`, '--icon-row-height': `${densityMetrics.icon}px` } as React.CSSProperties}>
+    ? <RemoteFilePane key={activeTabId + ":auxiliary-remote"} {...auxiliaryNavigationProps} language={language} connection={{ ...secondaryConnection, initialPath: restoredAuxiliary?.path ?? secondaryConnection.initialPath }} connections={connections} showHiddenFiles={preferences.showHiddenFiles} refreshToken={auxiliaryRefreshToken} paneId="auxiliary" onSelectLocal={() => { setRestoredAuxiliary(null); setAuxiliaryPaneState(null); setSecondaryConnection(null); }} onSelectConnection={(connection) => { setAuxiliaryPaneState(null); openConnectionSheet(connection, 'secondary'); }} onStateChange={setAuxiliaryPaneState} onWorkspaceDragStart={beginWorkspaceDrag} onWorkspaceDrop={dropWorkspaceItems}/>
+    : restoredAuxiliary?.kind === 'remote' && restoredAuxiliary.bookmarkId ? <section className="local-file-pane auxiliary-file-pane tab-disconnected"><Cloud size={24}/><span>{connections.find(item => item.id === restoredAuxiliary.bookmarkId)?.name ?? tabText.offline}</span><code>{visibleRemotePath(restoredAuxiliary.path)}</code><button onClick={() => reconnectTabPane(restoredAuxiliary, 'secondary')}>{tabText.reconnect}</button></section>
+    : <LocalFilePane key={activeTabId + ":auxiliary-local"} {...auxiliaryNavigationProps} language={language} initialPath={restoredAuxiliary?.path ?? active?.localDirectory} showHiddenFiles={preferences.showHiddenFiles} connections={connections} refreshToken={auxiliaryRefreshToken} paneId="auxiliary" paneClassName="auxiliary-file-pane" onSelectSource={(connection) => { setAuxiliaryPaneState(null); openConnectionSheet(connection, 'secondary'); }} onStateChange={setAuxiliaryPaneState} onWorkspaceDragStart={beginWorkspaceDrag} onWorkspaceDrop={dropWorkspaceItems}/>;
+  return <WorkspacePlacesProvider language={language} formatPath={visibleRemotePath} onError={setError}><main className={`app-shell ${transferPanelCollapsed ? 'queue-collapsed' : ''}`} style={{ '--file-name-font-size': `${preferences.fileNameFontSize}px`, '--file-name-font-weight': preferences.fileNameFontWeight === 'normal' ? 400 : 650, '--file-row-height': `${densityMetrics.list}px`, '--column-row-height': `${densityMetrics.column}px`, '--icon-row-height': `${densityMetrics.icon}px` } as React.CSSProperties}>
     <header className="toolbar" onPointerDown={startWindowDrag}>
       <div className="brand"><Cloud size={21}/><span>{t.title}</span></div>
       <button className="icon-button" aria-label={sidebarCollapsed ? queueText.showSidebar : queueText.hideSidebar} title={sidebarCollapsed ? queueText.showSidebar : queueText.hideSidebar} aria-expanded={!sidebarCollapsed} onClick={() => setSidebarCollapsed((current) => !current)}>{sidebarCollapsed ? <PanelLeftOpen size={17}/> : <PanelLeftClose size={17}/>}</button>
@@ -2630,7 +2934,10 @@ export default function App() {
       <div className="toolbar-spacer" />
       <label className="language"><span>Language</span><select value={language} onChange={(event) => setPreferences((current) => ({ ...current, language: event.target.value as Language }))}><option value="ja">日本語</option><option value="en">English</option><option value="zh-CN">简体中文</option></select></label>
     </header>
-    <section className={`workspace ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`} style={{ '--sidebar-width': `${sidebarWidth}px` } as React.CSSProperties}>
+    <div className="workspace-tabs-area">
+      {workspaceLoadError ? <div className="workspace-restore-error">{tabText.restoreError}: {workspaceLoadError}<button onClick={() => setWorkspaceLoadAttempt(value => value + 1)}>{tabText.retry}</button></div> : workspaceDocument && <WorkspaceTabs tabs={liveDocument?.tabs ?? workspaceDocument.tabs} activeId={activeTabId} language={language} label={tab => tab.name || connections.find(item => item.id === tab.primary.bookmarkId)?.name || (tab.primary.kind === 'local' ? dualPaneText.local : tabText.unnamed)} connected={tab => tab.primary.kind === 'local' || Boolean(tab.id === activeTabId ? active : tabSessions.current.get(tab.id)?.primary)} onSelect={id => { if (!showConnect && !inlineRenameBusy) selectWorkspaceTab(id); }} onAdd={addWorkspaceTab} onClose={id => closeWorkspaceTab(id)} onRename={(id, name) => setWorkspaceDocument(document => document ? { ...document, tabs: document.tabs.map(tab => tab.id === id ? { ...tab, name } : tab) } : document)}/>}
+    </div>
+    <section id="workspace-panel" role="tabpanel" aria-labelledby={activeTabId ? `workspace-tab-${activeTabId}` : undefined} className={`workspace ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`} style={{ '--sidebar-width': `${sidebarWidth}px` } as React.CSSProperties}>
       <aside className="sidebar">
         <div className="sidebar-section-heading bookmarks-heading">
           <div className="sidebar-label">{t.bookmarks}</div>
@@ -2672,6 +2979,8 @@ export default function App() {
       {dualPane && <div className="pane-transfer-rail" role="separator" aria-label={dualPaneText.resize} title={dualPaneText.resize} aria-orientation="vertical" aria-valuemin={20} aria-valuemax={80} aria-valuenow={Math.round(dualPaneRatio * 100)} tabIndex={0} onPointerDown={startDualPaneResize} onDoubleClick={(event) => { if (!(event.target as HTMLElement).closest('button')) setDualPaneRatio(defaultDualPaneRatio); }} onKeyDown={(event) => { if (event.key === 'ArrowLeft') { event.preventDefault(); adjustDualPaneRatio(-0.03); } if (event.key === 'ArrowRight') { event.preventDefault(); adjustDualPaneRatio(0.03); } if (event.key === 'Home') { event.preventDefault(); setDualPaneRatio(defaultDualPaneRatio); } }}><div className="pane-transfer-controls" role="group" aria-label={dualPaneText.transferring}>
         <button aria-label={dualPaneText.swap} title={dualPaneText.swap} onClick={() => setLeftPaneKind((current) => current === 'local' ? 'remote' : 'local')}><ArrowLeftRight size={16}/></button>
         <button disabled={workspaceTransferBusy || !leftPaneState?.directoryPath || !rightPaneState?.directoryPath} aria-label={compareCopy[language].compare} title={compareCopy[language].compare} onClick={() => setShowWorkspaceCompare(true)}><FolderSync size={16}/></button>
+        <button className={`workspace-link-toggle ${linkPhase}`} aria-label={linkLabel} title={linkLabel} aria-pressed={linkPhase === 'on'} disabled={linkToggling || !primaryLocation || !auxiliaryLocation} onClick={() => void toggleLinkedNavigation()}>{linkWorking || linkToggling ? <LoaderCircle size={16} className="spinning"/> : linkPhase === 'paused' ? <Unlink2 size={16}/> : <Link2 size={16}/>}</button>
+        <span className="workspace-live-status" role="status" aria-live="polite">{linkPhase === 'paused' ? `${toolsText.paused}: ${linkFailureText}` : ''}</span>
         <span className="pane-transfer-divider"/>
         <button disabled={workspaceTransferBusy || !leftPaneState?.items.length || !rightPaneState} aria-label={dualPaneText.copyRight} title={dualPaneText.copyRight} onClick={() => void transferBetweenPanes(leftPaneState, rightPaneState, false)}><Copy size={14}/><ArrowRight size={14}/></button>
         <button disabled={workspaceTransferBusy || !rightPaneState?.items.length || !leftPaneState} aria-label={dualPaneText.copyLeft} title={dualPaneText.copyLeft} onClick={() => void transferBetweenPanes(rightPaneState, leftPaneState, false)}><ArrowLeft size={14}/><Copy size={14}/></button>
@@ -2681,7 +2990,7 @@ export default function App() {
         {workspaceTransferBusy && <LoaderCircle className="spinning pane-transfer-spinner" size={15} />}
       </div></div>}
       {showWorkspaceCompare && leftPaneState && rightPaneState && <WorkspaceCompareSheet language={language} left={leftPaneState} right={rightPaneState} showHiddenFiles={preferences.showHiddenFiles} busy={workspaceTransferBusy} onClose={() => setShowWorkspaceCompare(false)} onCopy={async (source, destination, selectedEntries, policy) => { await copyComparedEntries(source, destination, selectedEntries, policy); setShowWorkspaceCompare(false); }} />}
-      {primaryLocal ? <LocalFilePane language={language} initialPath={active?.localDirectory} showHiddenFiles={preferences.showHiddenFiles} connections={connections} refreshToken={auxiliaryRefreshToken} paneId="primary" paneClassName="primary-file-pane" onSelectSource={(connection) => { setPrimaryLocalPaneState(null); openConnectionSheet(connection, 'primary'); }} onStateChange={setPrimaryLocalPaneState} onWorkspaceDragStart={beginWorkspaceDrag} onWorkspaceDrop={dropWorkspaceItems}/> : <section className={`browser ${isDragOver ? 'drag-over' : ''}`} ref={browserZoneRef} onDragOver={(event) => { if (event.dataTransfer.types.includes('application/x-harbor-workspace')) { event.preventDefault(); event.currentTarget.classList.add('workspace-drag-over'); event.dataTransfer.dropEffect = event.shiftKey ? 'move' : 'copy'; } }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.classList.remove('workspace-drag-over'); }} onDrop={(event) => { event.currentTarget.classList.remove('workspace-drag-over'); if (!event.dataTransfer.types.includes('application/x-harbor-workspace')) return; event.preventDefault(); dropWorkspaceItems('primary', event.shiftKey); }}>
+      {primaryLocal ? <LocalFilePane key={activeTabId + ":primary"} {...primaryNavigationProps} language={language} initialPath={restoredPrimary?.kind === "local" ? restoredPrimary.path : active?.localDirectory} showHiddenFiles={preferences.showHiddenFiles} connections={connections} refreshToken={auxiliaryRefreshToken} paneId="primary" paneClassName="primary-file-pane" onSelectSource={(connection) => { setPrimaryLocalPaneState(null); openConnectionSheet(connection, 'primary'); }} onStateChange={setPrimaryLocalPaneState} onWorkspaceDragStart={beginWorkspaceDrag} onWorkspaceDrop={dropWorkspaceItems}/> : <section className={`browser ${isDragOver ? 'drag-over' : ''}`} ref={browserZoneRef} onDragOver={(event) => { if (event.dataTransfer.types.includes('application/x-harbor-workspace')) { event.preventDefault(); event.currentTarget.classList.add('workspace-drag-over'); event.dataTransfer.dropEffect = event.shiftKey ? 'move' : 'copy'; } }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.classList.remove('workspace-drag-over'); }} onDrop={(event) => { event.currentTarget.classList.remove('workspace-drag-over'); if (!event.dataTransfer.types.includes('application/x-harbor-workspace')) return; event.preventDefault(); dropWorkspaceItems('primary', event.shiftKey); }}>
         {notice && <div className="notice-banner" role="status" aria-live="polite">{notice}</div>}
         {active ? <>
           <div className="browser-toolbar">
@@ -2707,6 +3016,7 @@ export default function App() {
           </div>
           {error && <div className="error-banner"><strong>{t.error}:</strong> {error}</div>}
           <div className="connection-strip"><span className="online-dot" />{active.name}<span>·</span><span>{active.username}@{active.host}</span><span className="connected">{t.connected}</span></div>
+          <PlacesBar location={{ kind: 'remote', connectionId: active.id, path }} onNavigate={(next) => void navigateDirectory(active, next)}/>
           <div className="file-display-region" aria-busy={busy} onKeyDown={navigateFileSelection} onPointerDown={(event) => {
             if (event.button === 0 && !(event.target as HTMLElement).closest('.file-row, .icon-entry, .column-entry, .file-header, .directory-column-title, .column-preview, input, button')) {
               cancelScheduledInlineRename();
@@ -2773,7 +3083,7 @@ export default function App() {
               <button title={crumb.path} aria-current={index === breadcrumbs.length - 1 ? 'location' : undefined} onClick={() => void navigateDirectory(active, crumb.path)}>{crumb.label}</button>
             </span>)}
           </nav>
-        </> : <div className="welcome"><Cloud size={46}/><h1>{t.empty}</h1><p>{t.emptyDetail}</p><button className="primary" onClick={() => openConnectionSheet(null)}>{t.connect}</button></div>}
+        </> : <div className="welcome"><Cloud size={46}/><h1>{restoredPrimary?.bookmarkId ? connections.find(item => item.id === restoredPrimary.bookmarkId)?.name ?? tabText.offline : t.empty}</h1><p>{restoredPrimary?.bookmarkId ? visibleRemotePath(restoredPrimary.path) : t.emptyDetail}</p><button className="primary" onClick={() => restoredPrimary?.bookmarkId ? reconnectTabPane(restoredPrimary, 'primary') : openConnectionSheet(null)}>{restoredPrimary?.bookmarkId ? tabText.reconnect : t.connect}</button></div>}
       </section>}
       </div>
     </section>
@@ -2862,16 +3172,21 @@ export default function App() {
       setNotice(t.bookmarkSaved);
       setShowConnect(false);
     }} onConnected={(connection) => {
+      invalidateTabConnection(connection.id);
+      const resume = tabReconnect.current;
+      const resumedPath = resume?.bookmarkId === connection.id && resume.target === connectTarget ? resume.path : connection.initialPath;
+      tabReconnect.current = null;
       setConnections((current) => upsertConnectionInOrder(current, connection));
       void invoke('bookmark_save', { bookmark: connection }).then(() => invoke('connection_history_record', { bookmark: connection })).then(() => invoke<ConnectionHistory[]>('connection_history_list')).then(setHistory).catch((reason) => setError(invokeErrorMessage(reason)));
       setShowConnect(false);
-      if (connectTarget === 'secondary') { setAuxiliaryPaneState(null); setSecondaryConnection(connection); }
-      else { setPrimaryLocal(false); setActive(connection); void navigateDirectory(connection, connection.initialPath, true); }
+      if (connectTarget === 'secondary') { setRestoredAuxiliary({ kind: 'remote', bookmarkId: connection.id, path: resumedPath }); setAuxiliaryPaneState(null); setSecondaryConnection(connection); }
+      else { setRestoredPrimary(null); setPrimaryLocal(false); setActive(connection); void navigateDirectory(connection, resumedPath, true); }
     }} />}
     {showPreferences && <PreferencesSheet value={preferences} language={language} t={t} softwareUpdate={softwareUpdate} onCheckUpdate={() => void checkForSoftwareUpdate(true)} onShowUpdate={() => setShowSoftwareUpdate(true)} onClose={() => setShowPreferences(false)} onSave={(next) => { setPreferences(next); setShowPreferences(false); }} />}
     {showSoftwareUpdate && <SoftwareUpdateSheet state={softwareUpdate} language={language} onClose={() => { if (softwareUpdate.phase !== 'downloading') setShowSoftwareUpdate(false); }} onInstall={() => void downloadAndInstallSoftwareUpdate()} onRestart={() => void relaunch()} />}
     {syncLocalDirectory && <SyncPreviewSheet preview={syncPreview} localDirectory={syncLocalDirectory} remoteDirectory={path} direction={syncDirection} comparison={syncComparison} busy={syncPreviewBusy} executionBusy={syncExecutionBusy} error={syncPreviewError} exclusions={syncExclusions} conflictChoices={syncConflictChoices} progress={syncExecutionProgress} result={syncExecutionResult} history={syncHistory} t={t} text={syncText} onClose={() => { if (syncExecutionBusy) return; setSyncLocalDirectory(''); setSyncPreview(null); }} onDirection={(direction) => { setSyncDirection(direction); setSyncExecutionResult(null); void calculateSyncPreview(syncLocalDirectory, direction); }} onComparison={(comparison) => { setSyncComparison(comparison); setSyncPreview(null); setSyncExecutionResult(null); void calculateSyncPreview(syncLocalDirectory, syncDirection, syncExclusions, comparison); }} onExclusions={(value) => { setSyncExclusions(value); setSyncPreview(null); setSyncExecutionResult(null); }} onConflict={(itemPath, choice) => setSyncConflictChoices((current) => ({ ...current, [itemPath]: choice }))} onRefresh={() => void calculateSyncPreview()} onExecute={() => void executeSync()} onCancelExecution={() => void cancelSyncExecution()} onClearHistory={() => void clearSyncHistory()} />}
-  </main>;
+    {tabCloseTarget && <div className="modal-backdrop"><section className="connect-sheet" role="dialog" aria-modal="true" aria-label={tabText.close}><p>{tabText.closeBusy}</p><div className="form-actions"><button onClick={() => setTabCloseTarget(null)}>{tabText.keep}</button><button onClick={() => closeWorkspaceTab(tabCloseTarget, true)}>{tabText.confirm}</button></div></section></div>}
+  </main></WorkspacePlacesProvider>;
 }
 
 function FileInformationSheet({ connection, target, t, text, onClose, onSave }: { connection: Connection; target: FileInformationTarget; t: typeof copy[keyof typeof copy]; text: typeof contextMenuCopy[keyof typeof contextMenuCopy]; onClose: () => void; onSave: (name: string | null, permissions: number | null, modified: number | null, ownerId: number | null, groupId: number | null) => Promise<void> }) {
