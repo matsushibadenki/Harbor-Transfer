@@ -1,5 +1,90 @@
 # 依存ライブラリ更新記録
 
+## 2026-11-16
+
+- 🟢 [Done] Vite 8.3.6 → 8.3.8、Reactプラグイン 6.2.1 → 6.3.0、Lucide 1.70.0 → 1.73.0。公式リリースノートとnpmのNode・peer範囲、ライセンスを確認。既存コードの移行は不要。Rolldownも1.2.19へ追随。
+- 🟢 [Done] pnpm build、pnpm check（Rustテストランナー上129件成功）、pnpm 10のfrozen-lockfile検証が成功。既存の未コミット変更を保持。
+- ⭕️ [Pending] Dockerに接続できず、実接続テストは未実施。ネイティブ画面も未検証のためTauri・通信依存は据え置き。ssh-keyのstable 0.6.7にはppk機能がなく、既存RC固定を維持。
+
+## 2026-11-09
+
+開始時にあった未コミットのmanifest、lockfile、更新記録、roadmapの変更を保持し、以下を追加更新。Rust manifest / Cargo.lockは変更していない。
+
+| パッケージ | 今回開始時 | 更新後 |
+| --- | --- | --- |
+| vite | 8.3.5 | 8.3.6 |
+| @vitejs/plugin-react | 6.1.2 | 6.2.1 |
+| lucide-react | 1.66.0 | 1.70.0 |
+
+🟢 [Done] 公式npm latestタグ、ライセンス、Node/peer要件、公式GitHubリリースノートを確認。ViteとReactプラグインはMIT、Node ^20.19.0 || >=22.12.0、プラグインのVite peerは^8.0.0。LucideはISC、React 19対応を維持。ViteはCSS依存収集・開発サーバー・ビルド等の修正。プラグインはrefreshInclude/refreshExclude追加と修正、optional compiler peer範囲の拡張であり、既存のreact()設定は移行不要。Lucide 1.68でwarning/alert系名変更があるが、アプリの既存52種類のimportは全てSVG描画可能だった。Rolldown/bindingsは1.2.16、@oxc-project/typesは0.156.0へ追随。新たなalpha/beta/rc/nightlyは導入していない。
+
+🟢 [Done] pnpm check / pnpm buildが成功。Rustテストランナー上129 passed、0 failed、整形検査成功。52種類のLucideアイコンのReact SVG描画成功。manifestとlockfileは既存caret方針を維持。pnpm supply-chain policy検査成功。実行環境はNode 26.12.1、Rust 1.99.1、pnpm 12.15.0。CI用pnpm 10.34.9でfrozen-lockfile同期確認も成功。
+
+⭕️ [Pending] Docker daemon socketが存在せずpnpm test:integrationは未実行。環境変数なしで早期returnするliveテストは実接続成功として数えない。ネイティブ画面・3言語操作・ドッキング／フローティング・配布ビルドも今回未検証。Tauri／通信ライブラリ／AWS SDKの固定は検証環境が整うまで維持。
+
+⭕️ [Pending] 公式crates.ioを再確認し、ssh-keyのlatest stableは0.6.7、ppk featureなし。PPK機能のstable代替を確認できないため、既存=0.7.0-rc.11固定を維持する。
+
+🟠 [Next] ネイティブTauriとDocker実通信を検証できる環境でTauriのJS/Rustと各プラグインをまとめて更新。SSD空き約29GiBのため、今回の検査は既存キャッシュを使用し、大規模なRust依存移行は保留。
+
+公式資料:
+- [Vite 8.3.6](https://github.com/vitejs/vite/releases/tag/v8.3.6)
+- [React plugin 6.2.0](https://github.com/vitejs/vite-plugin-react/releases/tag/plugin-react%406.2.0)
+- [React plugin 6.2.1](https://github.com/vitejs/vite-plugin-react/releases/tag/plugin-react%406.2.1)
+- [Lucide 1.67.0](https://github.com/lucide-icons/lucide/releases/tag/1.67.0)
+- [Lucide 1.68.0](https://github.com/lucide-icons/lucide/releases/tag/1.68.0)
+- [Lucide 1.69.0](https://github.com/lucide-icons/lucide/releases/tag/1.69.0)
+- [Lucide 1.70.0](https://github.com/lucide-icons/lucide/releases/tag/1.70.0)
+
+## 2026-11-02
+
+開始時の未コミット変更（前回のVite/Lucide更新、lockfile、更新記録、roadmap）を保持し、Lucideだけを追加更新。Rust manifestとCargo.lockは変更していない。
+
+| パッケージ | 今回開始時 | 更新後 |
+| --- | --- | --- |
+| lucide-react | 1.61.0 | 1.66.0 |
+
+🟢 [Done] 公式npmのlatestタグ、React 19対応peer範囲、ISCライセンス、公式GitHubの1.62〜1.66リリースノートとprerelease=falseを確認。per-icon exports追加、DynamicIconの古いロード結果の無視、アイコン追加・修正等を含む。既存の52種類のimportは変更不要で、React renderToStaticMarkupによるSVG描画がすべて成功。新しいalpha/beta/rc/nightlyは導入していない。
+
+🟢 [Done] manifest/lockfileを同期。pnpm checkとpnpm buildが成功（Rustテストランナー上129 passed、0 failed、整形検査成功）。実接続設定のないliveテストの早期returnを実通信成功には数えない。pnpm supply-chain policy検査も成功。
+
+⭕️ [Pending] Docker daemonのsocketが存在しないためpnpm test:integrationは未実行。ネイティブ画面・3言語操作・ドッキング／フローティングの回帰確認も未実施であり、SVG描画の成功で代替しない。Tauriと通信依存の更新は従来どおり保留。npmの候補はapi/cli 2.12.4、dialog 2.8.4、fs 2.7.1、process 2.4.0、updater 2.14.1。
+
+⭕️ [Pending] 公式crates.ioでssh-keyのstableは0.6.7、ppk featureなしと再確認。PPK機能を維持できるstable代替を確認できないため、=0.7.0-rc.11固定を維持。
+
+🟠 [Next] ネイティブと実接続の検証環境が整ったらTauriのJS/Rust・プラグインと通信ライブラリを分割更新。SSD空き容量は実行開始時約23GiB（使用率99%）のため、大きなRust依存の移行や追加ビルド成果物の生成を今回は避け、既存キャッシュで検証した。既存の成果物やユーザーファイルは削除していない。
+
+公式資料:
+- [Lucide 1.62.0](https://github.com/lucide-icons/lucide/releases/tag/1.62.0)
+- [Lucide 1.63.0](https://github.com/lucide-icons/lucide/releases/tag/1.63.0)
+- [Lucide 1.64.0](https://github.com/lucide-icons/lucide/releases/tag/1.64.0)
+- [Lucide 1.65.0](https://github.com/lucide-icons/lucide/releases/tag/1.65.0)
+- [Lucide 1.66.0](https://github.com/lucide-icons/lucide/releases/tag/1.66.0)
+
+## 2026-10-26
+
+開始時の作業ツリーはクリーン。アプリ0.2.6の既存機能を維持し、ビルドツールとアイコンを更新。Rust manifest / Cargo.lockは変更していない。
+
+| パッケージ | 更新前 | 更新後 |
+| --- | --- | --- |
+| vite | 8.3.4 | 8.3.5 |
+| lucide-react | 1.59.0 | 1.61.0 |
+
+🟢 [Done] 公式npm latestタグと公式リリースノートを確認。Viteはビルド・CSS・開発サーバー修正、Lucide 1.60/1.61は主にアイコン追加。ViteのNode要件は^20.19.0 || >=22.12.0、MITライセンスを維持。LucideはReact 19をpeer範囲に含み、ISCライセンスを維持。既存APIの移行は不要だった。manifestの既存caret方針を維持し、lockfileを同期。Rolldown/bindingsは1.2.13→1.2.15、@oxc-project/typesは0.153.0→0.155.0へ追随し、今回追加したプレリリースはない。
+
+🟢 [Done] pnpm check / pnpm buildが成功。Rustテストランナー上129 passed、0 failed、整形検査も成功。アプリで使用する52種類のLucideアイコンをReactのrenderToStaticMarkupでSVG描画しすべて成功。CIで使用中のpnpm 10.34.9でもinstall --lockfile-only --ignore-scripts --frozen-lockfileが成功。更新操作はpnpm 12.15.0、Node 26.12.1、Rust 1.99.1で実行した。
+
+⭕️ [Pending] Docker daemonのsocketが存在せず、実接続統合テストは未実行。環境変数なしで早期returnするliveテストは実通信成功として数えない。Tauri・通信・AWSの更新は引き続き保留。今回のネイティブ画面・3言語操作・ドッキング／フローティング・配布ビルドは未検証。SVG描画検査はGUI検証を代替しない。
+
+⭕️ [Pending] ssh-keyの公式latest stableは0.6.7でppk featureなし。PPK機能のため既存=0.7.0-rc.11固定を維持し、新たなRCは追加しない。
+
+🟠 [Next] ネイティブ環境とDocker実通信の検証が可能になったらTauriのJS/Rustとプラグインをまとめて更新。確認した候補はRust tauri 2.12.5（MSRV 1.90）、npm api/cli 2.12.4、dialog 2.8.3、fs 2.7.1、process 2.4.0、updater 2.14.0。AWS候補はconfig 1.13.0、S3 1.155.0（MSRV 1.94.1）。ローカルはMSRVを満たすが、固定理由となる認証・TLS・転送互換性の検証前には適用しない。
+
+公式資料:
+- [Vite 8.3.5](https://github.com/vitejs/vite/releases/tag/v8.3.5)
+- [Lucide 1.60.0](https://github.com/lucide-icons/lucide/releases/tag/1.60.0)
+- [Lucide 1.61.0](https://github.com/lucide-icons/lucide/releases/tag/1.61.0)
+- [ssh-key stable metadata](https://crates.io/api/v1/crates/ssh-key/0.6.7)
+
 ## 2026-10-19
 
 前回の未コミット変更（package.json / pnpm-lock.yaml / docs/roadmap.md / この記録 / src/vite-env.d.ts）を保持して、小さな更新を追加した。Rust manifestとCargo.lockは変更していない。

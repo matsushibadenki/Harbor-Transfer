@@ -6,6 +6,24 @@
 
 ## 進捗
 
+- 🟢 [Done] 2026-11-16: Vite 8.3.8、Reactプラグイン 6.3.0、Lucide 1.73.0へ更新。詳細は[依存更新記録](dependency-maintenance.md)。
+
+### 2026-11-09 依存ライブラリ定期更新
+
+- 🟢 [Done] Vite 8.3.5→8.3.6、Reactプラグイン6.1.2→6.2.1、Lucide 1.66.0→1.70.0へstable更新。pnpm check（Rustテストランナー上129 passed、0 failed）・ビルド・52種類のSVG描画・CI用pnpm 10のlockfile確認が成功。
+- ⭕️ [Pending] Docker実接続とネイティブUI検証は未完了。Tauri／AWS／SSH関連の固定と保留を維持。詳細は[依存更新記録](dependency-maintenance.md)。
+
+### 2026-11-02 依存ライブラリ定期更新
+
+- 🟢 [Done] Lucideを1.61.0→1.66.0へstable更新。pnpm check（Rustテストランナー上129 passed、0 failed）・ビルド・52種類のSVG描画が成功。前回の未コミット変更を保持。
+- ⭕️ [Pending] Docker実接続とネイティブUI回帰は未完了。Tauri／通信依存／PPK用RC固定は維持。詳細は[依存更新記録](dependency-maintenance.md)。
+
+### 2026-10-26 依存ライブラリ定期更新
+
+- 🟢 [Done] Vite 8.3.4→8.3.5、Lucide 1.59.0→1.61.0へstable更新。manifestとlockfileを同期し、pnpm 10のfrozen-lockfile互換性を確認。
+- 🟢 [Done] pnpm check（Rustテストランナー上129 passed、0 failed、整形検査を含む）・ビルド・使用中の52種類のアイコンSVG描画が成功。
+- ⭕️ [Pending] Docker実接続とネイティブUIの回帰確認は未完了。Tauri／AWS／SSH等の更新は保留を維持。詳細は[依存更新記録](dependency-maintenance.md)。
+
 ### 2026-10-23 Phase 12 — タブとワークスペース復元（開発版）
 
 - 🟢 [Done] 最大32タブの追加、切り替え、名称変更、終了を実装。タブ名のダブルクリックで編集し、⌘T／Ctrl+Tで追加、⌘W／Ctrl+Wで終了、タブ上の左右矢印で切り替え。横スクロールで多数のタブを扱う。
