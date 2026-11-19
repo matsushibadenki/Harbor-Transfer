@@ -236,6 +236,9 @@ pub struct AppState {
     bookmarks: BookmarkStore,
     places: PlaceStore,
     workspace_links: StdMutex<HashMap<String, WorkspaceLinkRoots>>,
+    searches: crate::file_search::SearchRegistry,
+    previews: crate::file_search::SearchRegistry,
+    preview_cache_directory: PathBuf,
     transfer_controls: Mutex<HashMap<String, Arc<TransferControl>>>,
     transfer_scheduler: Arc<TransferScheduler>,
     bandwidth_limiter: Arc<BandwidthLimiter>,
@@ -261,6 +264,9 @@ impl AppState {
             bookmarks: BookmarkStore::new(&data_directory)?,
             places: PlaceStore::new(&data_directory)?,
             workspace_links: StdMutex::new(HashMap::new()),
+            searches: crate::file_search::SearchRegistry::default(),
+            previews: crate::file_search::SearchRegistry::default(),
+            preview_cache_directory: cache_directory.join("quick-look"),
             transfer_controls: Mutex::new(HashMap::new()),
             transfer_scheduler: TransferScheduler::new(),
             bandwidth_limiter: BandwidthLimiter::new(),
@@ -277,6 +283,8 @@ impl AppState {
     }
 
     pub fn remove_workspace_link(&self, window_label: &str) {
+        self.searches.cancel(window_label, None);
+        self.previews.cancel(window_label, None);
         self.workspace_links.lock().unwrap_or_else(|error| error.into_inner()).remove(window_label);
     }
 
@@ -2060,6 +2068,201 @@ pub async fn remote_list(
 #[tauri::command]
 pub fn workspace_places_list(state: State<'_, Arc<AppState>>) -> Result<Vec<SavedPlace>, String> {
     state.places.list()
+}
+
+#[tauri::command]
+pub fn quick_look_close(preview_id: String, window: tauri::WebviewWindow, state: State<'_, Arc<AppState>>) {
+    state.previews.cancel(window.label(), Some(&preview_id));
+}
+
+#[tauri::command]
+pub async fn quick_look(
+    endpoint: WorkspaceEndpoint,
+    preview_id: String,
+    window: tauri::WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err("Quick Look is available only on macOS.".into());
+    }
+    let job = state.previews.begin(window.label(), &preview_id)?;
+    let cache = crate::preview::PreviewCache::new(&state.preview_cache_directory)?;
+    let path = match endpoint {
+        WorkspaceEndpoint::Local { path } => {
+            if !Path::new(&path).is_absolute() {
+                return Err("Invalid local preview path.".into());
+            }
+            let metadata = tokio::fs::symlink_metadata(&path).await.map_err(|e| e.to_string())?;
+            if !metadata.file_type().is_file() {
+                return Err("Only regular files can be previewed.".into());
+            }
+            crate::preview::check_size(metadata.len())?;
+            let name =
+                Path::new(&path).file_name().and_then(|name| name.to_str()).ok_or("Invalid file name.")?;
+            let target = cache.file(name)?;
+            tokio::fs::copy(&path, &target).await.map_err(|e| e.to_string())?;
+            target
+        }
+        WorkspaceEndpoint::Remote { connection_id, path } => {
+            if !path.starts_with('/') || path.contains('\0') || path.split('/').any(|part| part == "..") {
+                return Err("Invalid remote preview path.".into());
+            }
+            let (parent, component) = path.rsplit_once('/').ok_or("Invalid preview path.")?;
+            if component.is_empty() {
+                return Err("Only regular files can be previewed.".into());
+            }
+            let connection = state.connection(&connection_id).await.ok_or("Connection not found.")?;
+            let mut connection = tokio::time::timeout(Duration::from_secs(5), connection.lock())
+                .await
+                .map_err(|_| "Connection is busy. Retry preview after the current operation.")?;
+            let children = connection
+                .file_system()
+                .list_dir(if parent.is_empty() { "/" } else { parent })
+                .await
+                .map_err(|e| e.to_string())?;
+            let mut matching = children
+                .into_iter()
+                .filter(|entry| entry.path_component.as_deref().unwrap_or(&entry.name) == component);
+            let entry = matching.next().ok_or("The file no longer exists.")?;
+            if matching.next().is_some() {
+                return Err("The file path is ambiguous.".into());
+            }
+            if !matches!(entry.file_type, crate::sftp_client::FileEntryType::File) {
+                return Err("Only regular files can be previewed.".into());
+            }
+            crate::preview::check_size(entry.size)?;
+            let target =
+                cache.file(&safe_export_name(entry.download_name.as_deref().unwrap_or(&entry.name)))?;
+            if job.cancelled.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            connection
+                .file_system()
+                .download_file(&path, target.to_str().ok_or("Invalid cache path.")?)
+                .await
+                .map_err(|e| e.to_string())?;
+            target
+        }
+    };
+    if job.cancelled.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    let metadata = tokio::fs::symlink_metadata(&path).await.map_err(|e| e.to_string())?;
+    if !metadata.file_type().is_file() {
+        return Err("Invalid preview cache item.".into());
+    }
+    crate::preview::check_size(metadata.len())?;
+    let mut child = crate::preview::command(&path)?.spawn().map_err(|e| e.to_string())?;
+    let _ = window.emit_to(window.label(), "preview://opened", &preview_id);
+    tokio::select! {
+        status = child.wait() => { if !status.map_err(|e| e.to_string())?.success() { return Err("Quick Look could not preview this file.".into()); } },
+        _ = async { while !job.cancelled.load(Ordering::Relaxed) { tokio::time::sleep(Duration::from_millis(100)).await; } } => { let _ = child.kill().await; let _ = child.wait().await; },
+    }
+    // The cache guard removes only this preview's private snapshot, including on failures.
+    Ok(())
+}
+
+struct ConnectionSearchSource {
+    connection: Arc<Mutex<RemoteConnection>>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl crate::file_search::SearchSource for ConnectionSearchSource {
+    async fn list(&mut self, path: &str) -> Result<Vec<crate::file_search::SearchChild>, String> {
+        let mut connection = tokio::select! {
+            locked = tokio::time::timeout(std::time::Duration::from_secs(5), self.connection.lock()) => locked.map_err(|_| "Connection is busy. Retry search after the current operation.")?,
+            _ = async { while !self.cancelled.load(std::sync::atomic::Ordering::Relaxed) { tokio::time::sleep(std::time::Duration::from_millis(50)).await; } } => return Err("Search cancelled.".into()),
+        };
+        if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("Search cancelled.".into());
+        }
+        crate::file_search::SearchSource::list(
+            &mut crate::file_search::RemoteSource(connection.file_system()),
+            path,
+        )
+        .await
+    }
+}
+
+#[tauri::command]
+pub async fn remote_search(
+    request: RemotePathRequest,
+    query: String,
+    search_id: String,
+    show_hidden: Option<bool>,
+    window: tauri::WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::file_search::SearchResult, String> {
+    crate::file_search::validate(&request.path, &query)?;
+    let job = state.searches.begin(window.label(), &search_id)?;
+    let connection = state.connection(&request.connection_id).await.ok_or("Connection not found.")?;
+    crate::file_search::search(
+        &mut crate::file_search::VisibleSource {
+            source: &mut ConnectionSearchSource { connection, cancelled: job.cancelled.clone() },
+            show_hidden: show_hidden.unwrap_or(true),
+        },
+        &request.path,
+        &query,
+        &job.cancelled,
+        |result, path| {
+            let _ = window.emit_to(
+                window.label(),
+                "search://progress",
+                crate::file_search::SearchProgress {
+                    search_id: &search_id,
+                    path,
+                    inspected: result.inspected,
+                    directories: result.directories,
+                    matches: result.matches.len(),
+                },
+            );
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+pub fn search_cancel(search_id: String, window: tauri::WebviewWindow, state: State<'_, Arc<AppState>>) {
+    state.searches.cancel(window.label(), Some(&search_id));
+}
+
+#[tauri::command]
+pub async fn local_search(
+    path: String,
+    query: String,
+    search_id: String,
+    show_hidden: Option<bool>,
+    window: tauri::WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::file_search::SearchResult, String> {
+    crate::file_search::validate(&path, &query)?;
+    let job = state.searches.begin(window.label(), &search_id)?;
+    let root = tokio::fs::canonicalize(path).await.map_err(|e| e.to_string())?;
+    let root = root.to_str().ok_or("Local path is not valid UTF-8.")?;
+    crate::file_search::search(
+        &mut crate::file_search::VisibleSource {
+            source: &mut crate::file_search::LocalSource,
+            show_hidden: show_hidden.unwrap_or(true),
+        },
+        root,
+        &query,
+        &job.cancelled,
+        |result, path| {
+            let _ = window.emit_to(
+                window.label(),
+                "search://progress",
+                crate::file_search::SearchProgress {
+                    search_id: &search_id,
+                    path,
+                    inspected: result.inspected,
+                    directories: result.directories,
+                    matches: result.matches.len(),
+                },
+            );
+        },
+    )
+    .await
 }
 
 #[tauri::command]

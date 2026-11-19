@@ -1,6 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App, { SshKeyManagerWindow } from './App';
+import { QuickLookProvider } from './quick-look';
 import './styles.css';
 import './phase2.css';
 import './file-browser.css';
@@ -30,6 +31,6 @@ document.body.classList.toggle('key-manager-body', isKeyManagerWindow);
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    {isKeyManagerWindow ? <SshKeyManagerWindow /> : <App />}
+    {isKeyManagerWindow ? <SshKeyManagerWindow /> : <QuickLookProvider><App /></QuickLookProvider>}
   </StrictMode>,
 );

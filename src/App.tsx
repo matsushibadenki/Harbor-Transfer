@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { quickLookLabels, useQuickLook } from './quick-look';
 import { getVersion } from '@tauri-apps/api/app';
 import { LogicalPosition } from '@tauri-apps/api/dpi';
 import { startDrag } from '@crabnebula/tauri-plugin-drag';
@@ -9,7 +10,7 @@ import { check, type DownloadEvent, type Update } from '@tauri-apps/plugin-updat
 import { emitTo, listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { getCurrentWebviewWindow, WebviewWindow } from '@tauri-apps/api/webviewWindow';
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { PlacesBar, WorkspacePlacesProvider, locationKey, sameLocationSource, workspaceToolsCopy, type NavigationRequest, type WorkspaceLocation } from './workspace-tools';
 import { WorkspaceTabs, tabsCopy, type WorkspaceDocument, type WorkspaceTab, type TabPane } from './workspace-tabs';
 import {
@@ -17,6 +18,7 @@ import {
   ClipboardPaste, Download, FileArchive, FileAudio, FileCode2, FileDown, FileImage, FileJson, FileSpreadsheet, FileText, FileUp, FileVideo, FolderSync, FolderUp, GripVertical, KeyRound, Link2, Unlink2, List, LoaderCircle, LockKeyhole, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pencil, Plus, RefreshCw, Scissors, Search, Settings, Share2, Trash2, Upload,
 } from 'lucide-react';
 
+const RecursiveSearchButton = lazy(() => import('./recursive-search').then(module => ({ default: module.RecursiveSearchButton })));
 type Protocol = 'sftp' | 'cloudFtp' | 'ftp' | 'ftps' | 'webdav' | 's3' | 'smb' | 'googleDrive';
 type FileEntry = { name: string; path_component?: string; download_name?: string; size: number; modified?: string; permissions?: string; owner?: string; group?: string; file_type: 'File' | 'Directory' | 'Symlink' };
 type GoogleDriveLocationKind = 'myDrive' | 'sharedWithMe' | 'sharedDrive';
@@ -549,6 +551,7 @@ function upsertConnectionInOrder(current: Connection[], connection: Connection):
 type PaneNavigationProps = { navigationRequest?: NavigationRequest; onNavigationError?: () => void };
 function LocalFilePane({ language, initialPath, showHiddenFiles, connections, refreshToken, paneId, paneClassName = '', onSelectSource, onStateChange, onWorkspaceDragStart, onWorkspaceDrop, navigationRequest, onNavigationError }: { language: Language; initialPath?: string; showHiddenFiles: boolean; connections: Connection[]; refreshToken: number; paneId: WorkspacePaneId; paneClassName?: string; onSelectSource: (connection: Connection) => void; onStateChange: (state: WorkspacePaneState) => void; onWorkspaceDragStart: (paneId: WorkspacePaneId, state: WorkspacePaneState, event: React.DragEvent) => void; onWorkspaceDrop: (paneId: WorkspacePaneId, moveItem: boolean) => void } & PaneNavigationProps) {
   const text = dualPaneCopy[language];
+  const quickLook = useQuickLook();
   const common = copy[language];
   const views = viewCopy[language];
   const [listing, setListing] = useState<LocalDirectoryListing | null>(null);
@@ -631,6 +634,7 @@ function LocalFilePane({ language, initialPath, showHiddenFiles, connections, re
       <button aria-label={text.refresh} title={text.refresh} disabled={!listing || busy} onClick={() => listing && void loadLocalDirectory(listing.path)}><RefreshCw className={busy ? 'spinning' : ''} size={16}/></button>
       <button aria-label={text.choose} title={text.choose} onClick={() => void chooseLocalDirectory()}><Folder size={16}/></button>
       <div className="search local-search"><Search size={15}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={common.search}/></div>
+      <Suspense fallback={<span className="recursive-search-placeholder" aria-hidden="true"/>}><RecursiveSearchButton language={language} showHiddenFiles={showHiddenFiles} disabled={busy || !listing} location={{ kind: "local", path: listing?.path ?? "/" }} initialQuery={query} formatPath={visibleRemotePath} onNavigate={next => { setQuery(""); void loadLocalDirectory(next); }}/></Suspense>
     </div>
     <div className="local-path-toolbar">
       <button aria-label={text.up} title={text.up} disabled={!listing?.parent} onClick={() => listing?.parent && void loadLocalDirectory(listing.parent)}><ArrowUpToLine size={17}/></button>
@@ -650,7 +654,7 @@ function LocalFilePane({ language, initialPath, showHiddenFiles, connections, re
           if (next.has(entry.path)) next.delete(entry.path); else next.add(entry.path);
           setSelectedPaths(next);
           onStateChange({ kind: 'local', directoryPath: listing?.path ?? currentPathRef.current, entries: (listing?.entries ?? []).map((item) => item.name), items: (listing?.entries ?? []).filter((item) => next.has(item.path)).map((item) => ({ name: item.name, sourcePath: item.path, isDirectory: item.kind === 'Directory' })) });
-        }} onDragStart={(event) => { const paths = selected ? selectedPaths : new Set([entry.path]); const items = (listing?.entries ?? []).filter((item) => paths.has(item.path)).map((item) => ({ name: item.name, sourcePath: item.path, isDirectory: item.kind === 'Directory' })); onWorkspaceDragStart(paneId, { kind: 'local', directoryPath: listing?.path ?? currentPathRef.current, entries: (listing?.entries ?? []).map((item) => item.name), items }, event); }} onDoubleClick={() => { if (entry.kind === 'Directory') void loadLocalDirectory(entry.path); }} onKeyDown={(event) => { if (event.key === 'Enter' && entry.kind === 'Directory') void loadLocalDirectory(entry.path); }}>
+        }} onDragStart={(event) => { const paths = selected ? selectedPaths : new Set([entry.path]); const items = (listing?.entries ?? []).filter((item) => paths.has(item.path)).map((item) => ({ name: item.name, sourcePath: item.path, isDirectory: item.kind === 'Directory' })); onWorkspaceDragStart(paneId, { kind: 'local', directoryPath: listing?.path ?? currentPathRef.current, entries: (listing?.entries ?? []).map((item) => item.name), items }, event); }} onDoubleClick={() => { if (entry.kind === 'Directory') void loadLocalDirectory(entry.path); }} onKeyDown={(event) => { if (event.key === ' ' && entry.kind === 'File' && !event.metaKey && !event.ctrlKey && !event.altKey) { event.preventDefault(); if (!event.repeat) quickLook({ kind: 'local', path: entry.path }, language, entry.name); return; } if (event.key === 'Enter' && entry.kind === 'Directory') void loadLocalDirectory(entry.path); }}>
           <span className="local-file-name" role="cell"><RemoteEntryIcon entry={fileEntry} size={17}/><span>{entry.name}</span></span><span role="cell">{entry.kind === 'Directory' ? '—' : formatBytes(entry.size)}</span><time role="cell" title={entry.modifiedUnix ? new Date(entry.modifiedUnix * 1000).toLocaleString(language) : undefined}>{formatFileDate(entry.modifiedUnix || undefined, language)}</time>
         </button>;
       })}
@@ -667,6 +671,7 @@ function LocalFilePane({ language, initialPath, showHiddenFiles, connections, re
 
 function RemoteFilePane({ language, connection, connections, showHiddenFiles, refreshToken, paneId, onSelectLocal, onSelectConnection, onStateChange, onWorkspaceDragStart, onWorkspaceDrop, navigationRequest, onNavigationError }: { language: Language; connection: Connection; connections: Connection[]; showHiddenFiles: boolean; refreshToken: number; paneId: WorkspacePaneId; onSelectLocal: () => void; onSelectConnection: (connection: Connection) => void; onStateChange: (state: WorkspacePaneState) => void; onWorkspaceDragStart: (paneId: WorkspacePaneId, state: WorkspacePaneState, event: React.DragEvent) => void; onWorkspaceDrop: (paneId: WorkspacePaneId, moveItem: boolean) => void } & PaneNavigationProps) {
   const text = dualPaneCopy[language];
+  const quickLook = useQuickLook();
   const common = copy[language];
   const views = viewCopy[language];
   const [path, setPath] = useState(connection.initialPath || '/');
@@ -744,6 +749,7 @@ function RemoteFilePane({ language, connection, connections, showHiddenFiles, re
       }}><option value="local">{text.local}</option>{connections.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
       <button aria-label={text.refresh} title={text.refresh} disabled={busy} onClick={() => void loadRemoteDirectory(path)}><RefreshCw className={busy ? 'spinning' : ''} size={16}/></button>
       <div className="search local-search"><Search size={15}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={common.search}/></div>
+      <Suspense fallback={<span className="recursive-search-placeholder" aria-hidden="true"/>}><RecursiveSearchButton language={language} showHiddenFiles={showHiddenFiles} disabled={busy} location={{ kind: "remote", path, connectionId: connection.id }} initialQuery={query} formatPath={visibleRemotePath} onNavigate={next => { setQuery(""); void loadRemoteDirectory(next); }}/></Suspense>
     </div>
     <div className="local-path-toolbar">
       <button aria-label={text.up} title={text.up} disabled={path === '/'} onClick={() => void loadRemoteDirectory(parentPath(path))}><ArrowUpToLine size={17}/></button>
@@ -763,7 +769,7 @@ function RemoteFilePane({ language, connection, connections, showHiddenFiles, re
           if (next.has(remotePath)) next.delete(remotePath); else next.add(remotePath);
           setSelectedPaths(next);
           onStateChange({ kind: 'remote', connectionId, directoryPath: path, entries: entries.map((item) => item.name), items: entries.map((item) => ({ item, itemPath: entryRemotePath(path, item) })).filter(({ itemPath }) => next.has(itemPath)).map(({ item, itemPath }) => ({ name: item.name, sourcePath: itemPath, isDirectory: item.file_type === 'Directory' })) });
-        }} onDragStart={(event) => { const paths = selected ? selectedPaths : new Set([remotePath]); const items = entries.map((item) => ({ item, itemPath: entryRemotePath(path, item) })).filter(({ itemPath }) => paths.has(itemPath)).map(({ item, itemPath }) => ({ name: localDownloadName(item), sourcePath: itemPath, isDirectory: item.file_type === 'Directory' })); onWorkspaceDragStart(paneId, { kind: 'remote', connectionId, directoryPath: path, entries: entries.map((item) => item.name), items }, event); }} onDoubleClick={() => { if (entry.file_type === 'Directory') void loadRemoteDirectory(remotePath); }} onKeyDown={(event) => { if (event.key === 'Enter' && entry.file_type === 'Directory') void loadRemoteDirectory(remotePath); }}>
+        }} onDragStart={(event) => { const paths = selected ? selectedPaths : new Set([remotePath]); const items = entries.map((item) => ({ item, itemPath: entryRemotePath(path, item) })).filter(({ itemPath }) => paths.has(itemPath)).map(({ item, itemPath }) => ({ name: localDownloadName(item), sourcePath: itemPath, isDirectory: item.file_type === 'Directory' })); onWorkspaceDragStart(paneId, { kind: 'remote', connectionId, directoryPath: path, entries: entries.map((item) => item.name), items }, event); }} onDoubleClick={() => { if (entry.file_type === 'Directory') void loadRemoteDirectory(remotePath); }} onKeyDown={(event) => { if (event.key === ' ' && entry.file_type === 'File' && !event.metaKey && !event.ctrlKey && !event.altKey) { event.preventDefault(); if (!event.repeat) quickLook({ kind: 'remote', connectionId: connection.id, path: remotePath }, language, entry.name); return; } if (event.key === 'Enter' && entry.file_type === 'Directory') void loadRemoteDirectory(remotePath); }}>
           <span className="local-file-name" role="cell"><RemoteEntryIcon entry={entry} size={17}/><span>{entry.name}</span></span><span role="cell">{entry.file_type === 'Directory' ? '—' : formatBytes(entry.size)}</span><time role="cell" title={entry.modified}>{formatFileDate(entry.modified, language)}</time>
         </button>;
       })}
@@ -932,6 +938,7 @@ function WorkspaceCompareSheet({ language, left, right, showHiddenFiles, busy, o
 }
 
 export default function App() {
+  const quickLook = useQuickLook();
   const [preferences, setPreferences] = useState<Preferences>(loadPreferences);
   const language = preferences.language;
   const t = copy[language];
@@ -2345,6 +2352,12 @@ export default function App() {
     selectRemoteEntry(event, entry, basePath, orderedEntries);
   }
 
+  function previewRemoteEntry(entry: FileEntry, basePath = path) {
+    if (!active || entry.file_type !== 'File') return;
+    cancelScheduledDragPreparation();
+    quickLook({ kind: 'remote', connectionId: active.id, path: entryRemotePath(basePath, entry) }, language, entry.name);
+  }
+
   function navigateFileSelection(event: React.KeyboardEvent<HTMLDivElement>) {
     if (viewMode === 'columns' || !active || filteredEntries.length === 0) return;
     const target = event.target as HTMLElement;
@@ -2997,6 +3010,7 @@ export default function App() {
             {dualPane && <label className="pane-source"><Cloud size={15}/><select aria-label={dualPaneText.source} value={active.id} onChange={(event) => { if (event.target.value === 'local') { setPrimaryLocalPaneState(null); setPrimaryLocal(true); return; } const connection = connections.find((item) => item.id === event.target.value); if (connection && connection.id !== active.id) openConnectionSheet(connection); }}><option value="local">{dualPaneText.local}</option>{connections.map((connection) => <option value={connection.id} key={connection.id}>{connection.name}</option>)}</select></label>}
             <button aria-label={t.refresh} onClick={() => void loadDirectory()}><RefreshCw size={17} className={busy ? 'spinning' : ''}/></button>
             <div className="search"><Search size={16}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t.search}/></div>
+            <Suspense fallback={<span className="recursive-search-placeholder" aria-hidden="true"/>}><RecursiveSearchButton language={language} showHiddenFiles={preferences.showHiddenFiles} disabled={busy} location={{ kind: "remote", path, connectionId: active.id }} initialQuery={query} formatPath={visibleRemotePath} onNavigate={next => { setQuery(""); void navigateDirectory(active, next); }}/></Suspense>
             <div className="view-switcher" role="group" aria-label={t.name}>
               <button className={viewMode === 'list' ? 'active' : ''} aria-label={viewsText.list} title={viewsText.list} aria-pressed={viewMode === 'list'} onClick={() => selectViewMode('list')}><List size={16}/></button>
               <button className={viewMode === 'icons' ? 'active' : ''} aria-label={viewsText.icons} title={viewsText.icons} aria-pressed={viewMode === 'icons'} onClick={() => selectViewMode('icons')}><Grid2X2 size={16}/></button>
@@ -3029,7 +3043,7 @@ export default function App() {
             <div className="file-header" role="row" onContextMenu={openColumnVisibilityMenu}>
               {visibleColumns.map((column) => <ResizableColumnHeader key={column} label={columnLabel(column)} column={column} width={columnWidths[column]} resizeLabel={columnsText.resize} sorted={sortColumn === column} direction={sortDirection} onSort={sortByColumn} onStart={startColumnResize} onAdjust={adjustColumnWidth}/>)}<span className="file-grid-spacer" aria-hidden="true"/><span className="actions-column-heading" role="columnheader" />
             </div>
-            {filteredEntries.map((entry) => { const remotePath = entryRemotePath(path, entry); const selected = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const renaming = isInlineRenaming(entry, path); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`file-row interactive ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entryIdentity(entry)} role="row" aria-selected={selected} tabIndex={0} draggable={entry.file_type !== 'Symlink' && !renaming} onContextMenu={(event) => openEntryContext(event, entry)} onClick={(event) => scheduleRemoteDragPreparation(event, entry)} onKeyDown={(event) => { if (event.key === 'F2') { beginInlineRename(event, entry, path); return; } if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(event, entry); } if (event.key === 'Enter') { event.preventDefault(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); } }} onDragStart={(event) => { if (dualPane) beginPrimaryWorkspaceDrag(event, entry, path); else startRemoteDrag(event, entry); }} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); }}>
+            {filteredEntries.map((entry) => { const remotePath = entryRemotePath(path, entry); const selected = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const renaming = isInlineRenaming(entry, path); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`file-row interactive ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entryIdentity(entry)} role="row" aria-selected={selected} tabIndex={0} draggable={entry.file_type !== 'Symlink' && !renaming} onContextMenu={(event) => openEntryContext(event, entry)} onClick={(event) => scheduleRemoteDragPreparation(event, entry)} onKeyDown={(event) => { if ((event.target as HTMLElement).closest('input, textarea, select, .file-row button')) return; if (event.key === 'F2') { beginInlineRename(event, entry, path); return; } if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(event, entry); if (!event.repeat && !event.metaKey && !event.ctrlKey && !event.altKey) previewRemoteEntry(entry); return; } if (event.key === 'Enter') { event.preventDefault(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); } }} onDragStart={(event) => { if (dualPane) beginPrimaryWorkspaceDrag(event, entry, path); else startRemoteDrag(event, entry); }} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); }}>
               {visibleColumns.map((column) => <span className={`list-cell ${column}-column`} role="cell" key={column}>{renderListCell(entry, column, path, selected)}</span>)}<span className="file-grid-spacer" aria-hidden="true"/><button aria-label={menuText.information} title={menuText.information} onClick={(event) => openFileInformation(event, entry)}><MoreHorizontal size={18}/></button>
             </div>; })}
           </div>}
@@ -3040,7 +3054,7 @@ export default function App() {
               {renaming ? <div className="icon-entry-main inline-renaming">
                 <FileArtwork entry={entry}/>
                 {inlineRenameInput('icons')}<small>{entry.file_type === 'Directory' ? entry.permissions ?? '—' : formatBytes(entry.size)}</small>
-              </div> : <button className="icon-entry-main" title={entry.name} onClick={(event) => scheduleRemoteDragPreparation(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); }} onKeyDown={(event) => { if (event.key === 'F2') { beginInlineRename(event, entry, path); return; } if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(event, entry); } if (event.key !== 'Enter') return; event.preventDefault(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); }}>
+              </div> : <button className="icon-entry-main" title={entry.name} onClick={(event) => scheduleRemoteDragPreparation(event, entry)} onDoubleClick={() => { cancelScheduledDragPreparation(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); }} onKeyDown={(event) => { if ((event.target as HTMLElement).closest('input, textarea, select, .file-row button')) return; if (event.key === 'F2') { beginInlineRename(event, entry, path); return; } if (event.key === ' ') { event.preventDefault(); scheduleRemoteDragPreparation(event, entry); if (!event.repeat && !event.metaKey && !event.ctrlKey && !event.altKey) previewRemoteEntry(entry); return; } if (event.key !== 'Enter') return; event.preventDefault(); entry.file_type === 'Directory' ? void navigateDirectory(active, remotePath) : void editRemoteFile(entry); }}>
                 <FileArtwork entry={entry}/>
                 <strong><span title={selected ? menuText.rename : entry.name} onClick={(event) => { if (selected) scheduleInlineRename(event, entry, path); }}>{entry.name}</span></strong><small>{entry.file_type === 'Directory' ? entry.permissions ?? '—' : formatBytes(entry.size)}</small>
               </button>}
@@ -3055,7 +3069,7 @@ export default function App() {
                 <div className="directory-column-items" role="listbox" aria-label={visibleRemotePath(level.path)} aria-multiselectable="true" aria-busy={Boolean(level.loading)}>
                 {!level.loading && visibleLevelEntries.length === 0 && <p className="view-empty">{viewsText.empty}</p>}
                 {visibleLevelEntries.map((entry) => { const remotePath = entryRemotePath(level.path, entry); const selectedForAction = selectedRemoteItems.some((item) => item.connectionId === active.id && item.remotePath === remotePath); const selected = level.selectedName === entryIdentity(entry) || selectedForAction; const renaming = isInlineRenaming(entry, level.path); const ready = dragExport?.connectionId === active.id && dragExport.remotePath === remotePath; return <div className={`column-entry ${selected ? 'selected' : ''} ${ready ? 'drag-ready' : ''}`} key={entryIdentity(entry)} role="option" aria-selected={selected} draggable={entry.file_type !== 'Symlink' && !renaming} onContextMenu={(event) => openEntryContext(event, entry, level.path)} onDragStart={(event) => { if (dualPane) beginPrimaryWorkspaceDrag(event, entry, level.path); else startRemoteDrag(event, entry, level.path); }}>
-                  {renaming ? <div className="column-entry-main inline-renaming"><RemoteEntryIcon entry={entry} size={entry.file_type === 'Directory' ? 17 : 16}/>{inlineRenameInput('columns')}</div> : <button className="column-entry-main" title={entry.name} onClick={(event) => { if (event.detail <= 1) { cancelScheduledDragPreparation(); selectRemoteEntry(event, entry, level.path, visibleLevelEntries); if (!event.metaKey && !event.ctrlKey && !event.shiftKey) void openColumnEntry(levelIndex, entry); } }} onDoubleClick={() => { cancelScheduledDragPreparation(); if (entry.file_type !== 'Directory') void editRemoteFile(entry, level.path); }} onKeyDown={(event) => { if (event.key === 'F2') { beginInlineRename(event, entry, level.path); return; } if (event.key !== 'Enter') return; event.preventDefault(); entry.file_type === 'Directory' ? void openColumnEntry(levelIndex, entry) : void editRemoteFile(entry, level.path); }}>
+                  {renaming ? <div className="column-entry-main inline-renaming"><RemoteEntryIcon entry={entry} size={entry.file_type === 'Directory' ? 17 : 16}/>{inlineRenameInput('columns')}</div> : <button className="column-entry-main" title={entry.name} onClick={(event) => { if (event.detail <= 1) { cancelScheduledDragPreparation(); selectRemoteEntry(event, entry, level.path, visibleLevelEntries); if (!event.metaKey && !event.ctrlKey && !event.shiftKey) void openColumnEntry(levelIndex, entry); } }} onDoubleClick={() => { cancelScheduledDragPreparation(); if (entry.file_type !== 'Directory') void editRemoteFile(entry, level.path); }} onKeyDown={(event) => { if (event.key === ' ' && entry.file_type === 'File' && !event.metaKey && !event.ctrlKey && !event.altKey) { event.preventDefault(); cancelScheduledInlineRename(); if (!event.repeat) { selectRemoteEntry(event, entry, level.path, visibleLevelEntries); previewRemoteEntry(entry, level.path); } return; } if (event.key === 'F2') { beginInlineRename(event, entry, level.path); return; } if (event.key !== 'Enter') return; event.preventDefault(); entry.file_type === 'Directory' ? void openColumnEntry(levelIndex, entry) : void editRemoteFile(entry, level.path); }}>
                     <RemoteEntryIcon entry={entry} size={entry.file_type === 'Directory' ? 17 : 16}/><span title={selectedForAction ? menuText.rename : entry.name} onClick={(event) => { if (selectedForAction) scheduleInlineRename(event, entry, level.path); }}>{entry.name}</span>{entry.file_type === 'Directory' && <ChevronRight size={14}/>}
                   </button>}
                   <button className="column-entry-more" aria-label={menuText.information} title={menuText.information} onClick={(event) => openFileInformation(event, entry, level.path)}><MoreHorizontal size={15}/></button>
@@ -3127,6 +3141,7 @@ export default function App() {
     </div>}
     {entryContextMenu && active && <div className="entry-context-menu" role="menu" style={{ left: entryContextMenu.x, top: entryContextMenu.y }} onContextMenu={(event) => event.preventDefault()}>
       <div className="context-menu-heading" title={entryContextMenu.entry.name}>{entryContextMenu.entry.name}</div>
+      <button role="menuitem" disabled={entryContextMenu.entry.file_type !== 'File'} onClick={() => { previewRemoteEntry(entryContextMenu.entry, entryContextMenu.basePath); setEntryContextMenu(null); }}><Search size={15}/>{quickLookLabels[language]}</button>
       <button role="menuitem" disabled={entryContextMenu.entry.file_type === 'Symlink'} onClick={() => placeOnRemoteClipboard(entryContextMenu.entry, entryContextMenu.basePath, 'cut')}><Scissors size={15}/>{menuText.cut}</button>
       <button role="menuitem" disabled={entryContextMenu.entry.file_type === 'Symlink'} onClick={() => placeOnRemoteClipboard(entryContextMenu.entry, entryContextMenu.basePath, 'copy')}><Copy size={15}/>{menuText.copy}</button>
       <button role="menuitem" disabled={!remoteClipboard || remoteClipboard.connectionId !== active.id} onClick={() => void pasteRemote(entryContextMenu.basePath)}><ClipboardPaste size={15}/>{menuText.paste}</button>

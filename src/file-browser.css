@@ -411,3 +411,28 @@ html[data-resolved-theme] .column-preview dd { font-size: 11px; line-height: 1.4
 .tab-disconnected { display: flex; align-items: center; justify-content: center; gap: 12px; flex-direction: column; }
 .tab-disconnected code { max-width: 90%; overflow-wrap: anywhere; }
 .workspace-restore-error { display: flex; align-items: center; gap: 12px; padding: 2px 12px; font-size: 12px; }
+.recursive-search-trigger { position: relative; flex-shrink: 0; }
+.recursive-search-placeholder { display: inline-block; width: 32px; height: 32px; flex-shrink: 0; }
+.recursive-search-trigger > span { position: absolute; right: 2px; bottom: 0; font-size: 10px; font-weight: 700; }
+.recursive-search-sheet { width: min(720px, calc(100vw - 32px)); max-height: calc(100dvh - 48px); display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
+.recursive-search-sheet .sheet-title { display: flex; align-items: center; gap: 10px; flex-shrink: 0; margin: 0; }
+.recursive-search-sheet .sheet-title h2 { margin: 0 auto 0 0; }
+.recursive-search-root, .recursive-search-current { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--finder-secondary); font-size: 12px; flex-shrink: 0; }
+.recursive-search-form { display: flex; gap: 8px; flex-shrink: 0; }
+.recursive-search-form input { flex: 1; min-width: 0; }
+.recursive-search-form button { flex-shrink: 0; }
+.recursive-search-status { min-height: 28px; display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.recursive-search-status button { margin-left: auto; }
+.recursive-search-results { min-height: 120px; overflow: auto; overscroll-behavior: contain; }
+.recursive-search-results > button { display: flex; align-items: center; justify-content: flex-start; gap: 12px; width: 100%; text-align: left; background: transparent; border: 0; border-radius: 4px; box-shadow: none; color: var(--finder-ink); padding: 9px; font-weight: 400; }
+.recursive-search-results > button:hover, .recursive-search-results > button:focus-visible { background: var(--finder-hover); }
+.recursive-search-results > button > svg { flex-shrink: 0; color: var(--ht-accent); }
+.recursive-search-results > button > span { min-width: 0; }
+.recursive-search-name { display: block; overflow-wrap: anywhere; }
+.recursive-search-results small { display: block; color: var(--finder-secondary); overflow-wrap: anywhere; font-weight: 400; }
+.quick-look-status { position: fixed; z-index: 150; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom)); display: flex; align-items: flex-start; gap: 10px; width: min(360px, calc(100vw - 32px)); padding: 12px; border: 1px solid var(--finder-rule); border-radius: 10px; background: var(--finder-canvas); color: var(--finder-ink); box-shadow: 0 6px 24px #0002; }
+.quick-look-status > svg { flex-shrink: 0; margin-top: 3px; }
+.quick-look-status > div { flex: 1; min-width: 0; }
+.quick-look-status small { display: block; color: var(--finder-secondary); overflow-wrap: anywhere; }
+.quick-look-help { display: inline-flex; margin-left: 6px; vertical-align: middle; color: var(--finder-secondary); }
+.quick-look-status .quick-look-error { color: var(--ht-danger, #bb4433); max-height: 100px; overflow: auto; }

@@ -1,8 +1,10 @@
 mod bookmarks;
 mod commands;
 mod diagnostics;
+mod file_search;
 mod ftp_client;
 mod google_drive;
+mod preview;
 mod remote_fs;
 mod s3_client;
 mod samba_client;
@@ -76,6 +78,11 @@ pub fn run() {
             commands::credential_delete,
             commands::ssh_keys_list,
             commands::remote_list,
+            commands::remote_search,
+            commands::quick_look,
+            commands::quick_look_close,
+            commands::local_search,
+            commands::search_cancel,
             commands::sync_preview,
             commands::sync_execute,
             commands::remote_create_directory,
